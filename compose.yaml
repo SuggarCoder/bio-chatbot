@@ -1,0 +1,35 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: ai-chatbot:latest
+    container_name: ai-chatbot
+
+    restart: unless-stopped
+
+    init: true
+
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8090"
+      APP_COMMIT: "${APP_COMMIT:-local}"
+
+    ports:
+      - "10.88.20.19:8090:8090"
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:8090/ai-chatbot/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+    security_opt:
+      - no-new-privileges:true

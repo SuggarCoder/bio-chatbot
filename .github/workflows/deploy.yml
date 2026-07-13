@@ -1,0 +1,106 @@
+name: Deploy AI Chatbot
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-chatbot-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: TEST
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify Docker environment
+        run: |
+          set -Eeuo pipefail
+
+          docker version
+          docker compose version
+
+      - name: Build and deploy
+        env:
+          APP_COMMIT: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+
+          docker compose \
+            -p ai-chatbot \
+            up \
+            -d \
+            --build \
+            --remove-orphans
+
+      - name: Wait for application
+        run: |
+          set -Eeuo pipefail
+
+          for attempt in $(seq 1 30); do
+            echo "Health check ${attempt}/30"
+
+            if docker compose \
+              -p ai-chatbot \
+              exec -T app \
+              node -e "
+                fetch(
+                  'http://127.0.0.1:8090/ai-chatbot/api/health'
+                )
+                .then(response => {
+                  if (!response.ok) {
+                    process.exit(1)
+                  }
+
+                  return response.text()
+                })
+                .then(body => {
+                  console.log(body)
+                  process.exit(0)
+                })
+                .catch(error => {
+                  console.error(error)
+                  process.exit(1)
+                })
+              "
+            then
+              echo "Deployment succeeded"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Application did not become healthy"
+          exit 1
+
+      - name: Show deployment status
+        if: always()
+        run: |
+          docker compose \
+            -p ai-chatbot \
+            ps
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          docker compose \
+            -p ai-chatbot \
+            logs \
+            --tail=200 \
+            app

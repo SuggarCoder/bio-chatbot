@@ -1,0 +1,42 @@
+{
+  "name": "bio-chatbot",
+  "version": "1.0.0",
+  "description": "A chatbot for biotech, powered by solidjs and fastify",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently -k -n WEB,API \"npm:dev:web\" \"npm:dev:api\"",
+    "dev:web": "vite --host 0.0.0.0",
+    "dev:api": "cross-env SERVE_CLIENT=false tsx watch src/server/index.ts",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+    "build": "npm run check && vite build && tsc -p tsconfig.server.json",
+    "start": "node dist/server/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SuggarCoder/bio-chatbot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/SuggarCoder/bio-chatbot/issues"
+  },
+  "homepage": "https://github.com/SuggarCoder/bio-chatbot#readme",
+  "dependencies": {
+    "@fastify/static": "^10.1.0",
+    "fastify": "^5.10.0",
+    "solid-js": "^1.9.14"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@unocss/reset": "^66.7.5",
+    "concurrently": "^10.0.3",
+    "cross-env": "^10.1.0",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2",
+    "unocss": "^66.7.5",
+    "vite": "^8.1.4",
+    "vite-plugin-solid": "^2.11.12"
+  }
+}
