@@ -20,24 +20,87 @@ jobs:
       - linux
       - x64
 
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout repository
+      - name: Configure Git
+        shell: bash
+        run: |
+          git config --global http.version HTTP/1.1
+          git config --global http.maxRequests 1
+
+      - name: Checkout repository - attempt 1
+        id: checkout_1
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
+          fetch-depth: 1
+          clean: true
           persist-credentials: false
 
-      - name: Verify Docker environment
+      - name: Clean failed checkout 1
+        if: steps.checkout_1.outcome == 'failure'
+        shell: bash
+        run: |
+          find "$GITHUB_WORKSPACE" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} +
+
+          sleep 15
+
+      - name: Checkout repository - attempt 2
+        id: checkout_2
+        if: steps.checkout_1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Clean failed checkout 2
+        if: >
+          steps.checkout_1.outcome == 'failure' &&
+          steps.checkout_2.outcome == 'failure'
+        shell: bash
+        run: |
+          find "$GITHUB_WORKSPACE" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} +
+
+          sleep 30
+
+      - name: Checkout repository - attempt 3
+        id: checkout_3
+        if: >
+          steps.checkout_1.outcome == 'failure' &&
+          steps.checkout_2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Verify checkout
+        shell: bash
         run: |
           set -Eeuo pipefail
 
-          docker version
-          docker compose version
+          if [ ! -f package.json ]; then
+            echo "All checkout attempts failed"
+            exit 1
+          fi
+
+          echo "Successfully checked out commit:"
+          git rev-parse HEAD || true
 
       - name: Build and deploy
         env:
           APP_COMMIT: ${{ github.sha }}
+        shell: bash
         run: |
           set -Eeuo pipefail
 
@@ -48,37 +111,21 @@ jobs:
             --build \
             --remove-orphans
 
-      - name: Wait for application
+      - name: Verify application
+        shell: bash
         run: |
           set -Eeuo pipefail
 
           for attempt in $(seq 1 30); do
             echo "Health check ${attempt}/30"
 
-            if docker compose \
-              -p ai-chatbot \
-              exec -T app \
-              node -e "
-                fetch(
-                  'http://127.0.0.1:8090/ai-chatbot/api/health'
-                )
-                .then(response => {
-                  if (!response.ok) {
-                    process.exit(1)
-                  }
-
-                  return response.text()
-                })
-                .then(body => {
-                  console.log(body)
-                  process.exit(0)
-                })
-                .catch(error => {
-                  console.error(error)
-                  process.exit(1)
-                })
-              "
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              http://10.88.20.19:8090/ai-chatbot/api/health
             then
+              echo
               echo "Deployment succeeded"
               exit 0
             fi
@@ -86,21 +133,7 @@ jobs:
             sleep 2
           done
 
-          echo "Application did not become healthy"
+          docker compose -p ai-chatbot ps
+          docker compose -p ai-chatbot logs --tail=200
+
           exit 1
-
-      - name: Show deployment status
-        if: always()
-        run: |
-          docker compose \
-            -p ai-chatbot \
-            ps
-
-      - name: Show logs on failure
-        if: failure()
-        run: |
-          docker compose \
-            -p ai-chatbot \
-            logs \
-            --tail=200 \
-            app
