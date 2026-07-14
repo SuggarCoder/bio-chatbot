@@ -1,0 +1,188 @@
+@font-face {
+    font-family: 'Futura GPAS';
+    src: url('./assets/fonts/Futura Bold.ttf') format('truetype');
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+  }
+  
+  @font-face {
+    font-family: 'Futura Cyrillic Heavy';
+    src: url('./assets/fonts/FuturaCyrillicHeavy.ttf') format('truetype');
+    font-style: normal;
+    font-weight: 800;
+    font-display: swap;
+  }
+  
+  :root {
+    color: #10212a;
+    background: #f3f5f6;
+    font-family: "Sora", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-font-smoothing: antialiased;
+  }
+  
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    min-height: 100%;
+  }
+  
+  body {
+    margin: 0;
+    overflow: hidden;
+  }
+  
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+  
+  button,
+  input {
+    font: inherit;
+  }
+  
+  ::selection {
+    background: rgba(12, 130, 140, 0.18);
+  }
+  
+  .font-brand-futura,
+  .font-futura-heavy {
+    font-family: 'Futura Cyrillic Heavy', 'Futura GPAS', "Sora", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-weight: 800;
+  }
+  
+  .gpas-scrollbar {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(103, 122, 128, 0.72) transparent;
+  }
+  
+  .gpas-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  .gpas-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  .gpas-scrollbar::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: rgba(103, 122, 128, 0.58);
+  }
+  
+  .scrollbar-fade {
+    scrollbar-color: rgba(103, 122, 128, 0) transparent;
+    transition: scrollbar-color 220ms ease;
+  }
+  
+  .scrollbar-fade::-webkit-scrollbar-thumb {
+    background: rgba(103, 122, 128, 0);
+    transition: background-color 220ms ease;
+  }
+  
+  .scrollbar-fade.scrollbar-visible {
+    scrollbar-color: rgba(103, 122, 128, 0.58) transparent;
+  }
+  
+  .scrollbar-fade.scrollbar-visible::-webkit-scrollbar-thumb {
+    background: rgba(103, 122, 128, 0.58);
+  }
+
+  @keyframes voice-wave-flow {
+    0%,
+    100% {
+      transform: scaleY(0.42);
+      opacity: 0.28;
+    }
+  
+    50% {
+      transform: scaleY(1);
+      opacity: 0.95;
+    }
+  }
+  
+  .voice-action-button {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .voice-icon-glyph {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 1;
+    transform: scale(1);
+    transition: opacity 180ms ease, transform 180ms ease;
+  }
+  
+  .voice-wave-group {
+    position: absolute;
+    top: 50%;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    transform: translateY(-50%);
+    opacity: 0;
+    transition: opacity 180ms ease, transform 180ms ease;
+    pointer-events: none;
+  }
+  
+  .voice-wave-center {
+    left: 50%;
+    transform: translate(-50%, -50%) scale(.92);
+  }
+  
+  .voice-wave-bar {
+    width: 2px;
+    height: 14px;
+    border-radius: 999px;
+    background: currentColor;
+    transform-origin: center;
+    animation: voice-wave-flow 1s ease-in-out infinite;
+    animation-play-state: paused;
+  }
+  
+  .voice-wave-delay-0 {
+    animation-delay: 0s;
+  }
+  
+  .voice-wave-delay-1 {
+    animation-delay: 0.12s;
+  }
+  
+  .voice-wave-delay-2 {
+    animation-delay: 0.24s;
+  }
+  
+  .voice-action-button:hover .voice-icon-glyph,
+  .voice-action-button[data-voice-active='true'] .voice-icon-glyph {
+    opacity: 0;
+    transform: scale(.85);
+  }
+  
+  .voice-action-button:hover .voice-wave-group,
+  .voice-action-button[data-voice-active='true'] .voice-wave-group {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  
+  .voice-action-button:hover .voice-wave-bar,
+  .voice-action-button[data-voice-active='true'] .voice-wave-bar {
+    animation-play-state: running;
+  }
+  
+  .message-content {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  
