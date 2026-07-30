@@ -15,7 +15,10 @@ import {
 import collapseUrl from '../../assets/images/collapse.svg'
 import gpasUrl from '../../assets/images/gpas.svg'
 import { appRoutes, getAppPathname } from '../../routes'
-import { streamAssistantReply } from '../../features/chatbot/chatStream'
+import {
+  runChatStream,
+  StreamCompletedError,
+} from '../../features/chatbot/chatStream'
 import { ChatStoreProvider, useChatStore, type ChatMessage } from '../../features/chatbot/chatStore'
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
@@ -29,7 +32,6 @@ type LayoutContextValue = {
 
 const LayoutContext = createContext<LayoutContextValue>()
 const activeReplyControllers = new Map<string, AbortController>()
-const accountEmail = 'alexa@gpas.ai'
 const noop = () => undefined
 
 function cancelAssistantReply(conversationId: string) {
@@ -42,6 +44,59 @@ function cancelAllAssistantReplies() {
   }
 
   activeReplyControllers.clear()
+}
+
+function waitForDelay(duration: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('The operation was aborted', 'AbortError'))
+      return
+    }
+
+    const handleAbort = () => {
+      window.clearTimeout(timeoutId)
+      reject(new DOMException('The operation was aborted', 'AbortError'))
+    }
+    const timeoutId = window.setTimeout(() => {
+      signal.removeEventListener('abort', handleAbort)
+      resolve()
+    }, duration)
+
+    signal.addEventListener(
+      'abort',
+      handleAbort,
+      { once: true },
+    )
+  })
+}
+
+async function waitForPersistedReply(
+  conversationId: string,
+  chatStore: ReturnType<typeof useChatStore>,
+  signal: AbortSignal,
+) {
+  for (let attempt = 0; attempt < 150; attempt += 1) {
+    signal.throwIfAborted()
+    const conversation = await chatStore.loadConversation(
+      conversationId,
+    )
+    const latestMessage = conversation?.messages.at(-1)
+
+    if (
+      latestMessage?.role === 'assistant' &&
+      latestMessage.status === 'done'
+    ) {
+      return true
+    }
+
+    if (conversation && !conversation.activeStreamId) {
+      return false
+    }
+
+    await waitForDelay(2_000, signal)
+  }
+
+  return false
 }
 
 function MessageIcon() {
@@ -174,6 +229,12 @@ function buildAccountMenuItems(): PopupMenuEntry[] {
 }
 
 function AccountMenu(props: { buttonClass: string }) {
+  const chatStore = useChatStore()
+  const accountLabel = () =>
+    chatStore.currentUser()?.email ||
+    chatStore.currentUser()?.userName ||
+    'GPAS2 用户'
+
   return (
     <PopupMenu
       buttonLabel="打开账户菜单"
@@ -181,7 +242,7 @@ function AccountMenu(props: { buttonClass: string }) {
       header={
         <div class="min-w-0">
           <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Account</p>
-          <p class="mt-1 truncate text-sm font-semibold text-slate-800">{accountEmail}</p>
+          <p class="mt-1 truncate text-sm font-semibold text-slate-800">{accountLabel()}</p>
         </div>
       }
       menuWidth={256}
@@ -196,6 +257,8 @@ function AccountMenu(props: { buttonClass: string }) {
 async function runAssistantReply(
   conversationId: string,
   prompt: string,
+  clientMessageId: string,
+  existingStreamId: string | undefined,
   chatStore: ReturnType<typeof useChatStore>,
 ) {
   if (activeReplyControllers.has(conversationId)) {
@@ -204,16 +267,65 @@ async function runAssistantReply(
 
   const controller = new AbortController()
   activeReplyControllers.set(conversationId, controller)
-  chatStore.startAssistantMessage(conversationId)
+
+  if (existingStreamId) {
+    chatStore.startAssistantMessage(conversationId)
+  }
 
   try {
-    for await (const chunk of streamAssistantReply(prompt, controller.signal)) {
-      chatStore.appendAssistantChunk(conversationId, chunk)
-    }
-
-    chatStore.finishAssistantMessage(conversationId)
+    await runChatStream({
+      chatId: conversationId,
+      content: prompt,
+      clientMessageId,
+      existingStreamId,
+      signal: controller.signal,
+      onStreamId: (streamId) => {
+        chatStore.setActiveStream(conversationId, streamId)
+      },
+      onEvent: (event) => {
+        if (event.type === 'start') {
+          chatStore.startAssistantMessage(conversationId)
+          chatStore.confirmUserMessage(
+            conversationId,
+            event.userMessage,
+          )
+        } else if (event.type === 'text-delta') {
+          chatStore.startAssistantMessage(conversationId)
+          chatStore.appendAssistantChunk(
+            conversationId,
+            event.delta,
+          )
+        } else if (event.type === 'done') {
+          chatStore.finishAssistantMessage(
+            conversationId,
+            event.assistantMessage,
+          )
+        } else if (event.type === 'error') {
+          chatStore.failAssistantMessage(
+            conversationId,
+            event.message,
+          )
+        }
+      },
+    })
   } catch (error) {
     if (controller.signal.aborted) {
+      return
+    }
+
+    if (error instanceof StreamCompletedError) {
+      await chatStore.loadConversation(conversationId)
+      return
+    }
+
+    if (
+      chatStore.getConversation(conversationId)?.activeStreamId &&
+      await waitForPersistedReply(
+        conversationId,
+        chatStore,
+        controller.signal,
+      )
+    ) {
       return
     }
 
@@ -318,6 +430,13 @@ function ExpandedSidebarPanel(props: {
   const [renameConversationId, setRenameConversationId] = createSignal<string | null>(null)
   const [renameValue, setRenameValue] = createSignal('')
   const [deleteConversationId, setDeleteConversationId] = createSignal<string | null>(null)
+  const displayName = () =>
+    chatStore.currentUser()?.realName ||
+    chatStore.currentUser()?.name ||
+    chatStore.currentUser()?.userName ||
+    'GPAS2 用户'
+  const jobTitle = () =>
+    chatStore.currentUser()?.jobTitle || '研究人员'
 
   const closeRenameDialog = () => {
     setRenameConversationId(null)
@@ -337,7 +456,7 @@ function ExpandedSidebarPanel(props: {
       return
     }
 
-    chatStore.renameConversation(conversationId, title)
+    void chatStore.renameConversation(conversationId, title)
     closeRenameDialog()
   }
   const confirmDeleteConversation = () => {
@@ -349,7 +468,7 @@ function ExpandedSidebarPanel(props: {
 
     cancelAssistantReply(conversationId)
     navigate(appRoutes.home, { replace: true })
-    chatStore.deleteConversation(conversationId)
+    void chatStore.deleteConversation(conversationId)
     closeDeleteDialog()
     props.onConversationSelect()
   }
@@ -362,8 +481,8 @@ function ExpandedSidebarPanel(props: {
             <ResearcherAvatar />
             <div>
               <div class="flex items-end justify-between gap-2 w-full">
-                <span class="text-xl font-semibold leading-none text-slate-700">Alexa</span>
-                <span class="text-xs font-semibold text-slate-500">研究员</span>
+                <span class="max-w-36 truncate text-xl font-semibold leading-none text-slate-700">{displayName()}</span>
+                <span class="text-xs font-semibold text-slate-500">{jobTitle()}</span>
               </div>
               <div class="mt-2 flex items-center justify-between gap-2">
                 <span class="text-sm font-semibold leading-none text-emerald-600">良好</span>
@@ -823,17 +942,35 @@ function EmptyConversationState() {
   const navigate = useNavigate()
   const chatStore = useChatStore()
 
-  const startConversation = () => {
+  const startConversation = async () => {
     const content = chatStore.getRootDraft().trim()
 
     if (content.length === 0) {
       return
     }
 
-    const conversationId = crypto.randomUUID()
-    chatStore.appendUserMessage(conversationId, content)
-    chatStore.setRootDraft('')
-    navigate(appRoutes.session(conversationId))
+    try {
+      const conversation =
+        await chatStore.createConversation(content)
+      const message = chatStore.appendUserMessage(
+        conversation.id,
+        content,
+      )
+      chatStore.setRootDraft('')
+      navigate(appRoutes.session(conversation.id))
+
+      if (message?.clientMessageId) {
+        void runAssistantReply(
+          conversation.id,
+          message.content,
+          message.clientMessageId,
+          undefined,
+          chatStore,
+        )
+      }
+    } catch {
+      // The store initialization/error UI remains available for retry.
+    }
   }
 
   return (
@@ -851,7 +988,7 @@ function EmptyConversationState() {
             centered
             value={chatStore.getRootDraft()}
             onInput={chatStore.setRootDraft}
-            onSubmit={startConversation}
+            onSubmit={() => void startConversation()}
             placeholder="输入你的第一条消息，例如：请总结这份样本分析的关键风险"
           />
         </div>
@@ -893,6 +1030,7 @@ function SessionConversationView(props: { conversationId: string }) {
   const [renameValue, setRenameValue] = createSignal('')
   const [deleteConversationId, setDeleteConversationId] = createSignal<string | null>(null)
   const [isMessageListScrolling, setIsMessageListScrolling] = createSignal(false)
+  const [isConversationLoading, setIsConversationLoading] = createSignal(true)
   const conversation = () => chatStore.getConversation(props.conversationId)
   let scrollFadeTimer: number | undefined
   let pointerScrollEndTimer: number | undefined
@@ -921,7 +1059,7 @@ function SessionConversationView(props: { conversationId: string }) {
       return
     }
 
-    chatStore.renameConversation(conversationId, title)
+    void chatStore.renameConversation(conversationId, title)
     closeRenameDialog()
   }
   const confirmDeleteConversation = () => {
@@ -933,9 +1071,26 @@ function SessionConversationView(props: { conversationId: string }) {
 
     cancelAssistantReply(conversationId)
     navigate(appRoutes.home, { replace: true })
-    chatStore.deleteConversation(conversationId)
+    void chatStore.deleteConversation(conversationId)
     closeDeleteDialog()
   }
+
+  onMount(() => {
+    const existing = chatStore.getConversation(props.conversationId)
+    const hasOptimisticMessage =
+      existing?.messages.some((message) =>
+        Boolean(message.clientMessageId),
+      ) ?? false
+
+    if (existing?.pendingReply && hasOptimisticMessage) {
+      setIsConversationLoading(false)
+      return
+    }
+
+    void chatStore
+      .loadConversation(props.conversationId)
+      .finally(() => setIsConversationLoading(false))
+  })
 
   const showMessageListScrollbar = () => {
     setIsMessageListScrolling(true)
@@ -1049,7 +1204,11 @@ function SessionConversationView(props: { conversationId: string }) {
   createEffect(() => {
     const activeConversation = conversation()
 
-    if (!activeConversation || !activeConversation.pendingReply) {
+    if (
+      !activeConversation ||
+      !activeConversation.activeStreamId ||
+      activeConversation.streamState === 'streaming'
+    ) {
       return
     }
 
@@ -1059,7 +1218,13 @@ function SessionConversationView(props: { conversationId: string }) {
       return
     }
 
-    void runAssistantReply(activeConversation.id, latestUserMessage.content, chatStore)
+    void runAssistantReply(
+      activeConversation.id,
+      latestUserMessage.content,
+      latestUserMessage.clientMessageId || crypto.randomUUID(),
+      activeConversation.activeStreamId,
+      chatStore,
+    )
   })
 
   createEffect(() => {
@@ -1103,11 +1268,40 @@ function SessionConversationView(props: { conversationId: string }) {
       return
     }
 
-    chatStore.appendUserMessage(props.conversationId, content)
+    const message = chatStore.appendUserMessage(
+      props.conversationId,
+      content,
+    )
+
+    if (message?.clientMessageId) {
+      void runAssistantReply(
+        props.conversationId,
+        message.content,
+        message.clientMessageId,
+        undefined,
+        chatStore,
+      )
+    }
   }
 
   return (
-    <Show when={conversation()} fallback={<MissingConversationState />}>
+    <Show
+      when={conversation()}
+      fallback={
+        <Show
+          when={!isConversationLoading()}
+          fallback={
+            <ChatPanelFrame title="正在加载会话">
+              <div class="grid min-h-0 flex-1 place-items-center text-sm text-slate-400">
+                正在从服务器恢复会话…
+              </div>
+            </ChatPanelFrame>
+          }
+        >
+          <MissingConversationState />
+        </Show>
+      }
+    >
       {(activeConversation) => (
         <>
           <ChatPanelFrame
@@ -1152,7 +1346,10 @@ function SessionConversationView(props: { conversationId: string }) {
                 value={activeConversation().draft}
                 onInput={(value) => chatStore.updateConversationDraft(props.conversationId, value)}
                 onSubmit={sendFollowUp}
-                disabled={activeConversation().streamState === 'streaming'}
+                disabled={
+                  activeConversation().pendingReply ||
+                  activeConversation().streamState === 'streaming'
+                }
                 placeholder="继续提问，或补充更多上下文"
               />
             </div>

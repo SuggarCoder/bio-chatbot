@@ -1,170 +1,65 @@
-import fastifyStatic from '@fastify/static'
-import Fastify from 'fastify'
+import { buildApp } from './app.js'
+import { createRedisClient } from './cache.js'
+import { readConfig } from './config.js'
+import { createDatabase, verifyCoreSchema } from './db.js'
+import { GenerationService } from './generation.js'
 
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+const config = readConfig()
+const database = createDatabase(config.databaseUrl)
+const redis = createRedisClient(config)
 
-const APP_BASE = '/ai-chatbot/'
-const API_BASE = '/ai-chatbot/api'
+await verifyCoreSchema(database)
 
-const HOST = process.env.HOST ?? '0.0.0.0'
-const PORT = Number(process.env.PORT ?? 8090)
-
-/*
- * 本地开发：
- * SERVE_CLIENT=false
- * 前端由 Vite 5173 提供。
- *
- * 生产环境：
- * 默认 true
- * Fastify 托管 dist/client。
- */
-const SERVE_CLIENT =
-  process.env.SERVE_CLIENT !== 'false'
-
-const currentFile =
-  fileURLToPath(import.meta.url)
-
-const currentDirectory =
-  path.dirname(currentFile)
-
-/*
- * 编译后服务器文件：
- * dist/server/index.js
- *
- * 前端文件：
- * dist/client/
- */
-const clientDirectory =
-  path.resolve(currentDirectory, '../client')
-
-const app = Fastify({
-  logger: true,
-
-  /*
-   * Fastify 位于 Nginx 反向代理后方。
-   */
-  trustProxy: true,
-})
-
-/*
- * 健康检查接口。
- */
-app.get(`${API_BASE}/health`, async () => {
-  return {
-    status: 'ok',
-    service: 'ai-chatbot',
-    commit: process.env.APP_COMMIT ?? 'local',
-    time: new Date().toISOString(),
-  }
-})
-
-if (SERVE_CLIENT) {
-  await app.register(fastifyStatic, {
-    root: clientDirectory,
-    prefix: APP_BASE,
-
-    /*
-     * Vite 生成的 assets 文件带 hash，
-     * 可以长时间缓存。
-     */
-    maxAge: '30d',
-    immutable: true,
-
-    /*
-     * index.html 不能长时间缓存，
-     * 否则部署后可能仍引用旧资源。
-     */
-    setHeaders(reply, filePath) {
-      if (filePath.endsWith('index.html')) {
-        reply.header(
-          'Cache-Control',
-          'no-cache, no-store, must-revalidate',
-        )
-      }
-    },
-  })
-
-  /*
-   * 没有尾部 / 时跳转到标准路径。
-   */
-  app.get(
-    '/ai-chatbot',
-    async (_request, reply) => {
-      return reply.redirect(APP_BASE)
-    },
-  )
-
-  /*
-   * SPA fallback。
-   *
-   * 后续加入前端路由后：
-   * /ai-chatbot/conversations/123
-   * 仍然返回 index.html。
-   */
-  app.setNotFoundHandler(
-    async (request, reply) => {
-      const acceptsHtml =
-        request.headers.accept?.includes(
-          'text/html',
-        ) ?? false
-
-      const isClientRoute =
-        request.method === 'GET' &&
-        request.url.startsWith(APP_BASE)
-
-      const isApiRoute =
-        request.url.startsWith(
-          `${API_BASE}/`,
-        )
-
-      if (
-        isClientRoute &&
-        !isApiRoute &&
-        acceptsHtml
-      ) {
-        return reply
-          .type('text/html; charset=utf-8')
-          .sendFile('index.html', {
-            maxAge: 0,
-            immutable: false,
-          })
-      }
-
-      return reply.code(404).send({
-        error: 'Not Found',
-        path: request.url,
-      })
-    },
-  )
+try {
+  await redis.connect()
+} catch (error) {
+  console.error('Redis is unavailable; generation endpoints will return 503', error)
 }
 
-async function shutdown(
-  signal: string,
-): Promise<void> {
-  app.log.info(
-    { signal },
-    'Shutting down',
-  )
+const generations = new GenerationService(
+  config,
+  database,
+  redis,
+)
+const app = await buildApp({
+  config,
+  database,
+  redis,
+  generations,
+})
+let shuttingDown = false
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) {
+    return
+  }
+
+  shuttingDown = true
+  app.log.info({ signal }, 'Shutting down')
+  generations.abortAll()
 
   await app.close()
-  process.exit(0)
+  await Promise.allSettled([
+    database.end(),
+    redis.isOpen ? redis.close() : Promise.resolve(),
+  ])
 }
 
 process.on('SIGINT', () => {
-  void shutdown('SIGINT')
+  void shutdown('SIGINT').finally(() => process.exit(0))
 })
 
 process.on('SIGTERM', () => {
-  void shutdown('SIGTERM')
+  void shutdown('SIGTERM').finally(() => process.exit(0))
 })
 
 try {
   await app.listen({
-    host: HOST,
-    port: PORT,
+    host: config.host,
+    port: config.port,
   })
 } catch (error) {
   app.log.error(error)
+  await shutdown('startup-error')
   process.exit(1)
 }
