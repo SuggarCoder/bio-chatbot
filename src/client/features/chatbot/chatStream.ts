@@ -1,31 +1,48 @@
 import {
-  generationUrl,
   parseApiError,
   streamUrl,
   type ChatMessageDto,
 } from './chatApi'
+import { isCurrentGeneration } from './generationIdentity'
+
+type StreamIdentity = {
+  generationId: string
+  streamId: string
+}
 
 export type ChatStreamEvent =
-  | {
-      type: 'start'
-      generationId: string
-      streamId: string
+  | StreamIdentity & {
+      type: 'generation.start'
       userMessage: ChatMessageDto
     }
-  | {
-      type: 'text-delta'
+  | StreamIdentity & {
+      type: 'text.delta'
+      startIndex: number
       delta: string
     }
-  | {
-      type: 'done'
-      generationId: string
+  | StreamIdentity & {
+      type: 'tool.start'
+      toolRunId: string
+      toolName: string
+    }
+  | StreamIdentity & {
+      type: 'tool.result'
+      toolRunId: string
+      toolName: string
+    }
+  | StreamIdentity & {
+      type: 'generation.completed'
       assistantMessage: ChatMessageDto
     }
-  | {
-      type: 'error'
-      generationId: string
+  | StreamIdentity & {
+      type: 'generation.cancelled'
+      assistantMessage: ChatMessageDto | null
+    }
+  | StreamIdentity & {
+      type: 'generation.failed'
       code: string
       message: string
+      assistantMessage: ChatMessageDto | null
     }
 
 export class StreamCompletedError extends Error {
@@ -36,13 +53,10 @@ export class StreamCompletedError extends Error {
 }
 
 type StreamRequest = {
-  chatId: string
-  content: string
-  clientMessageId: string
-  existingStreamId?: string
+  generationId: string
+  streamId: string
   signal: AbortSignal
   onEvent: (event: ChatStreamEvent) => void
-  onStreamId: (streamId: string) => void
 }
 
 function sleep(duration: number, signal: AbortSignal) {
@@ -71,20 +85,13 @@ function parseEventBlock(block: string): ChatStreamEvent | null {
     .map((line) => line.slice(5).trimStart())
     .join('\n')
 
-  if (!data) {
-    return null
-  }
-
-  return JSON.parse(data) as ChatStreamEvent
+  return data ? JSON.parse(data) as ChatStreamEvent : null
 }
 
 async function consumeSse(
   response: Response,
-  state: {
-    buffer: string
-    receivedCharacters: number
-  },
-  onEvent: (event: ChatStreamEvent) => void,
+  state: { buffer: string; receivedCharacters: number },
+  request: StreamRequest,
 ): Promise<boolean> {
   if (!response.body) {
     throw new Error('Streaming response has no body')
@@ -92,7 +99,7 @@ async function consumeSse(
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
-  let finished = false
+  let terminal = false
 
   while (true) {
     const result = await reader.read()
@@ -119,23 +126,27 @@ async function consumeSse(
       state.buffer = state.buffer.slice(boundary + 2)
       const event = parseEventBlock(block)
 
-      if (event) {
-        onEvent(event)
-        finished = event.type === 'done' || event.type === 'error'
+      if (
+        !event ||
+        !isCurrentGeneration(request.generationId, event.generationId)
+      ) {
+        continue
       }
+
+      request.onEvent(event)
+      terminal = [
+        'generation.completed',
+        'generation.cancelled',
+        'generation.failed',
+      ].includes(event.type)
     }
   }
 
-  return finished
+  return terminal
 }
 
 export async function runChatStream(request: StreamRequest): Promise<void> {
-  const state = {
-    buffer: '',
-    receivedCharacters: 0,
-  }
-  let streamId = request.existingStreamId
-  let initialRequest = !streamId
+  const state = { buffer: '', receivedCharacters: 0 }
   let retries = 0
 
   while (!request.signal.aborted) {
@@ -143,38 +154,19 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
 
     try {
       response = await fetch(
-        initialRequest
-          ? generationUrl(request.chatId)
-          : streamUrl(streamId as string, state.receivedCharacters),
+        streamUrl(request.generationId, state.receivedCharacters),
         {
-          method: initialRequest ? 'POST' : 'GET',
           credentials: 'include',
-          headers: initialRequest
-            ? {
-                'content-type': 'application/json',
-              }
-            : undefined,
-          body: initialRequest
-            ? JSON.stringify({
-                content: request.content,
-                clientMessageId: request.clientMessageId,
-              })
-            : undefined,
           signal: request.signal,
         },
       )
     } catch (error) {
-      if (request.signal.aborted) {
-        throw error
-      }
-
-      if (!streamId || retries >= 5) {
+      if (request.signal.aborted || retries >= 5) {
         throw error
       }
 
       retries += 1
       await sleep(Math.min(500 * 2 ** retries, 5_000), request.signal)
-      initialRequest = false
       continue
     }
 
@@ -186,48 +178,16 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
       throw await parseApiError(response)
     }
 
-    const responseStreamId = response.headers.get('x-stream-id')
-
-    if (responseStreamId) {
-      streamId = responseStreamId
-      request.onStreamId(responseStreamId)
-    }
-
-    let finished: boolean
-
     try {
-      finished = await consumeSse(
-        response,
-        state,
-        request.onEvent,
-      )
+      if (await consumeSse(response, state, request)) {
+        return
+      }
     } catch (error) {
-      if (request.signal.aborted) {
+      if (request.signal.aborted || retries >= 5) {
         throw error
       }
-
-      if (!streamId || retries >= 5) {
-        throw error
-      }
-
-      retries += 1
-      initialRequest = false
-      await sleep(
-        Math.min(500 * 2 ** retries, 5_000),
-        request.signal,
-      )
-      continue
     }
 
-    if (finished) {
-      return
-    }
-
-    if (!streamId) {
-      throw new Error('Stream ended before a stream ID was assigned')
-    }
-
-    initialRequest = false
     retries += 1
 
     if (retries > 5) {

@@ -21,7 +21,6 @@ import {
   getChatDetail,
   getGeneration,
   listChats,
-  ownsStream,
   renameChat,
   type Database,
 } from './db.js'
@@ -395,6 +394,22 @@ export async function buildApp(
       if (!content || !clientMessageId) {
         return
       }
+      const supersedesGenerationId =
+        body.supersedesGenerationId === undefined
+          ? undefined
+          : requireUuid(
+              request,
+              reply,
+              body.supersedesGenerationId,
+              'supersedesGenerationId',
+            )
+
+      if (
+        body.supersedesGenerationId !== undefined &&
+        !supersedesGenerationId
+      ) {
+        return
+      }
 
       if (!redis.isReady) {
         throw new GenerationRejectedError(
@@ -419,52 +434,48 @@ export async function buildApp(
         )
       }
 
-      const prepared = await generations.prepare({
+      const started = await generations.create({
         user,
         chatId,
         content,
         clientMessageId,
         ip: request.ip,
+        supersedesGenerationId: supersedesGenerationId || undefined,
       })
 
-      if (!prepared.stream) {
-        return reply.code(410).send(
-          errorBody(
-            request,
-            'stream_completed',
-            'Generation is complete; refetch the chat',
-          ),
-        )
-      }
-
-      return sendStringStream(
-        reply,
-        prepared.stream,
-        prepared.start.generationId,
-        prepared.start.streamId,
-      )
+      return reply.code(201).send(started)
     },
   )
 
   app.get<{
-    Params: { streamId: string }
+    Params: { generationId: string }
     Querystring: { resumeAt?: string }
-  }>(`${API_BASE}/streams/:streamId`, async (request, reply) => {
+  }>(`${API_BASE}/generations/:generationId/stream`, async (request, reply) => {
     const user = await authenticate(request)
-    const streamId = requireUuid(
+    const generationId = requireUuid(
       request,
       reply,
-      request.params.streamId,
-      'streamId',
+      request.params.generationId,
+      'generationId',
     )
 
-    if (!streamId) {
+    if (!generationId) {
       return
     }
 
-    if (!(await ownsStream(database, user.id, streamId))) {
+    const generation = await getGeneration(
+      database,
+      user.id,
+      generationId,
+    )
+
+    if (!generation?.streamId) {
       return reply.code(404).send(
-        errorBody(request, 'stream_not_found', 'Stream not found'),
+        errorBody(
+          request,
+          'generation_not_found',
+          'Generation not found',
+        ),
       )
     }
 
@@ -494,7 +505,10 @@ export async function buildApp(
       )
     }
 
-    const stream = await generations.resume(streamId, resumeAt)
+    const stream = await generations.resume(
+      generation.streamId,
+      resumeAt,
+    )
 
     if (stream === undefined) {
       return reply.code(404).send(
@@ -512,18 +526,11 @@ export async function buildApp(
       )
     }
 
-    const detail = await getChatDetail(database, user.id, (
-      await database.query<{ chatId: string }>(
-        `SELECT "chatId" FROM "Stream" WHERE "id" = $1`,
-        [streamId],
-      )
-    ).rows[0].chatId)
-
     return sendStringStream(
       reply,
       stream,
-      detail?.activeGeneration?.id ?? '',
-      streamId,
+      generationId,
+      generation.streamId,
     )
   })
 
@@ -561,6 +568,44 @@ export async function buildApp(
       }
 
       return generation
+    },
+  )
+
+  app.post<{
+    Params: { generationId: string }
+  }>(
+    `${API_BASE}/generations/:generationId/cancel`,
+    async (request, reply) => {
+      const user = await authenticate(request)
+      const generationId = requireUuid(
+        request,
+        reply,
+        request.params.generationId,
+        'generationId',
+      )
+
+      if (!generationId) {
+        return
+      }
+
+      const generation = await generations.cancel(
+        user.id,
+        generationId,
+      )
+
+      if (!generation) {
+        return reply.code(404).send(
+          errorBody(
+            request,
+            'generation_not_found',
+            'Generation not found',
+          ),
+        )
+      }
+
+      return reply
+        .code(generation.effectiveStatus === 'cancelling' ? 202 : 200)
+        .send(generation)
     },
   )
 

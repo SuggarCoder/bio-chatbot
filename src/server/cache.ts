@@ -152,7 +152,11 @@ export async function renewGenerationLease(
 
   const key = redisKey(config, `concurrency:user:${userId}:generation`)
   const expiresAt = Math.floor(Date.now() / 1000) + config.generationLeaseSeconds
-  await redis.zAdd(key, [{ score: expiresAt, value: generationId }])
+  await redis.zAdd(
+    key,
+    [{ score: expiresAt, value: generationId }],
+    { condition: 'XX' },
+  )
   await redis.expire(key, config.generationLeaseSeconds * 2)
 }
 
@@ -312,4 +316,65 @@ export async function setGenerationRealtimeState(
     updatedAt: String(Math.floor(Date.now() / 1000)),
   })
   await redis.expire(key, 60 * 60)
+}
+
+export async function getGenerationRunnerId(
+  redis: RedisClient,
+  config: AppConfig,
+  generationId: string,
+): Promise<string | null> {
+  if (!redis.isReady) {
+    return null
+  }
+
+  return redis.hGet(
+    redisKey(config, `generation:${generationId}`),
+    'runnerId',
+  )
+}
+
+export function generationControlChannel(
+  config: AppConfig,
+  runnerId: string,
+): string {
+  return redisKey(config, `control:runner:${runnerId}`)
+}
+
+export async function publishGenerationCancellation(
+  redis: RedisClient,
+  config: AppConfig,
+  runnerId: string,
+  generationId: string,
+): Promise<void> {
+  if (!redis.isReady) {
+    return
+  }
+
+  await redis.publish(
+    generationControlChannel(config, runnerId),
+    JSON.stringify({
+      type: 'generation.cancel',
+      generationId,
+    }),
+  )
+}
+
+export async function notifyGenerationStateChanged(
+  redis: RedisClient,
+  config: AppConfig,
+  userId: string,
+  generationId: string,
+  status: string,
+): Promise<void> {
+  if (!redis.isReady) {
+    return
+  }
+
+  await redis.publish(
+    redisKey(config, `notify:user:${userId}`),
+    JSON.stringify({
+      type: `generation.${status}`,
+      generationId,
+    }),
+  )
 }

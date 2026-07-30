@@ -18,8 +18,31 @@ export type ChatMessageDto = {
   id: string
   seq: number
   role: 'user' | 'assistant'
+  status: 'completed' | 'cancelled' | 'failed'
   content: string
   createdAt: string
+}
+
+export type GenerationDto = {
+  id: string
+  chatId: string | null
+  streamId: string | null
+  status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+  effectiveStatus:
+    | 'pending'
+    | 'streaming'
+    | 'cancelling'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+  cancelRequestedAt: string | null
+  cancelSource:
+    | 'user_stop'
+    | 'superseded'
+    | 'timeout'
+    | 'server_shutdown'
+    | 'system'
+    | null
 }
 
 export type ChatSummaryDto = {
@@ -36,7 +59,7 @@ export type ChatDetailDto = ChatSummaryDto & {
   activeGeneration: {
     id: string
     streamId: string
-    status: 'pending' | 'streaming'
+    status: 'pending' | 'streaming' | 'cancelling'
   } | null
 }
 
@@ -79,13 +102,16 @@ async function requestJson<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  const headers = new Headers(init?.headers)
+
+  if (init?.body != null && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json')
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     credentials: 'include',
-    headers: {
-      'content-type': 'application/json',
-      ...init?.headers,
-    },
+    headers,
   })
 
   if (!response.ok) {
@@ -145,9 +171,38 @@ export function generationUrl(chatId: string) {
   return `${API_BASE}/chats/${encodeURIComponent(chatId)}/generations`
 }
 
-export function streamUrl(streamId: string, resumeAt: number) {
+export function createGeneration(
+  chatId: string,
+  input: {
+    content: string
+    clientMessageId: string
+    supersedesGenerationId?: string
+  },
+) {
+  return requestJson<{
+    generation: GenerationDto
+    userMessage: ChatMessageDto
+  }>(
+    `/chats/${encodeURIComponent(chatId)}/generations`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  )
+}
+
+export function cancelGeneration(generationId: string) {
+  return requestJson<GenerationDto>(
+    `/generations/${encodeURIComponent(generationId)}/cancel`,
+    {
+      method: 'POST',
+    },
+  )
+}
+
+export function streamUrl(generationId: string, resumeAt: number) {
   const params = new URLSearchParams({
     resumeAt: String(resumeAt),
   })
-  return `${API_BASE}/streams/${encodeURIComponent(streamId)}?${params}`
+  return `${API_BASE}/generations/${encodeURIComponent(generationId)}/stream?${params}`
 }

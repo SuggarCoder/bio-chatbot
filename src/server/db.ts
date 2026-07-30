@@ -76,8 +76,12 @@ export async function verifyCoreSchema(database: Database): Promise<void> {
     `SELECT 1
        FROM "User" u
        LEFT JOIN "Chat" c ON false
-       LEFT JOIN "Message_v2" m ON false
-       LEFT JOIN "Generation" g ON false
+       LEFT JOIN "Message_v2" m
+         ON m."status" = 'completed' AND false
+       LEFT JOIN "Generation" g
+         ON g."cancelRequestedAt" IS NULL AND false
+       LEFT JOIN "Stream" s
+         ON s."generationId" = g."id" AND false
        LEFT JOIN "UsageEvent" e ON false
       LIMIT 1`,
   )
@@ -237,6 +241,7 @@ type MessageRow = QueryResultRow & {
   id: string
   seq: string | number
   role: 'user' | 'assistant'
+  status: ChatMessageDto['status']
   parts: Array<{ type?: string; text?: string }>
   createdAt: Date | string
 }
@@ -253,15 +258,82 @@ export function mapMessage(row: MessageRow): ChatMessageDto {
     id: row.id,
     seq: Number(row.seq),
     role: row.role,
+    status: row.status,
     content,
     createdAt: asIso(row.createdAt),
   }
 }
 
+type GenerationRow = QueryResultRow & {
+  id: string
+  chatId: string | null
+  streamId: string | null
+  status: GenerationDto['status']
+  provider: string
+  model: string
+  inputTokens: string | number
+  outputTokens: string | number
+  errorCode: string | null
+  errorMessage: string | null
+  startedAt: Date | string | null
+  cancelRequestedAt: Date | string | null
+  cancelSource: GenerationDto['cancelSource']
+  createdAt: Date | string
+  finishedAt: Date | string | null
+}
+
+function mapGeneration(row: GenerationRow): GenerationDto {
+  return {
+    id: row.id,
+    chatId: row.chatId,
+    streamId: row.streamId,
+    status: row.status,
+    effectiveStatus:
+      !['completed', 'failed', 'cancelled'].includes(row.status) &&
+      row.cancelRequestedAt
+        ? 'cancelling'
+        : row.status,
+    provider: row.provider,
+    model: row.model,
+    inputTokens: Number(row.inputTokens),
+    outputTokens: Number(row.outputTokens),
+    errorCode: row.errorCode,
+    errorMessage: row.errorMessage,
+    startedAt: row.startedAt ? asIso(row.startedAt) : null,
+    cancelRequestedAt: row.cancelRequestedAt
+      ? asIso(row.cancelRequestedAt)
+      : null,
+    cancelSource: row.cancelSource,
+    createdAt: asIso(row.createdAt),
+    finishedAt: row.finishedAt ? asIso(row.finishedAt) : null,
+  }
+}
+
+const generationSelect = `
+  SELECT
+    g."id",
+    g."chatId",
+    s."id" AS "streamId",
+    g."status",
+    g."provider",
+    g."model",
+    g."inputTokens",
+    g."outputTokens",
+    g."errorCode",
+    g."errorMessage",
+    g."startedAt",
+    g."cancelRequestedAt",
+    g."cancelSource",
+    g."createdAt",
+    g."finishedAt"
+  FROM "Generation" g
+  LEFT JOIN "Stream" s ON s."generationId" = g."id"`
+
 type ActiveGenerationRow = QueryResultRow & {
   id: string
+  streamId: string
   status: 'pending' | 'streaming'
-  metadata: { streamId?: unknown }
+  cancelRequestedAt: Date | string | null
 }
 
 export async function getChatDetail(
@@ -284,7 +356,7 @@ export async function getChatDetail(
 
   const [messagesResult, generationResult] = await Promise.all([
     database.query<MessageRow>(
-      `SELECT "id", "seq", "role", "parts", "createdAt"
+      `SELECT "id", "seq", "role", "status", "parts", "createdAt"
          FROM "Message_v2"
         WHERE "chatId" = $1
           AND "role" IN ('user', 'assistant')
@@ -292,31 +364,30 @@ export async function getChatDetail(
       [chatId],
     ),
     database.query<ActiveGenerationRow>(
-      `SELECT "id", "status", "metadata"
-         FROM "Generation"
-        WHERE "chatId" = $1
-          AND "userId" = $2
-          AND "status" IN ('pending', 'streaming')
-        ORDER BY "createdAt" DESC
-        LIMIT 1`,
+      `SELECT
+         g."id",
+         s."id" AS "streamId",
+         g."status",
+         g."cancelRequestedAt"
+       FROM "Generation" g
+       JOIN "Stream" s ON s."generationId" = g."id"
+       WHERE g."chatId" = $1
+         AND g."userId" = $2
+         AND g."status" IN ('pending', 'streaming')
+         AND g."cancelRequestedAt" IS NULL
+       ORDER BY g."createdAt" DESC
+       LIMIT 1`,
       [chatId, userId],
     ),
   ])
-
-  const generation = generationResult.rows[0]
-  const streamId =
-    generation &&
-    typeof generation.metadata?.streamId === 'string'
-      ? generation.metadata.streamId
-      : null
-  const activeGeneration: ActiveGenerationDto | null =
-    generation && streamId
-      ? {
-          id: generation.id,
-          streamId,
-          status: generation.status,
-        }
-      : null
+  const active = generationResult.rows[0]
+  const activeGeneration: ActiveGenerationDto | null = active
+    ? {
+        id: active.id,
+        streamId: active.streamId,
+        status: active.status,
+      }
+    : null
 
   return {
     ...mapChat(chatResult.rows[0]),
@@ -333,9 +404,10 @@ export async function ownsStream(
   const result = await database.query(
     `SELECT 1
        FROM "Stream" s
-       JOIN "Chat" c ON c."id" = s."chatId"
+       JOIN "Generation" g ON g."id" = s."generationId"
+       JOIN "Chat" c ON c."id" = g."chatId"
       WHERE s."id" = $1
-        AND c."userId" = $2
+        AND g."userId" = $2
         AND c."deletedAt" IS NULL`,
     [streamId, userId],
   )
@@ -348,7 +420,7 @@ export type GenerationStart = {
   streamId: string
   userMessage: ChatMessageDto
   reused: boolean
-  status: string
+  status: GenerationDto['status']
 }
 
 export async function findGenerationStart(
@@ -360,24 +432,24 @@ export async function findGenerationStart(
   const result = await database.query<
     MessageRow & {
       generationId: string
-      generationStatus: string
-      metadata: { streamId?: unknown }
+      generationStatus: GenerationDto['status']
+      streamId: string
     }
   >(
     `SELECT
        m."id",
        m."seq",
        m."role",
+       m."status",
        m."parts",
        m."createdAt",
        g."id" AS "generationId",
        g."status" AS "generationStatus",
-       g."metadata"
+       s."id" AS "streamId"
      FROM "Generation" g
-     JOIN "Chat" c
-       ON c."id" = g."chatId"
-     JOIN "Message_v2" m
-       ON m."id" = g."userMessageId"
+     JOIN "Chat" c ON c."id" = g."chatId"
+     JOIN "Message_v2" m ON m."id" = g."userMessageId"
+     JOIN "Stream" s ON s."generationId" = g."id"
     WHERE g."requestId" = $1
       AND g."chatId" = $2
       AND g."userId" = $3
@@ -385,22 +457,16 @@ export async function findGenerationStart(
     [requestId, chatId, userId],
   )
   const row = result.rows[0]
-  const streamId =
-    row && typeof row.metadata?.streamId === 'string'
-      ? row.metadata.streamId
-      : null
 
-  if (!row || !streamId) {
-    return null
-  }
-
-  return {
-    generationId: row.generationId,
-    streamId,
-    userMessage: mapMessage(row),
-    reused: true,
-    status: row.generationStatus,
-  }
+  return row
+    ? {
+        generationId: row.generationId,
+        streamId: row.streamId,
+        userMessage: mapMessage(row),
+        reused: true,
+        status: row.generationStatus,
+      }
+    : null
 }
 
 export async function createGenerationStart(
@@ -415,9 +481,27 @@ export async function createGenerationStart(
     requestId: string
     provider: string
     model: string
+    supersedesGenerationId?: string
   },
 ): Promise<GenerationStart> {
   return withTransaction(database, async (client) => {
+    if (input.supersedesGenerationId) {
+      await client.query(
+        `UPDATE "Generation"
+            SET "cancelRequestedAt" = COALESCE("cancelRequestedAt", now()),
+                "cancelSource" = COALESCE("cancelSource", 'superseded')
+          WHERE "id" = $1
+            AND "chatId" = $2
+            AND "userId" = $3
+            AND "status" IN ('pending', 'streaming')`,
+        [
+          input.supersedesGenerationId,
+          input.chatId,
+          input.userId,
+        ],
+      )
+    }
+
     const sequenceResult = await client.query<{ seq: string }>(
       `UPDATE "Chat"
           SET "nextMessageSeq" = "nextMessageSeq" + 1,
@@ -438,12 +522,13 @@ export async function createGenerationStart(
          "chatId",
          "seq",
          "role",
+         "status",
          "parts",
          "sharedText",
          "clientMessageId"
        )
-       VALUES ($1, $2, 'user', $3::jsonb, $4, $5)
-       RETURNING "id", "seq", "role", "parts", "createdAt"`,
+       VALUES ($1, $2, 'user', 'completed', $3::jsonb, $4, $5)
+       RETURNING "id", "seq", "role", "status", "parts", "createdAt"`,
       [
         input.chatId,
         sequenceResult.rows[0].seq,
@@ -455,12 +540,6 @@ export async function createGenerationStart(
     const userMessage = mapMessage(messageResult.rows[0])
 
     await client.query(
-      `INSERT INTO "Stream" ("id", "chatId")
-       VALUES ($1, $2)`,
-      [input.streamId, input.chatId],
-    )
-
-    await client.query(
       `INSERT INTO "Generation" (
          "id",
          "chatId",
@@ -469,10 +548,9 @@ export async function createGenerationStart(
          "provider",
          "model",
          "requestId",
-         "status",
-         "metadata"
+         "status"
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')`,
       [
         input.generationId,
         input.chatId,
@@ -481,8 +559,12 @@ export async function createGenerationStart(
         input.provider,
         input.model,
         input.requestId,
-        JSON.stringify({ streamId: input.streamId }),
       ],
+    )
+    await client.query(
+      `INSERT INTO "Stream" ("id", "generationId")
+       VALUES ($1, $2)`,
+      [input.streamId, input.generationId],
     )
 
     return {
@@ -528,10 +610,13 @@ export async function rebuildChatContext(
   }
 
   const messagesResult = await database.query<MessageRow>(
-    `SELECT "id", "seq", "role", "parts", "createdAt"
+    `SELECT "id", "seq", "role", "status", "parts", "createdAt"
        FROM "Message_v2"
       WHERE "chatId" = $1
-        AND "role" IN ('user', 'assistant')
+        AND (
+          "role" = 'user'
+          OR ("role" = 'assistant' AND "status" = 'completed')
+        )
       ORDER BY "seq" DESC
       LIMIT 80`,
     [chatId],
@@ -574,96 +659,279 @@ export async function markGenerationStreaming(
   database: Database,
   generationId: string,
   providerRequestId?: string,
-): Promise<void> {
-  await database.query(
+): Promise<boolean> {
+  const result = await database.query(
     `UPDATE "Generation"
         SET "status" = 'streaming',
+            "startedAt" = COALESCE("startedAt", now()),
             "providerRequestId" = COALESCE($2, "providerRequestId")
       WHERE "id" = $1
-        AND "status" = 'pending'`,
+        AND "status" = 'pending'
+        AND "cancelRequestedAt" IS NULL`,
     [generationId, providerRequestId || null],
   )
+
+  return (result.rowCount ?? 0) > 0
 }
 
-export async function completeGeneration(
+export async function isGenerationCancellationRequested(
   database: Database,
-  input: {
-    generationId: string
-    userId: string
-    chatId: string
-    content: string
-    providerRequestId?: string
-    inputTokens: number
-    outputTokens: number
-    cachedInputTokens: number
-    reasoningTokens: number
-    latencyMs: number
-    timeToFirstTokenMs: number | null
-    finishReason?: string
-  },
-): Promise<ChatMessageDto> {
-  return withTransaction(database, async (client) => {
-    const sequenceResult = await client.query<{ seq: string }>(
-      `UPDATE "Chat"
-          SET "nextMessageSeq" = "nextMessageSeq" + 1,
-              "contextRevision" = "contextRevision" + 1
-        WHERE "id" = $1
-          AND "userId" = $2
-          AND "deletedAt" IS NULL
-        RETURNING "nextMessageSeq" - 1 AS "seq"`,
-      [input.chatId, input.userId],
-    )
+  generationId: string,
+): Promise<boolean> {
+  const result = await database.query<{
+    cancelRequested: boolean
+  }>(
+    `SELECT
+       (
+         "cancelRequestedAt" IS NOT NULL
+         OR "status" = 'cancelled'
+       ) AS "cancelRequested"
+     FROM "Generation"
+     WHERE "id" = $1`,
+    [generationId],
+  )
 
-    if (!sequenceResult.rows[0]) {
-      throw new Error('CHAT_NOT_FOUND')
+  return result.rows[0]?.cancelRequested ?? true
+}
+
+export async function getGeneration(
+  database: Database,
+  userId: string,
+  generationId: string,
+): Promise<GenerationDto | null> {
+  const result = await database.query<GenerationRow>(
+    `${generationSelect}
+     WHERE g."id" = $1
+       AND g."userId" = $2`,
+    [generationId, userId],
+  )
+
+  return result.rows[0] ? mapGeneration(result.rows[0]) : null
+}
+
+export async function requestGenerationCancellation(
+  database: Database,
+  userId: string,
+  generationId: string,
+  source: GenerationDto['cancelSource'] = 'user_stop',
+): Promise<GenerationDto | null> {
+  await database.query(
+    `UPDATE "Generation"
+        SET "cancelRequestedAt" = COALESCE("cancelRequestedAt", now()),
+            "cancelSource" = COALESCE("cancelSource", $3)
+      WHERE "id" = $1
+        AND "userId" = $2
+        AND "status" IN ('pending', 'streaming')`,
+    [generationId, userId, source],
+  )
+
+  return getGeneration(database, userId, generationId)
+}
+
+export type GenerationUsage = {
+  inputTokens: number
+  outputTokens: number
+  cachedInputTokens: number
+  reasoningTokens: number
+}
+
+export type FinalizeGenerationInput = {
+  generationId: string
+  userId: string
+  desiredStatus: 'completed' | 'failed'
+  content: string
+  providerRequestId?: string
+  usage: GenerationUsage
+  latencyMs: number
+  timeToFirstTokenMs: number | null
+  finishReason: string
+  errorCode?: string
+  errorMessage?: string
+}
+
+export type FinalizedGeneration = {
+  generation: GenerationDto
+  assistantMessage: ChatMessageDto | null
+  newlyFinalized: boolean
+}
+
+export function decideGenerationTerminalStatus(
+  currentStatus: GenerationDto['status'],
+  cancelRequestedAt: Date | string | null,
+  desiredStatus: 'completed' | 'failed',
+): 'completed' | 'failed' | 'cancelled' {
+  if (
+    currentStatus === 'completed' ||
+    currentStatus === 'failed' ||
+    currentStatus === 'cancelled'
+  ) {
+    return currentStatus
+  }
+
+  return cancelRequestedAt ? 'cancelled' : desiredStatus
+}
+
+export async function finalizeGeneration(
+  database: Database,
+  input: FinalizeGenerationInput,
+): Promise<FinalizedGeneration> {
+  return withTransaction(database, async (client) => {
+    const generationResult = await client.query<
+      GenerationRow & {
+        assistantMessageId: string | null
+      }
+    >(
+      `SELECT
+         g."id",
+         g."chatId",
+         s."id" AS "streamId",
+         g."status",
+         g."provider",
+         g."model",
+         g."inputTokens",
+         g."outputTokens",
+         g."errorCode",
+         g."errorMessage",
+         g."startedAt",
+         g."cancelRequestedAt",
+         g."cancelSource",
+         g."createdAt",
+         g."finishedAt",
+         g."assistantMessageId"
+       FROM "Generation" g
+       LEFT JOIN "Stream" s ON s."generationId" = g."id"
+       WHERE g."id" = $1
+         AND g."userId" = $2
+       FOR UPDATE OF g`,
+      [input.generationId, input.userId],
+    )
+    const row = generationResult.rows[0]
+
+    if (!row) {
+      throw new Error('GENERATION_NOT_FOUND')
     }
 
-    const messageResult = await client.query<MessageRow>(
-      `INSERT INTO "Message_v2" (
-         "chatId",
-         "seq",
-         "role",
-         "parts",
-         "sharedText"
-       )
-       VALUES ($1, $2, 'assistant', $3::jsonb, $4)
-       RETURNING "id", "seq", "role", "parts", "createdAt"`,
-      [
-        input.chatId,
-        sequenceResult.rows[0].seq,
-        JSON.stringify([{ type: 'text', text: input.content }]),
-        input.content,
-      ],
-    )
-    const assistantMessage = mapMessage(messageResult.rows[0])
+    if (['completed', 'failed', 'cancelled'].includes(row.status)) {
+      const existingMessage = row.assistantMessageId
+        ? (
+            await client.query<MessageRow>(
+              `SELECT "id", "seq", "role", "status", "parts", "createdAt"
+                 FROM "Message_v2"
+                WHERE "id" = $1`,
+              [row.assistantMessageId],
+            )
+          ).rows[0]
+        : null
 
-    await client.query(
+      return {
+        generation: mapGeneration(row),
+        assistantMessage: existingMessage
+          ? mapMessage(existingMessage)
+          : null,
+        newlyFinalized: false,
+      }
+    }
+
+    const finalStatus = decideGenerationTerminalStatus(
+      row.status,
+      row.cancelRequestedAt,
+      input.desiredStatus,
+    )
+    let assistantMessage: ChatMessageDto | null = null
+
+    if (input.content.trim() && row.chatId) {
+      const sequenceResult = await client.query<{ seq: string }>(
+        `UPDATE "Chat"
+            SET "nextMessageSeq" = "nextMessageSeq" + 1,
+                "contextRevision" = "contextRevision" + 1
+          WHERE "id" = $1
+            AND "userId" = $2
+            AND "deletedAt" IS NULL
+          RETURNING "nextMessageSeq" - 1 AS "seq"`,
+        [row.chatId, input.userId],
+      )
+
+      if (sequenceResult.rows[0]) {
+        const messageResult = await client.query<MessageRow>(
+          `INSERT INTO "Message_v2" (
+             "chatId",
+             "seq",
+             "role",
+             "status",
+             "parts",
+             "sharedText"
+           )
+           VALUES ($1, $2, 'assistant', $3, $4::jsonb, $5)
+           RETURNING "id", "seq", "role", "status", "parts", "createdAt"`,
+          [
+            row.chatId,
+            sequenceResult.rows[0].seq,
+            finalStatus,
+            JSON.stringify([
+              {
+                type: 'text',
+                text: input.content,
+              },
+            ]),
+            finalStatus === 'completed' ? input.content : null,
+          ],
+        )
+        assistantMessage = mapMessage(messageResult.rows[0])
+      }
+    }
+
+    const updatedResult = await client.query<GenerationRow>(
       `UPDATE "Generation"
           SET "assistantMessageId" = $2,
               "providerRequestId" = COALESCE($3, "providerRequestId"),
-              "status" = 'completed',
-              "inputTokens" = $4,
-              "outputTokens" = $5,
-              "cachedInputTokens" = $6,
-              "reasoningTokens" = $7,
-              "latencyMs" = $8,
-              "timeToFirstTokenMs" = $9,
-              "finishReason" = $10,
+              "status" = $4,
+              "inputTokens" = $5,
+              "outputTokens" = $6,
+              "cachedInputTokens" = $7,
+              "reasoningTokens" = $8,
+              "latencyMs" = $9,
+              "timeToFirstTokenMs" = $10,
+              "finishReason" = $11,
+              "errorCode" = $12,
+              "errorMessage" = $13,
               "finishedAt" = now()
         WHERE "id" = $1
-          AND "userId" = $11`,
+        RETURNING
+          "id",
+          "chatId",
+          (SELECT "id" FROM "Stream" WHERE "generationId" = $1) AS "streamId",
+          "status",
+          "provider",
+          "model",
+          "inputTokens",
+          "outputTokens",
+          "errorCode",
+          "errorMessage",
+          "startedAt",
+          "cancelRequestedAt",
+          "cancelSource",
+          "createdAt",
+          "finishedAt"`,
       [
         input.generationId,
-        assistantMessage.id,
+        assistantMessage?.id ?? null,
         input.providerRequestId || null,
-        input.inputTokens,
-        input.outputTokens,
-        input.cachedInputTokens,
-        input.reasoningTokens,
+        finalStatus,
+        input.usage.inputTokens,
+        input.usage.outputTokens,
+        input.usage.cachedInputTokens,
+        input.usage.reasoningTokens,
         input.latencyMs,
         input.timeToFirstTokenMs,
-        input.finishReason || 'completed',
-        input.userId,
+        finalStatus === 'cancelled'
+          ? 'cancelled'
+          : input.finishReason,
+        finalStatus === 'cancelled'
+          ? 'generation_cancelled'
+          : input.errorCode || null,
+        finalStatus === 'cancelled'
+          ? 'Generation stopped'
+          : input.errorMessage || null,
       ],
     )
 
@@ -680,42 +948,17 @@ export async function completeGeneration(
       [
         input.userId,
         input.generationId,
-        input.inputTokens,
-        input.outputTokens,
+        input.usage.inputTokens,
+        input.usage.outputTokens,
       ],
     )
 
-    return assistantMessage
+    return {
+      generation: mapGeneration(updatedResult.rows[0]),
+      assistantMessage,
+      newlyFinalized: true,
+    }
   })
-}
-
-export async function failGeneration(
-  database: Database,
-  generationId: string,
-  input: {
-    status: 'failed' | 'cancelled'
-    errorCode: string
-    errorMessage: string
-    latencyMs: number
-  },
-): Promise<void> {
-  await database.query(
-    `UPDATE "Generation"
-        SET "status" = $2,
-            "errorCode" = $3,
-            "errorMessage" = $4,
-            "latencyMs" = $5,
-            "finishedAt" = now()
-      WHERE "id" = $1
-        AND "status" IN ('pending', 'streaming')`,
-    [
-      generationId,
-      input.status,
-      input.errorCode,
-      input.errorMessage,
-      input.latencyMs,
-    ],
-  )
 }
 
 export async function getMonthlyTokenUsage(
@@ -734,68 +977,4 @@ export async function getMonthlyTokenUsage(
   )
 
   return Number(result.rows[0]?.total ?? 0)
-}
-
-type GenerationRow = QueryResultRow & {
-  id: string
-  chatId: string | null
-  status: GenerationDto['status']
-  provider: string
-  model: string
-  inputTokens: string | number
-  outputTokens: string | number
-  errorCode: string | null
-  errorMessage: string | null
-  metadata: { streamId?: unknown }
-  createdAt: Date | string
-  finishedAt: Date | string | null
-}
-
-export async function getGeneration(
-  database: Database,
-  userId: string,
-  generationId: string,
-): Promise<GenerationDto | null> {
-  const result = await database.query<GenerationRow>(
-    `SELECT
-       "id",
-       "chatId",
-       "status",
-       "provider",
-       "model",
-       "inputTokens",
-       "outputTokens",
-       "errorCode",
-       "errorMessage",
-       "metadata",
-       "createdAt",
-       "finishedAt"
-     FROM "Generation"
-     WHERE "id" = $1
-       AND "userId" = $2`,
-    [generationId, userId],
-  )
-  const row = result.rows[0]
-
-  if (!row) {
-    return null
-  }
-
-  return {
-    id: row.id,
-    chatId: row.chatId,
-    streamId:
-      typeof row.metadata?.streamId === 'string'
-        ? row.metadata.streamId
-        : null,
-    status: row.status,
-    provider: row.provider,
-    model: row.model,
-    inputTokens: Number(row.inputTokens),
-    outputTokens: Number(row.outputTokens),
-    errorCode: row.errorCode,
-    errorMessage: row.errorMessage,
-    createdAt: asIso(row.createdAt),
-    finishedAt: row.finishedAt ? asIso(row.finishedAt) : null,
-  }
 }

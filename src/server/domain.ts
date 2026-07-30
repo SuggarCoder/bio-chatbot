@@ -28,10 +28,28 @@ export type CurrentUser = {
   gpas2Role: number | null
 }
 
+export type MessageStatus = 'completed' | 'cancelled' | 'failed'
+export type GenerationStatus =
+  | 'pending'
+  | 'streaming'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+export type EffectiveGenerationStatus =
+  | GenerationStatus
+  | 'cancelling'
+export type CancelSource =
+  | 'user_stop'
+  | 'superseded'
+  | 'timeout'
+  | 'server_shutdown'
+  | 'system'
+
 export type ChatMessageDto = {
   id: string
   seq: number
   role: 'user' | 'assistant'
+  status: MessageStatus
   content: string
   createdAt: string
 }
@@ -48,22 +66,31 @@ export type ChatSummaryDto = {
 export type ActiveGenerationDto = {
   id: string
   streamId: string
-  status: 'pending' | 'streaming'
+  status: 'pending' | 'streaming' | 'cancelling'
 }
 
 export type GenerationDto = {
   id: string
   chatId: string | null
   streamId: string | null
-  status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+  status: GenerationStatus
+  effectiveStatus: EffectiveGenerationStatus
   provider: string
   model: string
   inputTokens: number
   outputTokens: number
   errorCode: string | null
   errorMessage: string | null
+  startedAt: string | null
+  cancelRequestedAt: string | null
+  cancelSource: CancelSource | null
   createdAt: string
   finishedAt: string | null
+}
+
+export type GenerationStartDto = {
+  generation: GenerationDto
+  userMessage: ChatMessageDto
 }
 
 export type ChatDetailDto = ChatSummaryDto & {
@@ -71,25 +98,42 @@ export type ChatDetailDto = ChatSummaryDto & {
   activeGeneration: ActiveGenerationDto | null
 }
 
+type StreamIdentity = {
+  generationId: string
+  streamId: string
+}
+
 export type StreamEvent =
-  | {
-      type: 'start'
-      generationId: string
-      streamId: string
+  | StreamIdentity & {
+      type: 'generation.start'
       userMessage: ChatMessageDto
     }
-  | {
-      type: 'text-delta'
+  | StreamIdentity & {
+      type: 'text.delta'
+      startIndex: number
       delta: string
     }
-  | {
-      type: 'done'
-      generationId: string
+  | StreamIdentity & {
+      type: 'tool.start'
+      toolRunId: string
+      toolName: string
+    }
+  | StreamIdentity & {
+      type: 'tool.result'
+      toolRunId: string
+      toolName: string
+    }
+  | StreamIdentity & {
+      type: 'generation.completed'
       assistantMessage: ChatMessageDto
     }
-  | {
-      type: 'error'
-      generationId: string
+  | StreamIdentity & {
+      type: 'generation.cancelled'
+      assistantMessage: ChatMessageDto | null
+    }
+  | StreamIdentity & {
+      type: 'generation.failed'
       code: string
       message: string
+      assistantMessage: ChatMessageDto | null
     }

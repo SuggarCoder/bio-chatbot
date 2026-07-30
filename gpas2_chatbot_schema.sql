@@ -202,6 +202,9 @@ CREATE TABLE IF NOT EXISTS "Message_v2" (
 
     "role" varchar(20) NOT NULL,
 
+    -- Immutable terminal message state. Streaming output is never stored here.
+    "status" varchar(20) NOT NULL DEFAULT 'completed',
+
     -- Internal complete UIMessage parts. NEVER expose this column directly from
     -- shared Chat endpoints.
     "parts" jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -215,6 +218,7 @@ CREATE TABLE IF NOT EXISTS "Message_v2" (
     "clientMessageId" varchar(128),
 
     "createdAt" timestamptz NOT NULL DEFAULT now(),
+    "updatedAt" timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT "chk_message_role"
         CHECK (
@@ -229,10 +233,26 @@ CREATE TABLE IF NOT EXISTS "Message_v2" (
     CONSTRAINT "chk_message_seq"
         CHECK ("seq" >= 1),
 
+    CONSTRAINT "chk_message_status"
+        CHECK (
+            (
+                "role" = 'assistant'
+                AND "status" IN ('completed', 'cancelled', 'failed')
+            )
+            OR
+            (
+                "role" <> 'assistant'
+                AND "status" = 'completed'
+            )
+        ),
+
     CONSTRAINT "chk_message_shared_text"
         CHECK (
-            "role" IN ('user', 'assistant')
-            OR "sharedText" IS NULL
+            "sharedText" IS NULL
+            OR (
+                "role" IN ('user', 'assistant')
+                AND "status" = 'completed'
+            )
         ),
 
     -- Supports stable ordered queries and snapshot boundaries.
@@ -364,21 +384,20 @@ ON "MessageAttachment" ("attachmentId");
 CREATE TABLE IF NOT EXISTS "Stream" (
     "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    "chatId" uuid NOT NULL
-        REFERENCES "Chat"("id")
-        ON DELETE CASCADE,
+    -- The FK is added after Generation is declared below.
+    "generationId" uuid NOT NULL,
 
     "createdAt" timestamptz NOT NULL DEFAULT now(),
 
     -- Default retention; the cleanup worker should purge expired rows.
-    "expiresAt" timestamptz NOT NULL DEFAULT (now() + interval '7 days'),
+    "expiresAt" timestamptz NOT NULL DEFAULT (now() + interval '24 hours'),
 
     CONSTRAINT "chk_stream_expiry"
         CHECK ("expiresAt" > "createdAt")
 );
 
-CREATE INDEX IF NOT EXISTS "idx_stream_chat"
-ON "Stream" ("chatId", "createdAt" DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS "uq_stream_generation"
+ON "Stream" ("generationId");
 
 CREATE INDEX IF NOT EXISTS "idx_stream_expiry"
 ON "Stream" ("expiresAt");
@@ -409,6 +428,7 @@ CREATE TABLE IF NOT EXISTS "AnalysisJob" (
     "params" jsonb NOT NULL DEFAULT '{}'::jsonb,
 
     "status" varchar(20) NOT NULL DEFAULT 'pending',
+
     "progress" smallint NOT NULL DEFAULT 0,
 
     -- Summary / references only; large outputs belong in Artifact/object storage.
@@ -541,6 +561,9 @@ CREATE TABLE IF NOT EXISTS "Generation" (
     "providerRequestId" varchar(256),
 
     "status" varchar(20) NOT NULL DEFAULT 'pending',
+    "startedAt" timestamptz,
+    "cancelRequestedAt" timestamptz,
+    "cancelSource" varchar(32),
 
     "inputTokens" bigint NOT NULL DEFAULT 0,
     "outputTokens" bigint NOT NULL DEFAULT 0,
@@ -596,8 +619,56 @@ CREATE TABLE IF NOT EXISTS "Generation" (
             ("latencyMs" IS NULL OR "latencyMs" >= 0)
             AND
             ("timeToFirstTokenMs" IS NULL OR "timeToFirstTokenMs" >= 0)
+        ),
+
+    CONSTRAINT "chk_generation_cancel_source"
+        CHECK (
+            "cancelSource" IS NULL
+            OR "cancelSource" IN (
+                'user_stop',
+                'superseded',
+                'timeout',
+                'server_shutdown',
+                'system'
+            )
+        ),
+
+    CONSTRAINT "chk_generation_cancel_fields"
+        CHECK (
+            ("cancelRequestedAt" IS NULL AND "cancelSource" IS NULL)
+            OR
+            ("cancelRequestedAt" IS NOT NULL AND "cancelSource" IS NOT NULL)
+        ),
+
+    CONSTRAINT "chk_generation_finished_at"
+        CHECK (
+            (
+                "status" IN ('completed', 'failed', 'cancelled')
+                AND "finishedAt" IS NOT NULL
+            )
+            OR
+            (
+                "status" IN ('pending', 'streaming')
+                AND "finishedAt" IS NULL
+            )
         )
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_stream_generation'
+    ) THEN
+        ALTER TABLE "Stream"
+        ADD CONSTRAINT "fk_stream_generation"
+        FOREIGN KEY ("generationId")
+        REFERENCES "Generation"("id")
+        ON DELETE CASCADE;
+    END IF;
+END;
+$$;
 
 CREATE INDEX IF NOT EXISTS "idx_generation_user_created"
 ON "Generation" (
@@ -619,6 +690,17 @@ ON "Generation" (
     "model",
     "createdAt" DESC
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS "uq_generation_assistant_message"
+ON "Generation" ("assistantMessageId")
+WHERE "assistantMessageId" IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS "uq_generation_chat_active"
+ON "Generation" ("chatId")
+WHERE
+    "chatId" IS NOT NULL
+    AND "status" IN ('pending', 'streaming')
+    AND "cancelRequestedAt" IS NULL;
 
 
 -- ============================================================
@@ -668,6 +750,29 @@ ON "ToolRun" ("generationId", "startedAt");
 
 CREATE INDEX IF NOT EXISTS "idx_tool_run_name"
 ON "ToolRun" ("toolName", "startedAt" DESC);
+
+ALTER TABLE "AnalysisJob"
+ADD COLUMN IF NOT EXISTS "originToolRunId" uuid;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_analysis_job_origin_tool'
+    ) THEN
+        ALTER TABLE "AnalysisJob"
+        ADD CONSTRAINT "fk_analysis_job_origin_tool"
+        FOREIGN KEY ("originToolRunId")
+        REFERENCES "ToolRun"("id")
+        ON DELETE SET NULL;
+    END IF;
+END;
+$$;
+
+CREATE INDEX IF NOT EXISTS "idx_job_origin_tool"
+ON "AnalysisJob" ("originToolRunId")
+WHERE "originToolRunId" IS NOT NULL;
 
 
 -- ============================================================
@@ -1105,6 +1210,7 @@ WHERE
     c."shareScope" = 'authenticated'
     AND c."deletedAt" IS NULL
     AND m."role" IN ('user', 'assistant')
+    AND m."status" = 'completed'
     AND m."sharedText" IS NOT NULL
     AND (
         c."shareMode" = 'live'
@@ -1143,6 +1249,7 @@ WHERE
     AND c."deletedAt" IS NULL
     AND a."isChatShareable" = true
     AND a."status" = 'ready'
+    AND m."status" = 'completed'
     AND a."deletedAt" IS NULL
     AND (a."expiresAt" IS NULL OR a."expiresAt" > now())
     AND (

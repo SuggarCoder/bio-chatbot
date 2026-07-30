@@ -3,6 +3,8 @@ import { createRedisClient } from './cache.js'
 import { readConfig } from './config.js'
 import { createDatabase, verifyCoreSchema } from './db.js'
 import { GenerationService } from './generation.js'
+import { GenerationFinalizer } from './generationFinalizer.js'
+import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
 
 const config = readConfig()
 const database = createDatabase(config.databaseUrl)
@@ -16,10 +18,20 @@ try {
   console.error('Redis is unavailable; generation endpoints will return 503', error)
 }
 
+const runtimes = new GenerationRuntimeRegistry(config, redis)
+await runtimes.start()
+const finalizer = new GenerationFinalizer(
+  config,
+  database,
+  redis,
+  runtimes,
+)
 const generations = new GenerationService(
   config,
   database,
   redis,
+  runtimes,
+  finalizer,
 )
 const app = await buildApp({
   config,
@@ -36,9 +48,10 @@ async function shutdown(signal: string): Promise<void> {
 
   shuttingDown = true
   app.log.info({ signal }, 'Shutting down')
-  generations.abortAll()
+  await generations.shutdown()
 
   await app.close()
+  await runtimes.close()
   await Promise.allSettled([
     database.end(),
     redis.isOpen ? redis.close() : Promise.resolve(),

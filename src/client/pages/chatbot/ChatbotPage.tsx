@@ -16,6 +16,10 @@ import collapseUrl from '../../assets/images/collapse.svg'
 import gpasUrl from '../../assets/images/gpas.svg'
 import { appRoutes, getAppPathname } from '../../routes'
 import {
+  cancelGeneration,
+  createGeneration,
+} from '../../features/chatbot/chatApi'
+import {
   runChatStream,
   StreamCompletedError,
 } from '../../features/chatbot/chatStream'
@@ -32,10 +36,18 @@ type LayoutContextValue = {
 
 const LayoutContext = createContext<LayoutContextValue>()
 const activeReplyControllers = new Map<string, AbortController>()
+const startingReplies = new Set<string>()
 const noop = () => undefined
 
-function cancelAssistantReply(conversationId: string) {
-  activeReplyControllers.get(conversationId)?.abort()
+function cancelAssistantReply(generationId: string) {
+  const controller = activeReplyControllers.get(generationId)
+
+  if (!controller) {
+    return
+  }
+
+  activeReplyControllers.delete(generationId)
+  controller.abort()
 }
 
 function cancelAllAssistantReplies() {
@@ -89,7 +101,7 @@ async function waitForPersistedReply(
       return true
     }
 
-    if (conversation && !conversation.activeStreamId) {
+    if (conversation && !conversation.activeGeneration) {
       return false
     }
 
@@ -109,6 +121,15 @@ function SendIcon() {
 
 function VoiceIcon() {
   return <span aria-hidden="true" class="i-lucide-mic h-4 w-4 shrink-0" />
+}
+
+function StopIcon() {
+  return (
+    <span
+      aria-hidden="true"
+      class="h-3.5 w-3.5 shrink-0 rounded-[2px] bg-current"
+    />
+  )
 }
 
 function AccountMenuIcon() {
@@ -258,52 +279,119 @@ async function runAssistantReply(
   conversationId: string,
   prompt: string,
   clientMessageId: string,
-  existingStreamId: string | undefined,
+  existingGeneration:
+    | {
+        generationId: string
+        streamId: string
+      }
+    | undefined,
   chatStore: ReturnType<typeof useChatStore>,
 ) {
-  if (activeReplyControllers.has(conversationId)) {
+  if (
+    startingReplies.has(conversationId) ||
+    (
+      existingGeneration &&
+      activeReplyControllers.has(existingGeneration.generationId)
+    )
+  ) {
+    return
+  }
+
+  let generationId = existingGeneration?.generationId
+  let streamId = existingGeneration?.streamId
+
+  if (!generationId || !streamId) {
+    startingReplies.add(conversationId)
+
+    try {
+      const previousGenerationId =
+        chatStore.getConversation(conversationId)
+          ?.activeGeneration?.generationId
+      const started = await createGeneration(conversationId, {
+        content: prompt,
+        clientMessageId,
+        supersedesGenerationId: previousGenerationId,
+      })
+
+      if (!started.generation.streamId) {
+        throw new Error('Generation stream was not created')
+      }
+
+      generationId = started.generation.id
+      streamId = started.generation.streamId
+      chatStore.setActiveGeneration(conversationId, generationId, streamId)
+      chatStore.confirmUserMessage(conversationId, started.userMessage)
+    } catch (error) {
+      chatStore.failGenerationStart(
+        conversationId,
+        error instanceof Error
+          ? error.message
+          : 'Generation could not be started',
+      )
+      return
+    } finally {
+      startingReplies.delete(conversationId)
+    }
+  }
+
+  if (activeReplyControllers.has(generationId)) {
     return
   }
 
   const controller = new AbortController()
-  activeReplyControllers.set(conversationId, controller)
-
-  if (existingStreamId) {
-    chatStore.startAssistantMessage(conversationId)
-  }
+  activeReplyControllers.set(generationId, controller)
+  chatStore.startAssistantMessage(conversationId, generationId)
 
   try {
     await runChatStream({
-      chatId: conversationId,
-      content: prompt,
-      clientMessageId,
-      existingStreamId,
+      generationId,
+      streamId,
       signal: controller.signal,
-      onStreamId: (streamId) => {
-        chatStore.setActiveStream(conversationId, streamId)
-      },
       onEvent: (event) => {
-        if (event.type === 'start') {
-          chatStore.startAssistantMessage(conversationId)
+        if (controller.signal.aborted) {
+          return
+        }
+
+        if (
+          event.generationId !== generationId ||
+          chatStore.getConversation(conversationId)
+            ?.activeGeneration?.generationId !== generationId
+        ) {
+          return
+        }
+
+        if (event.type === 'generation.start') {
+          chatStore.startAssistantMessage(conversationId, generationId)
           chatStore.confirmUserMessage(
             conversationId,
             event.userMessage,
           )
-        } else if (event.type === 'text-delta') {
-          chatStore.startAssistantMessage(conversationId)
+        } else if (event.type === 'text.delta') {
+          chatStore.startAssistantMessage(conversationId, generationId)
           chatStore.appendAssistantChunk(
             conversationId,
+            generationId,
+            event.startIndex,
             event.delta,
           )
-        } else if (event.type === 'done') {
+        } else if (event.type === 'generation.completed') {
           chatStore.finishAssistantMessage(
             conversationId,
+            generationId,
             event.assistantMessage,
           )
-        } else if (event.type === 'error') {
+        } else if (event.type === 'generation.cancelled') {
+          chatStore.cancelAssistantMessage(
+            conversationId,
+            generationId,
+            event.assistantMessage,
+          )
+        } else if (event.type === 'generation.failed') {
           chatStore.failAssistantMessage(
             conversationId,
+            generationId,
             event.message,
+            event.assistantMessage,
           )
         }
       },
@@ -319,7 +407,7 @@ async function runAssistantReply(
     }
 
     if (
-      chatStore.getConversation(conversationId)?.activeStreamId &&
+      chatStore.getConversation(conversationId)?.activeGeneration &&
       await waitForPersistedReply(
         conversationId,
         chatStore,
@@ -330,10 +418,14 @@ async function runAssistantReply(
     }
 
     const message = error instanceof Error ? error.message : '回复生成失败，请稍后重试。'
-    chatStore.failAssistantMessage(conversationId, message)
+    chatStore.failAssistantMessage(
+      conversationId,
+      generationId,
+      message,
+    )
   } finally {
-    if (activeReplyControllers.get(conversationId) === controller) {
-      activeReplyControllers.delete(conversationId)
+    if (activeReplyControllers.get(generationId) === controller) {
+      activeReplyControllers.delete(generationId)
     }
   }
 }
@@ -466,7 +558,13 @@ function ExpandedSidebarPanel(props: {
       return
     }
 
-    cancelAssistantReply(conversationId)
+    const generationId =
+      chatStore.getConversation(conversationId)
+        ?.activeGeneration?.generationId
+
+    if (generationId) {
+      cancelAssistantReply(generationId)
+    }
     navigate(appRoutes.home, { replace: true })
     void chatStore.deleteConversation(conversationId)
     closeDeleteDialog()
@@ -650,8 +748,11 @@ function ChatComposer(props: {
   value: string
   onInput: (value: string) => void
   onSubmit: () => void
+  onStop?: () => void
   centered?: boolean
   disabled?: boolean
+  generating?: boolean
+  stopping?: boolean
   placeholder?: string
 }) {
   const [selectedFiles, setSelectedFiles] = createSignal<File[]>([])
@@ -816,7 +917,23 @@ function ChatComposer(props: {
           >
             <AddIcon />
           </PopupMenu>
-          <Show
+          <Show when={props.generating}>
+            <button
+              type="button"
+              disabled={props.stopping}
+              aria-label={props.stopping ? '正在停止生成' : '停止生成'}
+              onClick={() => props.onStop?.()}
+              class={
+                props.stopping
+                  ? 'voice-action-button grid h-11 w-11 place-items-center rounded-full border border-slate-200 bg-slate-100 text-slate-400'
+                  : 'voice-action-button grid h-11 w-11 place-items-center rounded-full border border-slate-200 bg-white text-slate-700 transition duration-200 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900'
+              }
+            >
+              <StopIcon />
+            </button>
+          </Show>
+          <Show when={!props.generating}>
+            <Show
             when={hasTypedContent()}
             fallback={
               <button
@@ -861,6 +978,7 @@ function ChatComposer(props: {
             >
               <SendIcon />
             </button>
+            </Show>
           </Show>
         </div>
       </div>
@@ -896,13 +1014,17 @@ function ChatMessageBubble(props: { message: ChatMessage }) {
             class={`absolute right-3 top-2 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-opacity duration-200 ${
               props.message.status === 'streaming'
                 ? 'bg-teal-50 text-teal-700 opacity-100'
-                : props.message.status === 'error'
+                : props.message.status === 'failed'
                   ? 'bg-rose-50 text-rose-500 opacity-100'
+                  : props.message.status === 'cancelled'
+                    ? 'bg-amber-50 text-amber-700 opacity-100'
                   : 'pointer-events-none opacity-0'
             }`}
           >
-            {props.message.status === 'error'
-              ? 'Error'
+            {props.message.status === 'failed'
+              ? '生成失败'
+              : props.message.status === 'cancelled'
+                ? '已停止生成'
               : props.message.status === 'streaming'
                 ? 'Streaming'
                 : ''}
@@ -1031,6 +1153,7 @@ function SessionConversationView(props: { conversationId: string }) {
   const [deleteConversationId, setDeleteConversationId] = createSignal<string | null>(null)
   const [isMessageListScrolling, setIsMessageListScrolling] = createSignal(false)
   const [isConversationLoading, setIsConversationLoading] = createSignal(true)
+  const [isStoppingGeneration, setIsStoppingGeneration] = createSignal(false)
   const conversation = () => chatStore.getConversation(props.conversationId)
   let scrollFadeTimer: number | undefined
   let pointerScrollEndTimer: number | undefined
@@ -1069,7 +1192,13 @@ function SessionConversationView(props: { conversationId: string }) {
       return
     }
 
-    cancelAssistantReply(conversationId)
+    const generationId =
+      chatStore.getConversation(conversationId)
+        ?.activeGeneration?.generationId
+
+    if (generationId) {
+      cancelAssistantReply(generationId)
+    }
     navigate(appRoutes.home, { replace: true })
     void chatStore.deleteConversation(conversationId)
     closeDeleteDialog()
@@ -1082,7 +1211,13 @@ function SessionConversationView(props: { conversationId: string }) {
         Boolean(message.clientMessageId),
       ) ?? false
 
-    if (existing?.pendingReply && hasOptimisticMessage) {
+    if (
+      hasOptimisticMessage &&
+      (
+        existing?.activeGeneration ||
+        startingReplies.has(props.conversationId)
+      )
+    ) {
       setIsConversationLoading(false)
       return
     }
@@ -1206,8 +1341,10 @@ function SessionConversationView(props: { conversationId: string }) {
 
     if (
       !activeConversation ||
-      !activeConversation.activeStreamId ||
-      activeConversation.streamState === 'streaming'
+      !activeConversation.activeGeneration ||
+      activeReplyControllers.has(
+        activeConversation.activeGeneration.generationId,
+      )
     ) {
       return
     }
@@ -1222,7 +1359,7 @@ function SessionConversationView(props: { conversationId: string }) {
       activeConversation.id,
       latestUserMessage.content,
       latestUserMessage.clientMessageId || crypto.randomUUID(),
-      activeConversation.activeStreamId,
+      activeConversation.activeGeneration,
       chatStore,
     )
   })
@@ -1281,6 +1418,33 @@ function SessionConversationView(props: { conversationId: string }) {
         undefined,
         chatStore,
       )
+    }
+  }
+
+  const stopGeneration = async () => {
+    const activeConversation = conversation()
+    const generationId =
+      activeConversation?.activeGeneration?.generationId
+
+    if (!generationId || isStoppingGeneration()) {
+      return
+    }
+
+    setIsStoppingGeneration(true)
+    cancelAssistantReply(generationId)
+    chatStore.cancelAssistantMessage(
+      props.conversationId,
+      generationId,
+    )
+
+    try {
+      await cancelGeneration(generationId)
+    } catch {
+      if (!conversation()?.activeGeneration) {
+        await chatStore.loadConversation(props.conversationId)
+      }
+    } finally {
+      setIsStoppingGeneration(false)
     }
   }
 
@@ -1346,10 +1510,14 @@ function SessionConversationView(props: { conversationId: string }) {
                 value={activeConversation().draft}
                 onInput={(value) => chatStore.updateConversationDraft(props.conversationId, value)}
                 onSubmit={sendFollowUp}
+                onStop={() => void stopGeneration()}
                 disabled={
-                  activeConversation().pendingReply ||
-                  activeConversation().streamState === 'streaming'
+                  Boolean(activeConversation().activeGeneration)
                 }
+                generating={
+                  Boolean(activeConversation().activeGeneration)
+                }
+                stopping={isStoppingGeneration()}
                 placeholder="继续提问，或补充更多上下文"
               />
             </div>

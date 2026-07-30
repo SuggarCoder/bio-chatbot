@@ -80,8 +80,9 @@ All key examples below omit this prefix for readability.
 | `identity:resolve:{cookieHash}` | Hash | 30–120 s (optional) | Cache GPAS2 `/info` identity resolution result |
 | `user:profile:{externalUserId}` | Hash | 30 min | GPAS2 user profile cache |
 | `chat:ctx:{chatId}:r{revision}` | String JSON | 2 h | Versioned LLM context cache |
-| `generation:{generationId}` | Hash | running: sliding / completed: 1 h | Realtime generation state |
-| `stream:{streamId}:*` | library-managed | 1–24 h | Resumable streaming data |
+| `generation:{generationId}` | Hash | running: sliding / terminal: 1 h | Realtime Generation projection and runner location |
+| `stream:{streamId}:*` | library-managed | 24 h | Resumable streaming data for one Generation |
+| `control:runner:{runnerId}` | Pub/Sub | none | Best-effort low-latency Generation cancellation command |
 | `job:progress:{jobId}` | Hash | running: 24 h / completed: 6 h | Realtime analysis progress |
 | `notify:user:{userId}` | Pub/Sub | none | Realtime “state changed” notifications |
 | `rl:user:{userId}:req:{window}` | Counter | ~120 s | User request rate limit |
@@ -545,6 +546,10 @@ Provides fast realtime state while the model is running.
 
 PostgreSQL `Generation` remains the final source of truth.
 
+`status=cancelling` is only a realtime projection. PostgreSQL represents the
+same condition as a non-terminal status plus non-null `cancelRequestedAt`.
+Redis must never be the only record that cancellation was requested.
+
 ## Example fields
 
 ```text
@@ -554,6 +559,8 @@ userId
 streamId
 provider
 model
+runnerId
+cancelRequestedAt
 inputTokens
 outputTokens
 startedAt
@@ -570,6 +577,7 @@ HSET generation:G001
   streamId "S001"
   provider "openai"
   model "..."
+  runnerId "fastify-9af217..."
   inputTokens "1450"
   outputTokens "382"
   startedAt "1785400000"
@@ -602,6 +610,27 @@ PostgreSQL Generation
 
 must still work.
 
+## Runner cancellation control
+
+Each Fastify instance owns a random `runnerId` and subscribes to:
+
+```text
+control:runner:{runnerId}
+```
+
+Cancel payload:
+
+```json
+{
+  "type": "generation.cancel",
+  "generationId": "G001"
+}
+```
+
+The runner aborts the matching process-local Generation runtime. Pub/Sub is
+best-effort only; cancellation checkpoints always fall back to PostgreSQL
+`Generation.cancelRequestedAt`.
+
 ---
 
 # 9. Resumable Streaming
@@ -628,9 +657,12 @@ Recommended:
 1–24 hours
 ```
 
-Do not keep stream chunks as long-term history.
+Use a 24-hour retention window. Do not keep stream chunks as long-term
+history.
 
 PostgreSQL `Stream` stores the durable stream identity/relationship and retention metadata.
+`Stream.generationId` is required and unique. Browser/network disconnect only
+detaches a reader; it does not cancel the Generation.
 
 ## Rule
 
@@ -1147,6 +1179,11 @@ Atomically:
 
 Use Lua for atomicity.
 
+After PostgreSQL accepts a Generation cancellation request, remove that
+Generation from this logical concurrency set immediately. Its runner may still
+be aborting or cleaning up, but the user can start the next Generation without
+waiting for teardown.
+
 ## Why ZSet instead of Counter
 
 A worker/server may crash before decrementing a counter.
@@ -1606,6 +1643,7 @@ chat:ctx:{chatId}:r{revision}
 
 generation:{generationId}
 stream:{streamId}:*
+control:runner:{runnerId}
 
 job:progress:{jobId}
 notify:user:{userId}
