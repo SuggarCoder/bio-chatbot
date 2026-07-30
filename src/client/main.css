@@ -185,4 +185,125 @@
     overflow-wrap: anywhere;
     word-break: break-word;
   }
+
+  @keyframes generation-status-dot {
+    0%,
+    60%,
+    100% {
+      opacity: 0.32;
+      transform: translateY(0);
+    }
+
+    30% {
+      opacity: 1;
+      transform: translateY(-2px);
+    }
+  }
+
+  @keyframes generation-status-text-enter {
+    from {
+      opacity: 0;
+      transform: translateY(3px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes generation-status-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @keyframes generation-output-caret {
+    0%,
+    45% {
+      opacity: 1;
+    }
+
+    55%,
+    100% {
+      opacity: 0.18;
+    }
+  }
+
+  .generation-status-indicator {
+    display: inline-flex;
+    min-width: 10rem;
+    height: 1.5rem;
+    align-items: center;
+    justify-content: center;
+    gap: .4rem;
+    overflow: hidden;
+    border-radius: 999px;
+    padding: 0 .65rem;
+    background: rgba(240, 253, 250, .96);
+    color: rgb(15 118 110);
+    font-size: .6875rem;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .generation-status-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .generation-status-dots > span {
+    width: 3px;
+    height: 3px;
+    border-radius: 999px;
+    background: currentColor;
+    animation: generation-status-dot 1.2s ease-in-out infinite;
+  }
+
+  .generation-status-dots > span:nth-child(2) {
+    animation-delay: .14s;
+  }
+
+  .generation-status-dots > span:nth-child(3) {
+    animation-delay: .28s;
+  }
+
+  .generation-status-text {
+    animation: generation-status-text-enter 240ms ease-out;
+  }
+
+  .generation-status-spin {
+    animation: generation-status-spin 1.1s linear infinite;
+  }
+
+  .generation-output-caret {
+    display: inline-block;
+    width: 2px;
+    height: 1.05em;
+    margin-left: 3px;
+    border-radius: 999px;
+    background: rgb(13 148 136);
+    vertical-align: -.14em;
+    animation: generation-output-caret .9s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .generation-status-dots > span,
+    .generation-status-text,
+    .generation-status-spin,
+    .generation-output-caret {
+      animation: none;
+    }
+
+    .generation-status-dots > span {
+      opacity: .65;
+      transform: none;
+    }
+
+    .generation-output-caret {
+      opacity: .65;
+    }
+  }
   

@@ -8,7 +8,7 @@
     "dev:web": "vite --host 0.0.0.0",
     "dev:api": "cross-env SERVE_CLIENT=false tsx watch src/server/index.ts",
     "db:schema": "tsx src/server/applySchema.ts",
-    "test": "tsx --test src/server/*.test.ts",
+    "test": "tsx --test src/server/*.test.ts src/client/features/chatbot/*.test.ts",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "build": "npm run check && vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js"

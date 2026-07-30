@@ -23,6 +23,10 @@ import {
   runChatStream,
   StreamCompletedError,
 } from '../../features/chatbot/chatStream'
+import {
+  thinkingStatusTexts,
+  type GenerationActivity,
+} from '../../features/chatbot/generationActivity'
 import { ChatStoreProvider, useChatStore, type ChatMessage } from '../../features/chatbot/chatStore'
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
@@ -347,6 +351,13 @@ async function runAssistantReply(
       generationId,
       streamId,
       signal: controller.signal,
+      onConnectionState: (connectionState) => {
+        chatStore.setStreamConnectionState(
+          conversationId,
+          generationId,
+          connectionState,
+        )
+      },
       onEvent: (event) => {
         if (controller.signal.aborted) {
           return
@@ -362,6 +373,10 @@ async function runAssistantReply(
 
         if (event.type === 'generation.start') {
           chatStore.startAssistantMessage(conversationId, generationId)
+          chatStore.markGenerationStarted(
+            conversationId,
+            generationId,
+          )
           chatStore.confirmUserMessage(
             conversationId,
             event.userMessage,
@@ -373,6 +388,17 @@ async function runAssistantReply(
             generationId,
             event.startIndex,
             event.delta,
+          )
+        } else if (event.type === 'tool.start') {
+          chatStore.markToolStarted(
+            conversationId,
+            generationId,
+            event.toolName,
+          )
+        } else if (event.type === 'tool.result') {
+          chatStore.markToolFinished(
+            conversationId,
+            generationId,
           )
         } else if (event.type === 'generation.completed') {
           chatStore.finishAssistantMessage(
@@ -986,12 +1012,149 @@ function ChatComposer(props: {
   )
 }
 
+function GenerationStatusIndicator(props: {
+  activity: GenerationActivity
+}) {
+  const reducedMotionQuery = window.matchMedia(
+    '(prefers-reduced-motion: reduce)',
+  )
+  const [prefersReducedMotion, setPrefersReducedMotion] =
+    createSignal(reducedMotionQuery.matches)
+  const [thinkingTextIndex, setThinkingTextIndex] = createSignal(0)
+  const handleReducedMotionChange = (event: MediaQueryListEvent) => {
+    setPrefersReducedMotion(event.matches)
+  }
+
+  reducedMotionQuery.addEventListener(
+    'change',
+    handleReducedMotionChange,
+  )
+  onCleanup(() => {
+    reducedMotionQuery.removeEventListener(
+      'change',
+      handleReducedMotionChange,
+    )
+  })
+
+  createEffect(() => {
+    const phase = props.activity.phase
+    const reducedMotion = prefersReducedMotion()
+    setThinkingTextIndex(0)
+
+    if (phase !== 'thinking' || reducedMotion) {
+      return
+    }
+
+    const intervalId = window.setInterval(() => {
+      setThinkingTextIndex(
+        (current) => (current + 1) % thinkingStatusTexts.length,
+      )
+    }, 1_800)
+
+    onCleanup(() => window.clearInterval(intervalId))
+  })
+
+  const visibleText = () => {
+    if (props.activity.phase === 'queued') {
+      return '正在准备回答'
+    }
+
+    if (props.activity.phase === 'thinking') {
+      return thinkingStatusTexts[thinkingTextIndex()]
+    }
+
+    if (props.activity.phase === 'tool') {
+      return props.activity.toolLabel ?? '正在调用工具'
+    }
+
+    return '连接中断，正在恢复'
+  }
+  const accessibleText = () => {
+    if (props.activity.phase === 'thinking') {
+      return '正在思考'
+    }
+
+    return visibleText()
+  }
+
+  return (
+    <span
+      class="generation-status-indicator absolute right-3 top-2"
+      data-phase={props.activity.phase}
+      role="status"
+      aria-live="polite"
+    >
+      <Show
+        when={props.activity.phase === 'tool'}
+        fallback={
+          <Show
+            when={props.activity.phase === 'reconnecting'}
+            fallback={
+              <span
+                class="generation-status-dots"
+                aria-hidden="true"
+              >
+                <span />
+                <span />
+                <span />
+              </span>
+            }
+          >
+            <span
+              aria-hidden="true"
+              class="i-lucide-refresh-cw generation-status-spin h-3 w-3 shrink-0"
+            />
+          </Show>
+        }
+      >
+        <span
+          aria-hidden="true"
+          class="i-lucide-wrench h-3 w-3 shrink-0"
+        />
+      </Show>
+
+      <For each={[visibleText()]}>
+        {(text) => (
+          <span
+            aria-hidden="true"
+            class="generation-status-text"
+          >
+            {text}
+          </span>
+        )}
+      </For>
+      <span class="sr-only">{accessibleText()}</span>
+    </span>
+  )
+}
+
 function ChatMessageBubble(props: { message: ChatMessage }) {
   const isUser = () => props.message.role === 'user'
   const showPlaceholder = () =>
     props.message.role === 'assistant' &&
     props.message.status === 'streaming' &&
     props.message.content.trim().length === 0
+  const showActivityIndicator = () =>
+    props.message.status === 'streaming' &&
+    Boolean(props.message.activity) &&
+    props.message.activity?.phase !== 'responding'
+  const showOutputCaret = () =>
+    props.message.status === 'streaming' &&
+    props.message.activity?.phase === 'responding'
+  const messagePadding = () => {
+    if (showActivityIndicator()) {
+      return 'pr-44'
+    }
+
+    if (
+      props.message.status === 'failed' ||
+      props.message.status === 'cancelled'
+    ) {
+      return 'pr-24'
+    }
+
+    return ''
+  }
 
   return (
     <div class={isUser() ? 'flex justify-end' : 'flex items-start justify-start gap-3'}>
@@ -1007,34 +1170,59 @@ function ChatMessageBubble(props: { message: ChatMessage }) {
             : 'relative max-w-3xl rounded-3xl bg-white px-4 py-2 text-slate-700'
         }
       >
-        <Show when={!isUser()}>
+        <Show
+          when={
+            showActivityIndicator()
+              ? props.message.activity
+              : undefined
+          }
+        >
+          {(activity) => (
+            <GenerationStatusIndicator activity={activity()} />
+          )}
+        </Show>
+
+        <Show
+          when={
+            props.message.status === 'failed' ||
+            props.message.status === 'cancelled'
+          }
+        >
           <span
             role="status"
             aria-live="polite"
-            class={`absolute right-3 top-2 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-opacity duration-200 ${
-              props.message.status === 'streaming'
-                ? 'bg-teal-50 text-teal-700 opacity-100'
-                : props.message.status === 'failed'
-                  ? 'bg-rose-50 text-rose-500 opacity-100'
-                  : props.message.status === 'cancelled'
-                    ? 'bg-amber-50 text-amber-700 opacity-100'
-                  : 'pointer-events-none opacity-0'
+            class={`absolute right-3 top-2 rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
+              props.message.status === 'failed'
+                ? 'bg-rose-50 text-rose-500'
+                : 'bg-amber-50 text-amber-700'
             }`}
           >
             {props.message.status === 'failed'
               ? '生成失败'
-              : props.message.status === 'cancelled'
-                ? '已停止生成'
-              : props.message.status === 'streaming'
-                ? 'Streaming'
-                : ''}
+              : '已停止生成'}
+          </span>
+        </Show>
+
+        <Show when={showOutputCaret()}>
+          <span
+            class="sr-only"
+            role="status"
+            aria-live="polite"
+          >
+            正在回答
           </span>
         </Show>
 
         <p
-          class={`message-content whitespace-pre-wrap text-base leading-7 ${isUser() ? '' : 'pr-24'}`}
+          class={`message-content whitespace-pre-wrap text-base leading-7 ${isUser() ? '' : messagePadding()}`}
         >
           {showPlaceholder() ? '正在生成回复...' : props.message.content}
+          <Show when={showOutputCaret()}>
+            <span
+              aria-hidden="true"
+              class="generation-output-caret"
+            />
+          </Show>
         </p>
       </div>
     </div>

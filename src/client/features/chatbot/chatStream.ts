@@ -57,6 +57,9 @@ type StreamRequest = {
   streamId: string
   signal: AbortSignal
   onEvent: (event: ChatStreamEvent) => void
+  onConnectionState?: (
+    state: 'connected' | 'reconnecting',
+  ) => void
 }
 
 function sleep(duration: number, signal: AbortSignal) {
@@ -166,6 +169,7 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
       }
 
       retries += 1
+      request.onConnectionState?.('reconnecting')
       await sleep(Math.min(500 * 2 ** retries, 5_000), request.signal)
       continue
     }
@@ -177,6 +181,8 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
     if (!response.ok) {
       throw await parseApiError(response)
     }
+
+    request.onConnectionState?.('connected')
 
     try {
       if (await consumeSse(response, state, request)) {
@@ -194,6 +200,7 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
       throw new Error('Stream connection was interrupted')
     }
 
+    request.onConnectionState?.('reconnecting')
     await sleep(Math.min(500 * 2 ** retries, 5_000), request.signal)
   }
 }

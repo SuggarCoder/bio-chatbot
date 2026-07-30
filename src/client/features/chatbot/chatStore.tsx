@@ -18,6 +18,12 @@ import {
   type ChatSummaryDto,
   type CurrentUserDto,
 } from './chatApi'
+import {
+  createGenerationActivity,
+  reduceGenerationActivity,
+  type GenerationActivity,
+  type GenerationActivityAction,
+} from './generationActivity'
 
 export type ChatMessageRole = 'user' | 'assistant'
 export type ChatMessageStatus =
@@ -36,6 +42,7 @@ export type ChatMessage = {
   id: string
   clientMessageId?: string
   generationId?: string
+  activity?: GenerationActivity
   role: ChatMessageRole
   content: string
   status: ChatMessageStatus
@@ -78,6 +85,18 @@ type ChatStoreContextValue = {
   appendUserMessage: (id: string, content: string) => ChatMessage | undefined
   confirmUserMessage: (id: string, message: ChatMessageDto) => void
   startAssistantMessage: (id: string, generationId: string) => void
+  markGenerationStarted: (id: string, generationId: string) => void
+  markToolStarted: (
+    id: string,
+    generationId: string,
+    toolName: string,
+  ) => void
+  markToolFinished: (id: string, generationId: string) => void
+  setStreamConnectionState: (
+    id: string,
+    generationId: string,
+    state: 'connected' | 'reconnecting',
+  ) => void
   setActiveGeneration: (
     id: string,
     generationId: string,
@@ -309,6 +328,43 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     }
   }
 
+  const applyGenerationActivity = (
+    id: string,
+    action: GenerationActivityAction,
+  ) => {
+    if (!state.conversations[id]) {
+      return
+    }
+
+    setState(
+      'conversations',
+      id,
+      produce((conversation: ChatConversation) => {
+        if (
+          conversation.activeGeneration?.generationId !==
+          action.generationId
+        ) {
+          return
+        }
+
+        const activeMessage = conversation.messages.at(-1)
+
+        if (
+          activeMessage?.role !== 'assistant' ||
+          activeMessage.generationId !== action.generationId ||
+          activeMessage.status !== 'streaming'
+        ) {
+          return
+        }
+
+        activeMessage.activity = reduceGenerationActivity(
+          activeMessage.activity,
+          action,
+        )
+      }),
+    )
+  }
+
   const appendUserMessage = (id: string, content: string) => {
     const normalized = content.trim()
 
@@ -379,24 +435,90 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         if (
           !lastMessage ||
           lastMessage.role !== 'assistant' ||
-          lastMessage.status !== 'streaming'
+          lastMessage.status !== 'streaming' ||
+          lastMessage.generationId !== generationId
         ) {
           conversation.messages.push(
             {
               ...buildOptimisticMessage('assistant', '', 'streaming'),
               generationId,
+              activity: createGenerationActivity(generationId),
             },
           )
+        } else if (!lastMessage.activity) {
+          lastMessage.activity = createGenerationActivity(generationId)
         }
 
-        if (
-          conversation.activeGeneration?.generationId === generationId
-        ) {
-          conversation.activeGeneration.status = 'streaming'
-        }
         conversation.errorMessage = undefined
         conversation.updatedAt = Date.now()
       }),
+    )
+  }
+
+  const markGenerationStarted = (
+    id: string,
+    generationId: string,
+  ) => {
+    if (
+      state.conversations[id]?.activeGeneration?.generationId ===
+      generationId
+    ) {
+      setState(
+        'conversations',
+        id,
+        'activeGeneration',
+        'status',
+        'streaming',
+      )
+    }
+    applyGenerationActivity(id, {
+      type: 'generation-start',
+      generationId,
+    })
+  }
+
+  const markToolStarted = (
+    id: string,
+    generationId: string,
+    toolName: string,
+  ) => {
+    applyGenerationActivity(id, {
+      type: 'tool-start',
+      generationId,
+      toolName,
+    })
+  }
+
+  const markToolFinished = (
+    id: string,
+    generationId: string,
+  ) => {
+    applyGenerationActivity(id, {
+      type: 'tool-result',
+      generationId,
+    })
+  }
+
+  const setStreamConnectionState = (
+    id: string,
+    generationId: string,
+    connectionState: 'connected' | 'reconnecting',
+  ) => {
+    const activeMessage =
+      state.conversations[id]?.messages.at(-1)
+
+    applyGenerationActivity(
+      id,
+      connectionState === 'reconnecting'
+        ? {
+            type: 'reconnecting',
+            generationId,
+          }
+        : {
+            type: 'connected',
+            generationId,
+            hasContent: Boolean(activeMessage?.content.trim()),
+          },
     )
   }
 
@@ -448,6 +570,13 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           activeMessage?.role === 'assistant' &&
           activeMessage.status === 'streaming'
         ) {
+          activeMessage.activity = reduceGenerationActivity(
+            activeMessage.activity,
+            {
+              type: 'text-delta',
+              generationId,
+            },
+          )
           const overlap = activeMessage.content.length - startIndex
 
           if (overlap < chunk.length) {
@@ -486,6 +615,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           activeMessage.generationId === generationId
         ) {
           activeMessage.status = 'done'
+          activeMessage.activity = undefined
 
           if (message) {
             activeMessage.id = message.id
@@ -530,6 +660,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           activeMessage.generationId === generationId
         ) {
           activeMessage.status = 'failed'
+          activeMessage.activity = undefined
 
           if (message) {
             activeMessage.id = message.id
@@ -615,6 +746,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
 
           if (activeMessage.content.trim()) {
             activeMessage.status = 'cancelled'
+            activeMessage.activity = undefined
           } else {
             conversation.messages.pop()
           }
@@ -645,6 +777,10 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         appendUserMessage,
         confirmUserMessage,
         startAssistantMessage,
+        markGenerationStarted,
+        markToolStarted,
+        markToolFinished,
+        setStreamConnectionState,
         setActiveGeneration,
         appendAssistantChunk,
         finishAssistantMessage,
