@@ -116,6 +116,14 @@ export async function loadProfile(
     throw new AuthenticationError('GPAS2 session is invalid')
   }
 
+  if (payload.data.status !== 0) {
+    throw new AuthenticationError(
+      'GPAS2 account is not active',
+      403,
+      'account_inactive',
+    )
+  }
+
   return payload.data
 }
 

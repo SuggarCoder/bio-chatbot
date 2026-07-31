@@ -28,6 +28,8 @@ GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
 
 Fastify 会把浏览器请求携带的同域 Cookie 转发给 GPAS2，并以响应中的 `data.userId` 自动创建或更新 Chatbot 用户。请求体、查询参数和自定义 Header 中的 userId 不参与身份判定。
 
+生产环境通过 GPAS2 同一个 HTTPS 域名下的 `/ai-chatbot/` 路径访问。反向代理、Cookie、内部 TLS、错误语义和上线验证参见 [部署认证说明](docs/deployment-auth.md)。
+
 ## 数据与缓存
 
 - `gpas2_chatbot_schema.sql` 是 PostgreSQL 基线，通过 `npm run db:schema` 显式应用。

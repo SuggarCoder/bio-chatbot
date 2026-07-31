@@ -99,3 +99,43 @@ test('upstream identity forwards the original cookie', async () => {
     globalThis.fetch = originalFetch
   }
 })
+
+test('upstream identity rejects an inactive GPAS2 account', async () => {
+  const originalFetch = globalThis.fetch
+
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        ...mockUserInfoResponse,
+        data: {
+          ...mockUserInfoResponse.data,
+          status: 1,
+        },
+      }),
+      {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+        },
+      },
+    )
+
+  try {
+    await assert.rejects(
+      loadProfile(
+        request('gpas_session=opaque-value'),
+        config({
+          gpas2AuthMode: 'upstream',
+          gpas2UserInfoUrl:
+            'https://gpas.example.test/api/gpas2/v1/user/info',
+        }),
+      ),
+      (error: unknown) =>
+        error instanceof AuthenticationError &&
+        error.statusCode === 403 &&
+        error.code === 'account_inactive',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

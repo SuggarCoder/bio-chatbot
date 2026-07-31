@@ -1758,6 +1758,7 @@ function SessionConversationView(props: { conversationId: string }) {
 }
 
 function ChatbotChrome(props: ParentProps) {
+  const chatStore = useChatStore()
   const navigate = useNavigate()
   const location = useLocation()
   const [isSidebarOpen, setIsSidebarOpen] = createSignal(false)
@@ -1843,6 +1844,43 @@ function ChatbotChrome(props: ParentProps) {
           <div class="flex min-w-0 flex-1 flex-col overflow-hidden bg-slate-50 pl-20 lg:pl-0">
             {props.children}
           </div>
+
+          <Show when={chatStore.initializationError()}>
+            {(message) => (
+              <div class="absolute inset-0 z-50 grid place-items-center bg-slate-950/20 px-6 backdrop-blur-sm">
+                <div
+                  role="alert"
+                  class="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 text-center shadow-xl"
+                >
+                  <div class="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-full bg-amber-50 text-amber-600">
+                    <span
+                      aria-hidden="true"
+                      class="i-lucide-triangle-alert h-5 w-5"
+                    />
+                  </div>
+                  <h2 class="text-base font-semibold text-slate-900">
+                    无法加载 Chatbot
+                  </h2>
+                  <p class="mt-2 text-sm leading-6 text-slate-500">
+                    {message()}
+                  </p>
+                  <Show
+                    when={chatStore.initializationErrorStatus() !== 403}
+                  >
+                    <button
+                      type="button"
+                      class="mt-5 inline-flex h-10 items-center justify-center rounded-full bg-teal-700 px-5 text-sm font-semibold text-white transition hover:bg-teal-800"
+                      onClick={() =>
+                        void chatStore.retryInitialization()
+                      }
+                    >
+                      重试
+                    </button>
+                  </Show>
+                </div>
+              </div>
+            )}
+          </Show>
         </div>
       </section>
     </LayoutContext.Provider>

@@ -29,6 +29,11 @@ COPY --from=build \
     /app/dist \
     ./dist
 
+COPY --from=build \
+    --chown=node:node \
+    /app/gpas2_chatbot_schema.sql \
+    ./gpas2_chatbot_schema.sql
+
 USER node
 
 EXPOSE 8090

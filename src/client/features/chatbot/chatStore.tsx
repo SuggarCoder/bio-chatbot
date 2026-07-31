@@ -7,6 +7,7 @@ import {
 import { createStore, produce } from 'solid-js/store'
 
 import {
+  ChatApiError,
   createChat,
   deleteChat,
   fetchChat,
@@ -65,6 +66,7 @@ type ChatState = {
   currentUser?: CurrentUserDto
   initialized: boolean
   initializationError?: string
+  initializationErrorStatus?: number
   order: string[]
   conversations: Record<string, ChatConversation>
 }
@@ -75,6 +77,8 @@ type ChatStoreContextValue = {
   currentUser: () => CurrentUserDto | undefined
   initialized: () => boolean
   initializationError: () => string | undefined
+  initializationErrorStatus: () => number | undefined
+  retryInitialization: () => Promise<void>
   orderedConversations: () => ChatConversation[]
   getConversation: (id: string) => ChatConversation | undefined
   createConversation: (titleSeed: string) => Promise<ChatConversation>
@@ -218,6 +222,9 @@ export const ChatStoreProvider: ParentComponent = (props) => {
   }
 
   const initialize = async () => {
+    setState('initializationError', undefined)
+    setState('initializationErrorStatus', undefined)
+
     try {
       const [user, chats] = await Promise.all([
         fetchCurrentUser(),
@@ -238,15 +245,24 @@ export const ChatStoreProvider: ParentComponent = (props) => {
 
           draft.initialized = true
           draft.initializationError = undefined
+          draft.initializationErrorStatus = undefined
         }),
       )
     } catch (error) {
       setState('initialized', true)
       setState(
         'initializationError',
-        error instanceof Error
-          ? error.message
-          : '无法加载 Chatbot 数据',
+        error instanceof ChatApiError && error.status === 403
+          ? '当前 GPAS2 账号状态异常，暂时无法使用 Chatbot。'
+          : error instanceof ChatApiError && error.status === 502
+            ? '身份服务暂时不可用，请稍后重试。'
+            : error instanceof Error
+              ? error.message
+              : '无法加载 Chatbot 数据',
+      )
+      setState(
+        'initializationErrorStatus',
+        error instanceof ChatApiError ? error.status : undefined,
       )
     }
   }
@@ -767,6 +783,8 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         currentUser: () => state.currentUser,
         initialized: () => state.initialized,
         initializationError: () => state.initializationError,
+        initializationErrorStatus: () => state.initializationErrorStatus,
+        retryInitialization: initialize,
         orderedConversations,
         getConversation: (id) => state.conversations[id],
         createConversation,

@@ -106,9 +106,19 @@ jobs:
 
           docker compose \
             -p ai-chatbot \
+            build
+
+          docker compose \
+            -p ai-chatbot \
+            run \
+            --rm \
+            app \
+            node dist/server/applySchema.js
+
+          docker compose \
+            -p ai-chatbot \
             up \
             -d \
-            --build \
             --remove-orphans
 
       - name: Verify application

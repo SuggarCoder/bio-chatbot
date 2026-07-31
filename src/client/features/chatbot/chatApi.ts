@@ -70,6 +70,8 @@ type ApiErrorBody = {
   }
 }
 
+let loginRedirectStarted = false
+
 export class ChatApiError extends Error {
   status: number
   code: string
@@ -91,11 +93,22 @@ export async function parseApiError(response: Response): Promise<ChatApiError> {
     // Fall back to the HTTP status below.
   }
 
-  return new ChatApiError(
+  const error = new ChatApiError(
     response.status,
     payload.error?.code || 'request_failed',
     payload.error?.message || `HTTP ${response.status}`,
   )
+
+  if (
+    response.status === 401 &&
+    !loginRedirectStarted &&
+    typeof window !== 'undefined'
+  ) {
+    loginRedirectStarted = true
+    window.location.assign('/login')
+  }
+
+  return error
 }
 
 async function requestJson<T>(

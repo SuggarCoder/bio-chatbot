@@ -1,0 +1,26 @@
+# Serve the Chatbot under the same HTTPS origin as GPAS2 so the browser sends
+# the existing GPAS2 session Cookie to /ai-chatbot/api/*.
+#
+# Put these locations in the HTTPS server block for the GPAS2 host. TLS remains
+# terminated by the existing GPAS2 gateway.
+
+location = /ai-chatbot {
+    return 308 /ai-chatbot/;
+}
+
+location /ai-chatbot/ {
+    proxy_pass http://10.88.20.19:8090;
+    proxy_http_version 1.1;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Cookie $http_cookie;
+
+    # Required for SSE and resumable generation streams.
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 10m;
+    proxy_send_timeout 10m;
+}
