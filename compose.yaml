@@ -32,6 +32,9 @@ services:
     ports:
       - "10.88.20.19:8090:8090"
 
+    networks:
+      - chatbot-backend
+
     healthcheck:
       test:
         [
@@ -45,3 +48,7 @@ services:
 
     security_opt:
       - no-new-privileges:true
+networks:
+    chatbot-backend:
+      external: true
+      name: chatbot-backend
