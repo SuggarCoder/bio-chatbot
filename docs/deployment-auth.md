@@ -52,6 +52,12 @@ command through `--env-file` and never prints its contents.
 a private CA, mount the CA certificate into the container and configure
 `NODE_EXTRA_CA_CERTS`; do not disable TLS certificate verification.
 
+For an isolated test deployment only, `NODE_TLS_REJECT_UNAUTHORIZED=0` may be
+set in the external deployment environment file. The Compose service explicitly
+passes this value to Node.js. This disables certificate verification for every
+HTTPS request made by the process, including GPAS2, model providers, MCP, and
+tool requests, so it must remain `1` in production.
+
 Fastify forwards the incoming Cookie to `/user/info` with a ten-second timeout.
 Access is granted only when the upstream HTTP request succeeds, `code` is 200,
 `data.userId` is present, and `data.status` is 0.
