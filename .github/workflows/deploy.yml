@@ -21,6 +21,8 @@ jobs:
       - x64
 
     timeout-minutes: 45
+    env:
+      DEPLOY_ENV_FILE: /home/lu/.env
 
     steps:
       - name: Configure Git
@@ -97,6 +99,66 @@ jobs:
           echo "Successfully checked out commit:"
           git rev-parse HEAD || true
 
+      - name: Verify deployment environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ -L "$DEPLOY_ENV_FILE" ]; then
+            echo "Deployment environment file must not be a symbolic link"
+            exit 1
+          fi
+
+          if [ ! -f "$DEPLOY_ENV_FILE" ]; then
+            echo "Deployment environment file is missing"
+            exit 1
+          fi
+
+          if [ ! -s "$DEPLOY_ENV_FILE" ]; then
+            echo "Deployment environment file is empty"
+            exit 1
+          fi
+
+          if [ ! -r "$DEPLOY_ENV_FILE" ]; then
+            echo "Deployment environment file is not readable by the runner"
+            exit 1
+          fi
+
+          permissions="$(stat -c '%a' -- "$DEPLOY_ENV_FILE")"
+          if [ "${permissions: -1}" != "0" ]; then
+            echo "Deployment environment file must not be accessible by other users"
+            exit 1
+          fi
+
+          node <<'NODE'
+          const path = process.env.DEPLOY_ENV_FILE
+          process.loadEnvFile(path)
+
+          const sensitiveKeys = [
+            'DATABASE_URL',
+            'REDIS_URL',
+            'QWEN_API_KEY',
+            'GPAS2_USER_INFO_URL',
+          ]
+
+          for (const key of sensitiveKeys) {
+            const value = process.env[key]
+
+            if (!value) {
+              continue
+            }
+
+            const escaped = value
+              .replaceAll('%', '%25')
+              .replaceAll('\r', '%0D')
+              .replaceAll('\n', '%0A')
+
+            process.stdout.write(`::add-mask::${escaped}\n`)
+          }
+          NODE
+
+          echo "Deployment environment file is ready"
+
       - name: Build and deploy
         env:
           APP_COMMIT: ${{ github.sha }}
@@ -104,19 +166,21 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          docker compose \
-            -p ai-chatbot \
-            build
+          compose=(
+            docker compose
+            --env-file "$DEPLOY_ENV_FILE"
+            -p ai-chatbot
+          )
 
-          docker compose \
-            -p ai-chatbot \
+          "${compose[@]}" build
+
+          "${compose[@]}" \
             run \
             --rm \
             app \
             node dist/server/applySchema.js
 
-          docker compose \
-            -p ai-chatbot \
+          "${compose[@]}" \
             up \
             -d \
             --remove-orphans
@@ -125,6 +189,12 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+
+          compose=(
+            docker compose
+            --env-file "$DEPLOY_ENV_FILE"
+            -p ai-chatbot
+          )
 
           for attempt in $(seq 1 30); do
             echo "Health check ${attempt}/30"
@@ -143,7 +213,7 @@ jobs:
             sleep 2
           done
 
-          docker compose -p ai-chatbot ps
-          docker compose -p ai-chatbot logs --tail=200
+          "${compose[@]}" ps
+          "${compose[@]}" logs --tail=200
 
           exit 1

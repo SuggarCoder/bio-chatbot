@@ -42,6 +42,12 @@ GPAS2_AUTH_MODE=upstream
 GPAS2_USER_INFO_URL=https://<internal-gpas-host>/api/gpas2/v1/user/info
 ```
 
+The self-hosted GitHub Actions runner reads these values from
+`/home/lu/.env`. The file stays outside `GITHUB_WORKSPACE`, so checkout cleanup
+cannot remove it. It must be a non-empty regular file, readable by the runner,
+and inaccessible to other users. The workflow passes it to every Compose
+command through `--env-file` and never prints its contents.
+
 `GPAS2_USER_INFO_URL` must be HTTPS in production. If the internal service uses
 a private CA, mount the CA certificate into the container and configure
 `NODE_EXTRA_CA_CERTS`; do not disable TLS certificate verification.
