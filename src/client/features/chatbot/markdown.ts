@@ -43,32 +43,50 @@ function escapeHtml(value: string) {
     .replaceAll("'", '&#39;')
 }
 
+function normalizeLanguage(language?: string) {
+  return language?.trim().toLowerCase().split(/\s+/)[0]
+}
+
+export function highlightCode(
+  source: string,
+  language?: string,
+  generationId?: string,
+) {
+  const normalizedLanguage = normalizeLanguage(language)
+  const start = performance.now()
+  const html = normalizedLanguage && hljs.getLanguage(normalizedLanguage)
+    ? hljs.highlight(source, {
+        language: normalizedLanguage,
+        ignoreIllegals: true,
+      }).value
+    : escapeHtml(source)
+
+  if (generationId) {
+    recordStreamOperation(generationId, {
+      type: 'highlight',
+      duration: performance.now() - start,
+      detail: normalizedLanguage || 'plain',
+    })
+  }
+
+  return {
+    html,
+    language: normalizedLanguage && hljs.getLanguage(normalizedLanguage)
+      ? normalizedLanguage
+      : undefined,
+  }
+}
+
 export function renderMarkdown(source: string, generationId?: string) {
   const renderer = new Renderer()
 
   renderer.html = ({ text }) => `<p>${escapeHtml(text)}</p>`
   renderer.code = ({ text, lang }) => {
-    const language = lang?.trim().toLowerCase().split(/\s+/)[0]
-    const start = performance.now()
-    const highlighted = language && hljs.getLanguage(language)
-      ? hljs.highlight(text, {
-          language,
-          ignoreIllegals: true,
-        }).value
-      : escapeHtml(text)
-
-    if (generationId) {
-      recordStreamOperation(generationId, {
-        type: 'highlight',
-        duration: performance.now() - start,
-        detail: language || 'plain',
-      })
-    }
-
-    const languageClass = language && hljs.getLanguage(language)
-      ? ` language-${language}`
+    const highlighted = highlightCode(text, lang, generationId)
+    const languageClass = highlighted.language
+      ? ` language-${highlighted.language}`
       : ''
-    return `<pre><code class="hljs${languageClass}">${highlighted}</code></pre>`
+    return `<pre><code class="hljs${languageClass}">${highlighted.html}</code></pre>`
   }
 
   const start = performance.now()
@@ -100,6 +118,64 @@ export function renderMarkdown(source: string, generationId?: string) {
   }
 
   return String(clean)
+}
+
+export type StreamingMarkdownTail =
+  | {
+      kind: 'text'
+      source: string
+    }
+  | {
+      kind: 'code'
+      code: string
+      language?: string
+      remainder: string
+      closed: boolean
+    }
+
+export function parseStreamingMarkdownTail(
+  source: string,
+): StreamingMarkdownTail {
+  const opening = /^ {0,3}(`{3,}|~{3,})([^\n]*)(?:\n|$)/.exec(source)
+
+  if (!opening) return { kind: 'text', source }
+
+  const fence = opening[1]
+  const info = opening[2]
+
+  if (fence[0] === '`' && info.includes('`')) {
+    return { kind: 'text', source }
+  }
+
+  const body = source.slice(opening[0].length)
+  const fenceCharacter = fence[0] === '`' ? '`' : '~'
+  const closingPattern = new RegExp(
+    `(?:^|\\n) {0,3}${fenceCharacter}{${fence.length},}[ \\t]*(?=\\n|$)`,
+  )
+  const closing = closingPattern.exec(body)
+  const language = normalizeLanguage(info)
+
+  if (!closing) {
+    return {
+      kind: 'code',
+      code: body,
+      language,
+      remainder: '',
+      closed: false,
+    }
+  }
+
+  let remainderStart = closing.index + closing[0].length
+
+  if (body[remainderStart] === '\n') remainderStart += 1
+
+  return {
+    kind: 'code',
+    code: body.slice(0, closing.index),
+    language,
+    remainder: body.slice(remainderStart),
+    closed: true,
+  }
 }
 
 function hasClosedFence(source: string) {
