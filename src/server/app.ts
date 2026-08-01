@@ -33,6 +33,7 @@ import {
   GenerationRejectedError,
   GenerationService,
 } from './generation.js'
+import type { ObjectStore } from './storage/objectStore.js'
 
 const APP_BASE = '/ai-chatbot/'
 const API_BASE = '/ai-chatbot/api'
@@ -137,6 +138,7 @@ export type AppDependencies = {
   database: Database
   redis: RedisClient
   generations: GenerationService
+  objectStore: ObjectStore | null
 }
 
 export async function buildApp(
@@ -147,6 +149,7 @@ export async function buildApp(
     database,
     redis,
     generations,
+    objectStore,
   } = dependencies
   const app = Fastify({
     logger: true,
@@ -208,16 +211,21 @@ export async function buildApp(
 
   app.get(`${API_BASE}/health`, async (_request, reply) => {
     let postgres = 'ok'
+    let objectStorage = objectStore ? 'ok' : 'disabled'
 
-    try {
-      await checkDatabase(database)
-    } catch {
-      postgres = 'unavailable'
-    }
+    await Promise.all([
+      checkDatabase(database).catch(() => {
+        postgres = 'unavailable'
+      }),
+      objectStore?.healthCheck().catch(() => {
+        objectStorage = 'unavailable'
+      }),
+    ])
 
     const redisStatus = redis.isReady ? 'ok' : 'unavailable'
     const status =
       postgres === 'ok' && redisStatus === 'ok'
+        && objectStorage !== 'unavailable'
         ? 'ok'
         : postgres === 'ok'
           ? 'degraded'
@@ -235,6 +243,7 @@ export async function buildApp(
       dependencies: {
         postgres,
         redis: redisStatus,
+        objectStorage,
       },
       time: new Date().toISOString(),
     }

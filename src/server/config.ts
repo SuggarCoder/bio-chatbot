@@ -18,6 +18,19 @@ export type AppConfig = {
   maxConcurrentGenerations: number
   monthlyTokenLimit: number
   generationLeaseSeconds: number
+  objectStorage: ObjectStorageConfig
+}
+
+export type ObjectStorageConfig = {
+  enabled: boolean
+  endpoint?: string
+  region: string
+  bucket?: string
+  accessKeyId?: string
+  secretAccessKey?: string
+  forcePathStyle: boolean
+  maxAttempts: number
+  serverSideEncryption?: 'AES256'
 }
 
 function required(name: string): string {
@@ -40,6 +53,106 @@ function positiveInteger(name: string, fallback: number, allowZero = false): num
   }
 
   return value
+}
+
+function booleanValue(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  fallback: boolean,
+): boolean {
+  const raw = environment[name]?.trim().toLowerCase()
+
+  if (!raw) {
+    return fallback
+  }
+
+  if (raw === 'true') {
+    return true
+  }
+
+  if (raw === 'false') {
+    return false
+  }
+
+  throw new Error(`${name} must be true or false`)
+}
+
+function storageRequired(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+): string {
+  const value = environment[name]?.trim()
+
+  if (!value) {
+    throw new Error(`${name} is required when OBJECT_STORAGE_ENABLED=true`)
+  }
+
+  return value
+}
+
+export function readObjectStorageConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+  nodeEnv = environment.NODE_ENV?.trim() || 'development',
+): ObjectStorageConfig {
+  const enabled = booleanValue(
+    environment,
+    'OBJECT_STORAGE_ENABLED',
+    false,
+  )
+  const region = environment.S3_REGION?.trim() || 'us-east-1'
+  const forcePathStyle = booleanValue(
+    environment,
+    'S3_FORCE_PATH_STYLE',
+    true,
+  )
+  const maxAttemptsRaw = environment.S3_MAX_ATTEMPTS?.trim()
+  const maxAttempts = maxAttemptsRaw ? Number(maxAttemptsRaw) : 3
+
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error('S3_MAX_ATTEMPTS must be an integer greater than or equal to 1')
+  }
+
+  const encryption = environment.S3_SERVER_SIDE_ENCRYPTION?.trim()
+
+  if (encryption && encryption !== 'AES256') {
+    throw new Error('S3_SERVER_SIDE_ENCRYPTION must be empty or AES256')
+  }
+  const serverSideEncryption = encryption === 'AES256'
+    ? encryption
+    : undefined
+
+  if (!enabled) {
+    return {
+      enabled,
+      region,
+      forcePathStyle,
+      maxAttempts,
+      serverSideEncryption,
+    }
+  }
+
+  const endpoint = storageRequired(environment, 'S3_ENDPOINT')
+  const parsedEndpoint = new URL(endpoint)
+
+  if (!['http:', 'https:'].includes(parsedEndpoint.protocol)) {
+    throw new Error('S3_ENDPOINT must use HTTP or HTTPS')
+  }
+
+  if (nodeEnv === 'production' && parsedEndpoint.protocol !== 'https:') {
+    throw new Error('S3_ENDPOINT must use HTTPS in production')
+  }
+
+  return {
+    enabled,
+    endpoint: parsedEndpoint.toString().replace(/\/$/, ''),
+    region,
+    bucket: storageRequired(environment, 'S3_BUCKET'),
+    accessKeyId: storageRequired(environment, 'S3_ACCESS_KEY_ID'),
+    secretAccessKey: storageRequired(environment, 'S3_SECRET_ACCESS_KEY'),
+    forcePathStyle,
+    maxAttempts,
+    serverSideEncryption,
+  }
 }
 
 export function readConfig(): AppConfig {
@@ -95,5 +208,6 @@ export function readConfig(): AppConfig {
     maxConcurrentGenerations: positiveInteger('MAX_CONCURRENT_GENERATIONS', 1),
     monthlyTokenLimit: positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true),
     generationLeaseSeconds: positiveInteger('GENERATION_LEASE_SECONDS', 120),
+    objectStorage: readObjectStorageConfig(process.env, nodeEnv),
   }
 }

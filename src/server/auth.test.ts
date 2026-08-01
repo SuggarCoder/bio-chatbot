@@ -29,6 +29,12 @@ function config(
     maxConcurrentGenerations: 1,
     monthlyTokenLimit: 0,
     generationLeaseSeconds: 120,
+    objectStorage: {
+      enabled: false,
+      region: 'us-east-1',
+      forcePathStyle: true,
+      maxAttempts: 3,
+    },
     ...overrides,
   }
 }

@@ -11,7 +11,9 @@
     "db:migrate": "tsx src/server/migrate.ts",
     "db:check": "drizzle-kit check",
     "db:studio": "drizzle-kit studio",
-    "test": "tsx --test src/server/*.test.ts src/client/features/chatbot/*.test.ts",
+    "test": "tsx --test src/server/*.test.ts src/server/storage/*.test.ts src/client/features/chatbot/*.test.ts",
+    "test:storage": "tsx --test src/server/storage/*.integration.ts",
+    "storage:check": "tsx src/server/storageCheck.ts",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "build": "npm run check && vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js"
@@ -29,6 +31,8 @@
   },
   "homepage": "https://github.com/SuggarCoder/bio-chatbot#readme",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1101.0",
+    "@aws-sdk/lib-storage": "^3.1101.0",
     "@fastify/static": "^10.1.0",
     "@solidjs/router": "^0.16.1",
     "dompurify": "^3.4.12",

@@ -1,5 +1,7 @@
 # bio-chatbot
 
+SeaweedFS S3 底仓配置与本地验证参见 [docs/object-storage.md](docs/object-storage.md)。
+
 基于 SolidJS、Fastify、PostgreSQL、Redis 和阿里云百炼 Qwen 的 GPAS2 Chatbot。
 
 ## 本地开发

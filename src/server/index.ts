@@ -9,10 +9,14 @@ import {
 import { GenerationService } from './generation.js'
 import { GenerationFinalizer } from './generationFinalizer.js'
 import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
+import { SeaweedS3ObjectStore } from './storage/seaweedS3ObjectStore.js'
 
 const config = readConfig()
 const database = createDatabase(config.databaseUrl)
 const redis = createRedisClient(config)
+const objectStore = config.objectStorage.enabled
+  ? new SeaweedS3ObjectStore(config.objectStorage)
+  : null
 
 await verifyCoreSchema(database)
 
@@ -42,11 +46,13 @@ const app = await buildApp({
   database,
   redis,
   generations,
+  objectStore,
 })
 app.log.info(
   {
     nodeEnv: config.nodeEnv,
     authMode: config.gpas2AuthMode,
+    objectStorageEnabled: config.objectStorage.enabled,
   },
   'Authentication mode configured',
 )
@@ -67,6 +73,7 @@ async function shutdown(signal: string): Promise<void> {
     closeDatabase(database),
     redis.isOpen ? redis.close() : Promise.resolve(),
   ])
+  objectStore?.close()
 }
 
 process.on('SIGINT', () => {
