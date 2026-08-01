@@ -521,7 +521,7 @@ or equivalent service queries based on those safe views.
 The Shared Chat API must never expose raw:
 
 ```text
-Message_v2.parts
+Message.parts
 ```
 
 ---

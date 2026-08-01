@@ -8,7 +8,7 @@
 
 ```bash
 npm ci
-npm run db:schema
+npm run db:migrate
 npm run dev
 ```
 
@@ -32,7 +32,8 @@ Fastify 会把浏览器请求携带的同域 Cookie 转发给 GPAS2，并以响�
 
 ## 数据与缓存
 
-- `gpas2_chatbot_schema.sql` 是 PostgreSQL 基线，通过 `npm run db:schema` 显式应用。
+- `src/server/db/schema.ts` 是 PostgreSQL 结构的唯一代码真源，提交的 `drizzle/` 迁移通过 `npm run db:migrate` 显式应用。
+- 修改数据库结构后运行 `npm run db:generate` 生成迁移，并用 `npm run db:check` 校验迁移历史。
 - PostgreSQL 保存用户、会话、最终消息、Generation 和 UsageEvent。
 - Redis 仅保存资料/上下文缓存、生成实时状态、可续传流、限流、并发租约和月度用量投影。
 - `MONTHLY_TOKEN_LIMIT=0` 表示记录用量但不拦截；正整数表示月度 Token 上限。

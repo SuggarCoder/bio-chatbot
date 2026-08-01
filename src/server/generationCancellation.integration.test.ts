@@ -1,15 +1,24 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { eq, inArray, sql } from 'drizzle-orm'
 
 import {
+  closeDatabase,
   createChat,
   createDatabase,
   createGenerationStart,
   finalizeGeneration,
   getChatDetail,
+  migrateDatabase,
   rebuildChatContext,
   requestGenerationCancellation,
 } from './db.js'
+import {
+  generations,
+  messages,
+  usageEvents,
+  users,
+} from './db/schema.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 
@@ -18,14 +27,24 @@ test(
   { skip: !databaseUrl },
   async () => {
     const database = createDatabase(databaseUrl as string)
+    await migrateDatabase(database)
+    await migrateDatabase(database)
+    const catalog = await database.execute<{
+      messageTable: string | null
+      voteTable: string | null
+    }>(sql`
+      select
+        to_regclass('"Message"')::text as "messageTable",
+        to_regclass('"Vote"')::text as "voteTable"
+    `)
+    assert.ok(catalog.rows[0]?.messageTable)
+    assert.ok(catalog.rows[0]?.voteTable)
     const externalUserId = `test-${crypto.randomUUID()}`
-    const userResult = await database.query<{ id: string }>(
-      `INSERT INTO "User" ("externalUserId")
-       VALUES ($1)
-       RETURNING "id"`,
-      [externalUserId],
-    )
-    const userId = userResult.rows[0].id
+    const [user] = await database
+      .insert(users)
+      .values({ externalUserId })
+      .returning({ id: users.id })
+    const userId = user.id
     const generationIds = [crypto.randomUUID(), crypto.randomUUID()]
 
     try {
@@ -41,6 +60,21 @@ test(
         provider: 'test',
         model: 'test',
       })
+      await assert.rejects(
+        database
+          .update(messages)
+          .set({ sharedText: 'rewritten' })
+          .where(eq(messages.id, first.userMessage.id)),
+        (error) => {
+          const cause =
+            typeof error === 'object' && error !== null && 'cause' in error
+              ? String(error.cause)
+              : ''
+          return `${String(error)} ${cause}`.includes(
+            'Message rows are immutable after insert',
+          )
+        },
+      )
       const cancelled = await requestGenerationCancellation(
         database,
         userId,
@@ -106,21 +140,14 @@ test(
         ['first prompt', 'second prompt'],
       )
     } finally {
-      await database.query(
-        `DELETE FROM "UsageEvent"
-          WHERE "generationId" = ANY($1::uuid[])`,
-        [generationIds],
-      )
-      await database.query(
-        `DELETE FROM "Generation"
-          WHERE "id" = ANY($1::uuid[])`,
-        [generationIds],
-      )
-      await database.query(
-        `DELETE FROM "User" WHERE "id" = $1`,
-        [userId],
-      )
-      await database.end()
+      await database
+        .delete(usageEvents)
+        .where(inArray(usageEvents.generationId, generationIds))
+      await database
+        .delete(generations)
+        .where(inArray(generations.id, generationIds))
+      await database.delete(users).where(eq(users.id, userId))
+      await closeDatabase(database)
     }
   },
 )

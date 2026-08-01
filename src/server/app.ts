@@ -17,6 +17,7 @@ import {
 import type { AppConfig } from './config.js'
 import {
   createChat,
+  checkDatabase,
   deleteMessageVote,
   deleteChat,
   getChatDetail,
@@ -209,7 +210,7 @@ export async function buildApp(
     let postgres = 'ok'
 
     try {
-      await database.query('SELECT 1')
+      await checkDatabase(database)
     } catch {
       postgres = 'unavailable'
     }

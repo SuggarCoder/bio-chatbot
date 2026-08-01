@@ -5,7 +5,7 @@ stream-event isolation boundary; no separate Run, epoch, or version exists.
 
 ## Durable model
 
-- `Message_v2` is immutable conversation history. Streaming never inserts or
+- `Message` is immutable conversation history. Streaming never inserts or
   updates an assistant message.
 - `Generation` is the durable execution lifecycle. PostgreSQL status is
   `pending`, `streaming`, `completed`, `failed`, or `cancelled`.

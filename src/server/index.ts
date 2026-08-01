@@ -1,7 +1,11 @@
 import { buildApp } from './app.js'
 import { createRedisClient } from './cache.js'
 import { readConfig } from './config.js'
-import { createDatabase, verifyCoreSchema } from './db.js'
+import {
+  closeDatabase,
+  createDatabase,
+  verifyCoreSchema,
+} from './db.js'
 import { GenerationService } from './generation.js'
 import { GenerationFinalizer } from './generationFinalizer.js'
 import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
@@ -60,7 +64,7 @@ async function shutdown(signal: string): Promise<void> {
   await app.close()
   await runtimes.close()
   await Promise.allSettled([
-    database.end(),
+    closeDatabase(database),
     redis.isOpen ? redis.close() : Promise.resolve(),
   ])
 }

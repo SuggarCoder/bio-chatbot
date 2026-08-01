@@ -1,0 +1,2908 @@
+{
+  "id": "1a7aefb0-a531-43f4-95d4-8ae9b439427d",
+  "prevId": "00000000-0000-0000-0000-000000000000",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.AnalysisJob": {
+      "name": "AnalysisJob",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "externalJobId": {
+          "name": "externalJobId",
+          "type": "varchar(256)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "jobType": {
+          "name": "jobType",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "jobName": {
+          "name": "jobName",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "params": {
+          "name": "params",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "progress": {
+          "name": "progress",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "result": {
+          "name": "result",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "idempotencyKey": {
+          "name": "idempotencyKey",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "attempt": {
+          "name": "attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "maxAttempts": {
+          "name": "maxAttempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 3
+        },
+        "workerId": {
+          "name": "workerId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "leaseUntil": {
+          "name": "leaseUntil",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "heartbeatAt": {
+          "name": "heartbeatAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cancelRequestedAt": {
+          "name": "cancelRequestedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "queuedAt": {
+          "name": "queuedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "startedAt": {
+          "name": "startedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finishedAt": {
+          "name": "finishedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "originToolRunId": {
+          "name": "originToolRunId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_job_chat": {
+          "name": "idx_job_chat",
+          "columns": [
+            {
+              "expression": "chatId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"AnalysisJob\".\"chatId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_job_user_status": {
+          "name": "idx_job_user_status",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"AnalysisJob\".\"userId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_job_active_status": {
+          "name": "idx_job_active_status",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"AnalysisJob\".\"status\" in ('pending', 'queued', 'running')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_job_external": {
+          "name": "idx_job_external",
+          "columns": [
+            {
+              "expression": "externalJobId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"AnalysisJob\".\"externalJobId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "uq_job_idempotency": {
+          "name": "uq_job_idempotency",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotencyKey",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"AnalysisJob\".\"userId\" is not null and \"AnalysisJob\".\"idempotencyKey\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_job_origin_tool": {
+          "name": "idx_job_origin_tool",
+          "columns": [
+            {
+              "expression": "originToolRunId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"AnalysisJob\".\"originToolRunId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "AnalysisJob_chatId_Chat_id_fk": {
+          "name": "AnalysisJob_chatId_Chat_id_fk",
+          "tableFrom": "AnalysisJob",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "chatId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "AnalysisJob_userId_User_id_fk": {
+          "name": "AnalysisJob_userId_User_id_fk",
+          "tableFrom": "AnalysisJob",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "AnalysisJob_originToolRunId_ToolRun_id_fk": {
+          "name": "AnalysisJob_originToolRunId_ToolRun_id_fk",
+          "tableFrom": "AnalysisJob",
+          "tableTo": "ToolRun",
+          "columnsFrom": [
+            "originToolRunId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_job_status": {
+          "name": "chk_job_status",
+          "value": "\"AnalysisJob\".\"status\" in ('pending', 'queued', 'running', 'completed', 'failed', 'cancelled')"
+        },
+        "chk_job_progress": {
+          "name": "chk_job_progress",
+          "value": "\"AnalysisJob\".\"progress\" between 0 and 100"
+        },
+        "chk_job_attempt": {
+          "name": "chk_job_attempt",
+          "value": "\"AnalysisJob\".\"attempt\" >= 0 and \"AnalysisJob\".\"maxAttempts\" >= 1\n        and \"AnalysisJob\".\"attempt\" <= \"AnalysisJob\".\"maxAttempts\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Artifact": {
+      "name": "Artifact",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "messageId": {
+          "name": "messageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "generationId": {
+          "name": "generationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "analysisJobId": {
+          "name": "analysisJobId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "artifactType": {
+          "name": "artifactType",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "isChatShareable": {
+          "name": "isChatShareable",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "\"artifactType\" in ('report', 'table', 'chart')",
+            "type": "stored"
+          }
+        },
+        "format": {
+          "name": "format",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'generating'"
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "storageProvider": {
+          "name": "storageProvider",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "storageKey": {
+          "name": "storageKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mimeType": {
+          "name": "mimeType",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sizeBytes": {
+          "name": "sizeBytes",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sha256": {
+          "name": "sha256",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "deletedAt": {
+          "name": "deletedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "uq_artifact_storage": {
+          "name": "uq_artifact_storage",
+          "columns": [
+            {
+              "expression": "storageProvider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "storageKey",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"Artifact\".\"storageKey\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_artifact_user": {
+          "name": "idx_artifact_user",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Artifact\".\"userId\" is not null and \"Artifact\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_artifact_chat": {
+          "name": "idx_artifact_chat",
+          "columns": [
+            {
+              "expression": "chatId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Artifact\".\"chatId\" is not null and \"Artifact\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_artifact_message": {
+          "name": "idx_artifact_message",
+          "columns": [
+            {
+              "expression": "messageId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Artifact\".\"messageId\" is not null and \"Artifact\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_artifact_generation": {
+          "name": "idx_artifact_generation",
+          "columns": [
+            {
+              "expression": "generationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Artifact\".\"generationId\" is not null and \"Artifact\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_artifact_job": {
+          "name": "idx_artifact_job",
+          "columns": [
+            {
+              "expression": "analysisJobId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Artifact\".\"analysisJobId\" is not null and \"Artifact\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_artifact_expiry": {
+          "name": "idx_artifact_expiry",
+          "columns": [
+            {
+              "expression": "expiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Artifact\".\"expiresAt\" is not null and \"Artifact\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "Artifact_userId_User_id_fk": {
+          "name": "Artifact_userId_User_id_fk",
+          "tableFrom": "Artifact",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "Artifact_chatId_Chat_id_fk": {
+          "name": "Artifact_chatId_Chat_id_fk",
+          "tableFrom": "Artifact",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "chatId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "Artifact_messageId_Message_id_fk": {
+          "name": "Artifact_messageId_Message_id_fk",
+          "tableFrom": "Artifact",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "messageId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "Artifact_generationId_Generation_id_fk": {
+          "name": "Artifact_generationId_Generation_id_fk",
+          "tableFrom": "Artifact",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "generationId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "Artifact_analysisJobId_AnalysisJob_id_fk": {
+          "name": "Artifact_analysisJobId_AnalysisJob_id_fk",
+          "tableFrom": "Artifact",
+          "tableTo": "AnalysisJob",
+          "columnsFrom": [
+            "analysisJobId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "fk_artifact_message_chat": {
+          "name": "fk_artifact_message_chat",
+          "tableFrom": "Artifact",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "messageId",
+            "chatId"
+          ],
+          "columnsTo": [
+            "id",
+            "chatId"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_artifact_type": {
+          "name": "chk_artifact_type",
+          "value": "\"Artifact\".\"artifactType\" in ('report', 'table', 'chart', 'file', 'dataset')"
+        },
+        "chk_artifact_format": {
+          "name": "chk_artifact_format",
+          "value": "\"Artifact\".\"format\" in ('html', 'markdown', 'pdf', 'csv', 'xlsx', 'json', 'png', 'jpeg', 'svg')"
+        },
+        "chk_artifact_status": {
+          "name": "chk_artifact_status",
+          "value": "\"Artifact\".\"status\" in ('generating', 'ready', 'failed', 'expired')"
+        },
+        "chk_artifact_size": {
+          "name": "chk_artifact_size",
+          "value": "\"Artifact\".\"sizeBytes\" is null or \"Artifact\".\"sizeBytes\" >= 0"
+        },
+        "chk_artifact_storage": {
+          "name": "chk_artifact_storage",
+          "value": "(\"Artifact\".\"storageProvider\" is null and \"Artifact\".\"storageKey\" is null)\n        or (\"Artifact\".\"storageProvider\" is not null and \"Artifact\".\"storageKey\" is not null)"
+        },
+        "chk_artifact_ready_content": {
+          "name": "chk_artifact_ready_content",
+          "value": "\"Artifact\".\"status\" <> 'ready' or \"Artifact\".\"content\" is not null or \"Artifact\".\"storageKey\" is not null"
+        },
+        "chk_artifact_expiry": {
+          "name": "chk_artifact_expiry",
+          "value": "\"Artifact\".\"expiresAt\" is null or \"Artifact\".\"expiresAt\" > \"Artifact\".\"createdAt\""
+        },
+        "chk_artifact_message_chat_presence": {
+          "name": "chk_artifact_message_chat_presence",
+          "value": "\"Artifact\".\"messageId\" is null or \"Artifact\".\"chatId\" is not null"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Attachment": {
+      "name": "Attachment",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storageProvider": {
+          "name": "storageProvider",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storageKey": {
+          "name": "storageKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fileName": {
+          "name": "fileName",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mimeType": {
+          "name": "mimeType",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sizeBytes": {
+          "name": "sizeBytes",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sha256": {
+          "name": "sha256",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'uploading'"
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "deletedAt": {
+          "name": "deletedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_attachment_user": {
+          "name": "idx_attachment_user",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Attachment\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_attachment_sha": {
+          "name": "idx_attachment_sha",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sha256",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Attachment\".\"sha256\" is not null and \"Attachment\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "Attachment_userId_User_id_fk": {
+          "name": "Attachment_userId_User_id_fk",
+          "tableFrom": "Attachment",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_attachment_storage": {
+          "name": "uq_attachment_storage",
+          "nullsNotDistinct": false,
+          "columns": [
+            "storageProvider",
+            "storageKey"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_attachment_size": {
+          "name": "chk_attachment_size",
+          "value": "\"Attachment\".\"sizeBytes\" >= 0"
+        },
+        "chk_attachment_status": {
+          "name": "chk_attachment_status",
+          "value": "\"Attachment\".\"status\" in ('uploading', 'scanning', 'ready', 'quarantined', 'failed')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.AuditLog": {
+      "name": "AuditLog",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "actorUserId": {
+          "name": "actorUserId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "actorExternalUserId": {
+          "name": "actorExternalUserId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "requestId": {
+          "name": "requestId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "action": {
+          "name": "action",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'success'"
+        },
+        "resourceType": {
+          "name": "resourceType",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resourceId": {
+          "name": "resourceId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ip": {
+          "name": "ip",
+          "type": "inet",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "userAgent": {
+          "name": "userAgent",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_audit_actor": {
+          "name": "idx_audit_actor",
+          "columns": [
+            {
+              "expression": "actorUserId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_audit_resource": {
+          "name": "idx_audit_resource",
+          "columns": [
+            {
+              "expression": "resourceType",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "resourceId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_audit_request": {
+          "name": "idx_audit_request",
+          "columns": [
+            {
+              "expression": "requestId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"AuditLog\".\"requestId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_audit_outcome": {
+          "name": "idx_audit_outcome",
+          "columns": [
+            {
+              "expression": "outcome",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "AuditLog_actorUserId_User_id_fk": {
+          "name": "AuditLog_actorUserId_User_id_fk",
+          "tableFrom": "AuditLog",
+          "tableTo": "User",
+          "columnsFrom": [
+            "actorUserId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_audit_outcome": {
+          "name": "chk_audit_outcome",
+          "value": "\"AuditLog\".\"outcome\" in ('success', 'denied', 'failed')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Chat": {
+      "name": "Chat",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "chatType": {
+          "name": "chatType",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'general'"
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "shareScope": {
+          "name": "shareScope",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'private'"
+        },
+        "shareMode": {
+          "name": "shareMode",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sharedThroughSeq": {
+          "name": "sharedThroughSeq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sharedAt": {
+          "name": "sharedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "shareSlug": {
+          "name": "shareSlug",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "contextRevision": {
+          "name": "contextRevision",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "nextMessageSeq": {
+          "name": "nextMessageSeq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "1"
+        },
+        "forkedFromChatId": {
+          "name": "forkedFromChatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "forkedFromSeq": {
+          "name": "forkedFromSeq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "deletedAt": {
+          "name": "deletedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_chat_user_active": {
+          "name": "idx_chat_user_active",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Chat\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "uq_chat_share_slug": {
+          "name": "uq_chat_share_slug",
+          "columns": [
+            {
+              "expression": "shareSlug",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"Chat\".\"shareSlug\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_chat_shared": {
+          "name": "idx_chat_shared",
+          "columns": [
+            {
+              "expression": "sharedAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Chat\".\"shareScope\" = 'authenticated' and \"Chat\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "Chat_userId_User_id_fk": {
+          "name": "Chat_userId_User_id_fk",
+          "tableFrom": "Chat",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "Chat_forkedFromChatId_Chat_id_fk": {
+          "name": "Chat_forkedFromChatId_Chat_id_fk",
+          "tableFrom": "Chat",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "forkedFromChatId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_chat_status": {
+          "name": "chk_chat_status",
+          "value": "\"Chat\".\"status\" in ('active', 'archived')"
+        },
+        "chk_chat_type": {
+          "name": "chk_chat_type",
+          "value": "\"Chat\".\"chatType\" in ('general', 'analysis', 'pipeline', 'literature')"
+        },
+        "chk_chat_next_seq": {
+          "name": "chk_chat_next_seq",
+          "value": "\"Chat\".\"nextMessageSeq\" >= 1"
+        },
+        "chk_chat_fork_state": {
+          "name": "chk_chat_fork_state",
+          "value": "(\n        (\"Chat\".\"forkedFromChatId\" is null and \"Chat\".\"forkedFromSeq\" is null)\n        or\n        (\"Chat\".\"forkedFromChatId\" is not null and \"Chat\".\"forkedFromSeq\" is not null\n          and \"Chat\".\"forkedFromSeq\" >= 1 and \"Chat\".\"forkedFromChatId\" <> \"Chat\".\"id\")\n      )"
+        },
+        "chk_chat_share_scope": {
+          "name": "chk_chat_share_scope",
+          "value": "\"Chat\".\"shareScope\" in ('private', 'authenticated')"
+        },
+        "chk_chat_share_mode": {
+          "name": "chk_chat_share_mode",
+          "value": "\"Chat\".\"shareMode\" is null or \"Chat\".\"shareMode\" in ('snapshot', 'live')"
+        },
+        "chk_chat_share_state": {
+          "name": "chk_chat_share_state",
+          "value": "(\n        (\"Chat\".\"shareScope\" = 'private' and \"Chat\".\"shareMode\" is null\n          and \"Chat\".\"sharedThroughSeq\" is null and \"Chat\".\"sharedAt\" is null\n          and \"Chat\".\"shareSlug\" is null)\n        or\n        (\"Chat\".\"shareScope\" = 'authenticated' and \"Chat\".\"shareMode\" = 'snapshot'\n          and \"Chat\".\"sharedThroughSeq\" is not null and \"Chat\".\"sharedThroughSeq\" >= 1\n          and \"Chat\".\"sharedThroughSeq\" < \"Chat\".\"nextMessageSeq\"\n          and \"Chat\".\"sharedAt\" is not null and \"Chat\".\"shareSlug\" is not null)\n        or\n        (\"Chat\".\"shareScope\" = 'authenticated' and \"Chat\".\"shareMode\" = 'live'\n          and \"Chat\".\"sharedThroughSeq\" is null and \"Chat\".\"sharedAt\" is not null\n          and \"Chat\".\"shareSlug\" is not null)\n      )"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Generation": {
+      "name": "Generation",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "userMessageId": {
+          "name": "userMessageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "assistantMessageId": {
+          "name": "assistantMessageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "supersedesGenerationId": {
+          "name": "supersedesGenerationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model": {
+          "name": "model",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requestId": {
+          "name": "requestId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "providerRequestId": {
+          "name": "providerRequestId",
+          "type": "varchar(256)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "startedAt": {
+          "name": "startedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cancelRequestedAt": {
+          "name": "cancelRequestedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cancelSource": {
+          "name": "cancelSource",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "inputTokens": {
+          "name": "inputTokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "outputTokens": {
+          "name": "outputTokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "cachedInputTokens": {
+          "name": "cachedInputTokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "reasoningTokens": {
+          "name": "reasoningTokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "providerCostUsd": {
+          "name": "providerCostUsd",
+          "type": "numeric(18, 8)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "latencyMs": {
+          "name": "latencyMs",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "timeToFirstTokenMs": {
+          "name": "timeToFirstTokenMs",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finishReason": {
+          "name": "finishReason",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "errorCode": {
+          "name": "errorCode",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "errorMessage": {
+          "name": "errorMessage",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "finishedAt": {
+          "name": "finishedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_generation_supersedes": {
+          "name": "idx_generation_supersedes",
+          "columns": [
+            {
+              "expression": "supersedesGenerationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Generation\".\"supersedesGenerationId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_generation_user_created": {
+          "name": "idx_generation_user_created",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Generation\".\"userId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_generation_chat": {
+          "name": "idx_generation_chat",
+          "columns": [
+            {
+              "expression": "chatId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Generation\".\"chatId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_generation_model": {
+          "name": "idx_generation_model",
+          "columns": [
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "model",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "uq_generation_assistant_message": {
+          "name": "uq_generation_assistant_message",
+          "columns": [
+            {
+              "expression": "assistantMessageId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"Generation\".\"assistantMessageId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "uq_generation_chat_active": {
+          "name": "uq_generation_chat_active",
+          "columns": [
+            {
+              "expression": "chatId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"Generation\".\"chatId\" is not null and \"Generation\".\"status\" in ('pending', 'streaming')\n          and \"Generation\".\"cancelRequestedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "Generation_chatId_Chat_id_fk": {
+          "name": "Generation_chatId_Chat_id_fk",
+          "tableFrom": "Generation",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "chatId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "Generation_userId_User_id_fk": {
+          "name": "Generation_userId_User_id_fk",
+          "tableFrom": "Generation",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "Generation_userMessageId_Message_id_fk": {
+          "name": "Generation_userMessageId_Message_id_fk",
+          "tableFrom": "Generation",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "userMessageId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "Generation_assistantMessageId_Message_id_fk": {
+          "name": "Generation_assistantMessageId_Message_id_fk",
+          "tableFrom": "Generation",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "assistantMessageId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "Generation_supersedesGenerationId_Generation_id_fk": {
+          "name": "Generation_supersedesGenerationId_Generation_id_fk",
+          "tableFrom": "Generation",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "supersedesGenerationId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_generation_request_id": {
+          "name": "uq_generation_request_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "requestId"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_generation_status": {
+          "name": "chk_generation_status",
+          "value": "\"Generation\".\"status\" in ('pending', 'streaming', 'completed', 'failed', 'cancelled')"
+        },
+        "chk_generation_tokens": {
+          "name": "chk_generation_tokens",
+          "value": "\"Generation\".\"inputTokens\" >= 0 and \"Generation\".\"outputTokens\" >= 0\n        and \"Generation\".\"cachedInputTokens\" >= 0 and \"Generation\".\"reasoningTokens\" >= 0"
+        },
+        "chk_generation_cost": {
+          "name": "chk_generation_cost",
+          "value": "\"Generation\".\"providerCostUsd\" is null or \"Generation\".\"providerCostUsd\" >= 0"
+        },
+        "chk_generation_latency": {
+          "name": "chk_generation_latency",
+          "value": "(\"Generation\".\"latencyMs\" is null or \"Generation\".\"latencyMs\" >= 0)\n        and (\"Generation\".\"timeToFirstTokenMs\" is null or \"Generation\".\"timeToFirstTokenMs\" >= 0)"
+        },
+        "chk_generation_cancel_source": {
+          "name": "chk_generation_cancel_source",
+          "value": "\"Generation\".\"cancelSource\" is null or \"Generation\".\"cancelSource\" in (\n        'user_stop', 'superseded', 'timeout', 'server_shutdown', 'system'\n      )"
+        },
+        "chk_generation_cancel_fields": {
+          "name": "chk_generation_cancel_fields",
+          "value": "(\"Generation\".\"cancelRequestedAt\" is null and \"Generation\".\"cancelSource\" is null)\n        or (\"Generation\".\"cancelRequestedAt\" is not null and \"Generation\".\"cancelSource\" is not null)"
+        },
+        "chk_generation_finished_at": {
+          "name": "chk_generation_finished_at",
+          "value": "(\"Generation\".\"status\" in ('completed', 'failed', 'cancelled') and \"Generation\".\"finishedAt\" is not null)\n        or (\"Generation\".\"status\" in ('pending', 'streaming') and \"Generation\".\"finishedAt\" is null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.JobEvent": {
+      "name": "JobEvent",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "jobId": {
+          "name": "jobId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "eventType": {
+          "name": "eventType",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "data": {
+          "name": "data",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_job_event_job": {
+          "name": "idx_job_event_job",
+          "columns": [
+            {
+              "expression": "jobId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "JobEvent_jobId_AnalysisJob_id_fk": {
+          "name": "JobEvent_jobId_AnalysisJob_id_fk",
+          "tableFrom": "JobEvent",
+          "tableTo": "AnalysisJob",
+          "columnsFrom": [
+            "jobId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.MessageAttachment": {
+      "name": "MessageAttachment",
+      "schema": "",
+      "columns": {
+        "messageId": {
+          "name": "messageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attachmentId": {
+          "name": "attachmentId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "position": {
+          "name": "position",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "idx_message_attachment_attachment": {
+          "name": "idx_message_attachment_attachment",
+          "columns": [
+            {
+              "expression": "attachmentId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "MessageAttachment_messageId_Message_id_fk": {
+          "name": "MessageAttachment_messageId_Message_id_fk",
+          "tableFrom": "MessageAttachment",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "messageId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "MessageAttachment_attachmentId_Attachment_id_fk": {
+          "name": "MessageAttachment_attachmentId_Attachment_id_fk",
+          "tableFrom": "MessageAttachment",
+          "tableTo": "Attachment",
+          "columnsFrom": [
+            "attachmentId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "MessageAttachment_messageId_attachmentId_pk": {
+          "name": "MessageAttachment_messageId_attachmentId_pk",
+          "columns": [
+            "messageId",
+            "attachmentId"
+          ]
+        }
+      },
+      "uniqueConstraints": {
+        "uq_message_attachment_position": {
+          "name": "uq_message_attachment_position",
+          "nullsNotDistinct": false,
+          "columns": [
+            "messageId",
+            "position"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_message_attachment_position": {
+          "name": "chk_message_attachment_position",
+          "value": "\"MessageAttachment\".\"position\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Message": {
+      "name": "Message",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "seq": {
+          "name": "seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'completed'"
+        },
+        "parts": {
+          "name": "parts",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "sharedText": {
+          "name": "sharedText",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "clientMessageId": {
+          "name": "clientMessageId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "uq_message_client_id": {
+          "name": "uq_message_client_id",
+          "columns": [
+            {
+              "expression": "chatId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "clientMessageId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"Message\".\"clientMessageId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "Message_chatId_Chat_id_fk": {
+          "name": "Message_chatId_Chat_id_fk",
+          "tableFrom": "Message",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "chatId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_message_chat_seq": {
+          "name": "uq_message_chat_seq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "chatId",
+            "seq"
+          ]
+        },
+        "uq_message_id_chat": {
+          "name": "uq_message_id_chat",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "chatId"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_message_role": {
+          "name": "chk_message_role",
+          "value": "\"Message\".\"role\" in ('user', 'assistant', 'system', 'tool')"
+        },
+        "chk_message_seq": {
+          "name": "chk_message_seq",
+          "value": "\"Message\".\"seq\" >= 1"
+        },
+        "chk_message_status": {
+          "name": "chk_message_status",
+          "value": "(\n        (\"Message\".\"role\" = 'assistant' and \"Message\".\"status\" in ('completed', 'cancelled', 'failed'))\n        or (\"Message\".\"role\" <> 'assistant' and \"Message\".\"status\" = 'completed')\n      )"
+        },
+        "chk_message_shared_text": {
+          "name": "chk_message_shared_text",
+          "value": "\"Message\".\"sharedText\" is null or (\n        \"Message\".\"role\" in ('user', 'assistant') and \"Message\".\"status\" = 'completed'\n      )"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.Stream": {
+      "name": "Stream",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "generationId": {
+          "name": "generationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now() + interval '24 hours'"
+        }
+      },
+      "indexes": {
+        "uq_stream_generation": {
+          "name": "uq_stream_generation",
+          "columns": [
+            {
+              "expression": "generationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_stream_expiry": {
+          "name": "idx_stream_expiry",
+          "columns": [
+            {
+              "expression": "expiresAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "Stream_generationId_Generation_id_fk": {
+          "name": "Stream_generationId_Generation_id_fk",
+          "tableFrom": "Stream",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "generationId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_stream_expiry": {
+          "name": "chk_stream_expiry",
+          "value": "\"Stream\".\"expiresAt\" > \"Stream\".\"createdAt\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.ToolRun": {
+      "name": "ToolRun",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "generationId": {
+          "name": "generationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "toolCallId": {
+          "name": "toolCallId",
+          "type": "varchar(256)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "toolName": {
+          "name": "toolName",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "input": {
+          "name": "input",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "outputSummary": {
+          "name": "outputSummary",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "startedAt": {
+          "name": "startedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "finishedAt": {
+          "name": "finishedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "uq_tool_run_call": {
+          "name": "uq_tool_run_call",
+          "columns": [
+            {
+              "expression": "generationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "toolCallId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"ToolRun\".\"toolCallId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_tool_run_generation": {
+          "name": "idx_tool_run_generation",
+          "columns": [
+            {
+              "expression": "generationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "startedAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_tool_run_name": {
+          "name": "idx_tool_run_name",
+          "columns": [
+            {
+              "expression": "toolName",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "startedAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "ToolRun_generationId_Generation_id_fk": {
+          "name": "ToolRun_generationId_Generation_id_fk",
+          "tableFrom": "ToolRun",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "generationId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_tool_run_status": {
+          "name": "chk_tool_run_status",
+          "value": "\"ToolRun\".\"status\" in ('pending', 'running', 'completed', 'failed', 'cancelled')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.UsageEvent": {
+      "name": "UsageEvent",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "generationId": {
+          "name": "generationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "inputTokens": {
+          "name": "inputTokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "outputTokens": {
+          "name": "outputTokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "totalTokens": {
+          "name": "totalTokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "\"inputTokens\" + \"outputTokens\"",
+            "type": "stored"
+          }
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "uq_usage_generation": {
+          "name": "uq_usage_generation",
+          "columns": [
+            {
+              "expression": "generationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"UsageEvent\".\"generationId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_usage_user_created": {
+          "name": "idx_usage_user_created",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "UsageEvent_userId_User_id_fk": {
+          "name": "UsageEvent_userId_User_id_fk",
+          "tableFrom": "UsageEvent",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "UsageEvent_generationId_Generation_id_fk": {
+          "name": "UsageEvent_generationId_Generation_id_fk",
+          "tableFrom": "UsageEvent",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "generationId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "chk_usage_tokens": {
+          "name": "chk_usage_tokens",
+          "value": "\"UsageEvent\".\"inputTokens\" >= 0 and \"UsageEvent\".\"outputTokens\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.User": {
+      "name": "User",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "externalUserId": {
+          "name": "externalUserId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "externalTeamId": {
+          "name": "externalTeamId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "realName": {
+          "name": "realName",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "userName": {
+          "name": "userName",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "jobTitle": {
+          "name": "jobTitle",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "researchField": {
+          "name": "researchField",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "phone": {
+          "name": "phone",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "gpas2Role": {
+          "name": "gpas2Role",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "email": {
+          "name": "email",
+          "type": "varchar(320)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "image": {
+          "name": "image",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "deletedAt": {
+          "name": "deletedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_user_team": {
+          "name": "idx_user_team",
+          "columns": [
+            {
+              "expression": "externalTeamId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"User\".\"externalTeamId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "User_externalUserId_unique": {
+          "name": "User_externalUserId_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "externalUserId"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.Vote": {
+      "name": "Vote",
+      "schema": "",
+      "columns": {
+        "messageId": {
+          "name": "messageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "isUpvoted": {
+          "name": "isUpvoted",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "Vote_messageId_Message_id_fk": {
+          "name": "Vote_messageId_Message_id_fk",
+          "tableFrom": "Vote",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "messageId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "Vote_userId_User_id_fk": {
+          "name": "Vote_userId_User_id_fk",
+          "tableFrom": "Vote",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "Vote_messageId_userId_pk": {
+          "name": "Vote_messageId_userId_pk",
+          "columns": [
+            "messageId",
+            "userId"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {
+    "public.SharedArtifact": {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "messageId": {
+          "name": "messageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "artifactType": {
+          "name": "artifactType",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "format": {
+          "name": "format",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'generating'"
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mimeType": {
+          "name": "mimeType",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sizeBytes": {
+          "name": "sizeBytes",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "definition": "select \"Artifact\".\"id\", \"Artifact\".\"chatId\", \"Artifact\".\"messageId\", \"Artifact\".\"title\", \"Artifact\".\"artifactType\", \"Artifact\".\"format\", \"Artifact\".\"status\", \"Artifact\".\"content\", \"Artifact\".\"mimeType\", \"Artifact\".\"sizeBytes\", \"Artifact\".\"storageKey\" is not null as \"hasStoredContent\", \"Artifact\".\"createdAt\", \"Artifact\".\"updatedAt\", \"Artifact\".\"expiresAt\" from \"Artifact\" inner join \"Message\" on \"Message\".\"id\" = \"Artifact\".\"messageId\" and \"Message\".\"chatId\" = \"Artifact\".\"chatId\" inner join \"Chat\" on \"Chat\".\"id\" = \"Artifact\".\"chatId\" where \n      \"Chat\".\"shareScope\" = 'authenticated'\n      and \"Chat\".\"deletedAt\" is null\n      and \"Artifact\".\"isChatShareable\" = true\n      and \"Artifact\".\"status\" = 'ready'\n      and \"Message\".\"status\" = 'completed'\n      and \"Artifact\".\"deletedAt\" is null\n      and (\"Artifact\".\"expiresAt\" is null or \"Artifact\".\"expiresAt\" > now())\n      and (\n        \"Chat\".\"shareMode\" = 'live'\n        or (\"Chat\".\"shareMode\" = 'snapshot' and \"Message\".\"seq\" <= \"Chat\".\"sharedThroughSeq\")\n      )\n    ",
+      "name": "SharedArtifact",
+      "schema": "public",
+      "isExisting": false,
+      "materialized": false
+    },
+    "public.SharedChatMessage": {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "seq": {
+          "name": "seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sharedText": {
+          "name": "sharedText",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "definition": "select \"Message\".\"id\", \"Message\".\"chatId\", \"Message\".\"seq\", \"Message\".\"role\", \"Message\".\"sharedText\", \"Message\".\"createdAt\" from \"Message\" inner join \"Chat\" on \"Chat\".\"id\" = \"Message\".\"chatId\" where \n      \"Chat\".\"shareScope\" = 'authenticated'\n      and \"Chat\".\"deletedAt\" is null\n      and \"Message\".\"role\" in ('user', 'assistant')\n      and \"Message\".\"status\" = 'completed'\n      and \"Message\".\"sharedText\" is not null\n      and (\n        \"Chat\".\"shareMode\" = 'live'\n        or (\"Chat\".\"shareMode\" = 'snapshot' and \"Message\".\"seq\" <= \"Chat\".\"sharedThroughSeq\")\n      )\n    ",
+      "name": "SharedChatMessage",
+      "schema": "public",
+      "isExisting": false,
+      "materialized": false
+    },
+    "public.SharedChat": {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "chatType": {
+          "name": "chatType",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'general'"
+        },
+        "shareMode": {
+          "name": "shareMode",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sharedThroughSeq": {
+          "name": "sharedThroughSeq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sharedAt": {
+          "name": "sharedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "shareSlug": {
+          "name": "shareSlug",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "definition": "select \"id\", \"userId\" as \"ownerUserId\", \"title\", \"chatType\", \"shareMode\", \"sharedThroughSeq\", \"sharedAt\", \"shareSlug\", \"createdAt\", \"updatedAt\" from \"Chat\" where \"Chat\".\"shareScope\" = 'authenticated' and \"Chat\".\"deletedAt\" is null",
+      "name": "SharedChat",
+      "schema": "public",
+      "isExisting": false,
+      "materialized": false
+    }
+  },
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

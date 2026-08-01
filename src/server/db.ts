@@ -1,7 +1,18 @@
-import { readFile } from 'node:fs/promises'
-import path from 'node:path'
-import type { PoolClient, QueryResultRow } from 'pg'
-import pg from 'pg'
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  notExists,
+  or,
+  sql,
+} from 'drizzle-orm'
+import { alias } from 'drizzle-orm/pg-core'
 
 import type {
   ActiveGenerationDto,
@@ -12,169 +23,138 @@ import type {
   GenerationDto,
   Gpas2UserInfo,
 } from './domain.js'
+import {
+  chats,
+  generations,
+  messages,
+  streams,
+  usageEvents,
+  users,
+  votes,
+} from './db/schema.js'
+import type { MessagePart } from './db/schema.js'
+import type { Database } from './db/client.js'
 
-const { Pool } = pg
+export {
+  checkDatabase,
+  closeDatabase,
+  createDatabase,
+  migrateDatabase,
+  verifyCoreSchema,
+} from './db/client.js'
+export type { Database } from './db/client.js'
 
-export type Database = InstanceType<typeof Pool>
-
-type UserRow = QueryResultRow & {
+type MessageRow = {
   id: string
-  externalUserId: string
-  externalTeamId: string | null
-  realName: string | null
-  userName: string | null
-  jobTitle: string | null
-  researchField: string | null
-  email: string | null
-  name: string | null
-  image: string | null
-  gpas2Role: number | null
+  seq: bigint
+  role: string
+  status: string
+  parts: MessagePart[]
+  createdAt: Date
+  isUpvoted?: boolean | null
 }
 
-function asIso(value: Date | string): string {
-  return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
+type GenerationRow = {
+  id: string
+  chatId: string | null
+  streamId: string | null
+  status: string
+  provider: string
+  model: string
+  inputTokens: bigint
+  outputTokens: bigint
+  errorCode: string | null
+  errorMessage: string | null
+  startedAt: Date | null
+  cancelRequestedAt: Date | null
+  cancelSource: string | null
+  createdAt: Date
+  finishedAt: Date | null
 }
 
-export function createDatabase(databaseUrl: string): Database {
-  return new Pool({
-    connectionString: databaseUrl,
-    max: 10,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 5_000,
-  })
+const chatSelection = {
+  id: chats.id,
+  title: chats.title,
+  chatType: chats.chatType,
+  status: chats.status,
+  createdAt: chats.createdAt,
+  updatedAt: chats.updatedAt,
 }
 
-export async function withTransaction<T>(
-  database: Database,
-  operation: (client: PoolClient) => Promise<T>,
-): Promise<T> {
-  const client = await database.connect()
+const generationColumns = {
+  id: generations.id,
+  chatId: generations.chatId,
+  status: generations.status,
+  provider: generations.provider,
+  model: generations.model,
+  inputTokens: generations.inputTokens,
+  outputTokens: generations.outputTokens,
+  errorCode: generations.errorCode,
+  errorMessage: generations.errorMessage,
+  startedAt: generations.startedAt,
+  cancelRequestedAt: generations.cancelRequestedAt,
+  cancelSource: generations.cancelSource,
+  createdAt: generations.createdAt,
+  finishedAt: generations.finishedAt,
+}
 
-  try {
-    await client.query('BEGIN')
-    const result = await operation(client)
-    await client.query('COMMIT')
-    return result
-  } catch (error) {
-    await client.query('ROLLBACK')
-    throw error
-  } finally {
-    client.release()
+function asIso(value: Date): string {
+  return value.toISOString()
+}
+
+function toSafeNumber(value: bigint | number | string, field: string): number {
+  const result = typeof value === 'number' ? value : Number(value)
+
+  if (!Number.isSafeInteger(result)) {
+    throw new RangeError(`${field} exceeds the JavaScript safe integer range`)
   }
-}
 
-export async function applySchema(database: Database, schemaPath?: string): Promise<void> {
-  const targetPath =
-    schemaPath ||
-    path.resolve(process.cwd(), 'gpas2_chatbot_schema.sql')
-  const schema = await readFile(targetPath, 'utf8')
-  await database.query(schema)
-}
-
-export async function verifyCoreSchema(database: Database): Promise<void> {
-  try {
-    await database.query(
-      `SELECT 1
-         FROM "User" u
-         LEFT JOIN "Chat" c ON false
-         LEFT JOIN "Message_v2" m
-           ON m."status" = 'completed' AND false
-         LEFT JOIN "Generation" g
-           ON g."cancelRequestedAt" IS NULL AND false
-         LEFT JOIN "Stream" s
-           ON s."generationId" = g."id" AND false
-         LEFT JOIN "UsageEvent" e ON false
-        LIMIT 1`,
-    )
-  } catch (error) {
-    if (
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === '42P01'
-    ) {
-      throw new Error(
-        'Database schema is missing. Run `npm run db:schema` before starting the development server.',
-        { cause: error },
-      )
-    }
-
-    throw error
-  }
+  return result
 }
 
 export async function syncUser(
   database: Database,
   profile: Gpas2UserInfo,
 ): Promise<CurrentUser> {
-  const result = await database.query<UserRow>(
-    `INSERT INTO "User" (
-       "externalUserId",
-       "externalTeamId",
-       "realName",
-       "userName",
-       "jobTitle",
-       "researchField",
-       "phone",
-       "gpas2Role",
-       "email",
-       "name",
-       "image",
-       "deletedAt"
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $3, $10, NULL)
-     ON CONFLICT ("externalUserId")
-     DO UPDATE SET
-       "externalTeamId" = EXCLUDED."externalTeamId",
-       "realName" = EXCLUDED."realName",
-       "userName" = EXCLUDED."userName",
-       "jobTitle" = EXCLUDED."jobTitle",
-       "researchField" = EXCLUDED."researchField",
-       "phone" = EXCLUDED."phone",
-       "gpas2Role" = EXCLUDED."gpas2Role",
-       "email" = EXCLUDED."email",
-       "name" = EXCLUDED."name",
-       "image" = EXCLUDED."image",
-       "deletedAt" = NULL
-     RETURNING
-       "id",
-       "externalUserId",
-       "externalTeamId",
-       "realName",
-       "userName",
-       "jobTitle",
-       "researchField",
-       "email",
-       "name",
-       "image",
-       "gpas2Role"`,
-    [
-      profile.userId,
-      profile.ownteamId || null,
-      profile.realName || null,
-      profile.userName || null,
-      profile.jobTitle || null,
-      profile.researchField || null,
-      profile.phone || null,
-      profile.role ?? null,
-      profile.email || null,
-      profile.image || null,
-    ],
-  )
+  const values = {
+    externalUserId: profile.userId,
+    externalTeamId: profile.ownteamId || null,
+    realName: profile.realName || null,
+    userName: profile.userName || null,
+    jobTitle: profile.jobTitle || null,
+    researchField: profile.researchField || null,
+    phone: profile.phone || null,
+    gpas2Role: profile.role ?? null,
+    email: profile.email || null,
+    name: profile.realName || null,
+    image: profile.image || null,
+    deletedAt: null,
+  }
+  const [row] = await database
+    .insert(users)
+    .values(values)
+    .onConflictDoUpdate({
+      target: users.externalUserId,
+      set: values,
+    })
+    .returning({
+      id: users.id,
+      externalUserId: users.externalUserId,
+      externalTeamId: users.externalTeamId,
+      realName: users.realName,
+      userName: users.userName,
+      jobTitle: users.jobTitle,
+      researchField: users.researchField,
+      email: users.email,
+      name: users.name,
+      image: users.image,
+      gpas2Role: users.gpas2Role,
+    })
 
-  return result.rows[0] as CurrentUser
+  return row
 }
 
-type ChatRow = QueryResultRow & {
-  id: string
-  title: string
-  chatType: string
-  status: string
-  createdAt: Date | string
-  updatedAt: Date | string
-}
-
-function mapChat(row: ChatRow): ChatSummaryDto {
+function mapChat(row: typeof chats.$inferSelect): ChatSummaryDto {
   return {
     id: row.id,
     title: row.title,
@@ -189,17 +169,14 @@ export async function listChats(
   database: Database,
   userId: string,
 ): Promise<ChatSummaryDto[]> {
-  const result = await database.query<ChatRow>(
-    `SELECT "id", "title", "chatType", "status", "createdAt", "updatedAt"
-       FROM "Chat"
-      WHERE "userId" = $1
-        AND "deletedAt" IS NULL
-      ORDER BY "updatedAt" DESC, "id" DESC
-      LIMIT 100`,
-    [userId],
-  )
+  const rows = await database
+    .select(chatSelection)
+    .from(chats)
+    .where(and(eq(chats.userId, userId), isNull(chats.deletedAt)))
+    .orderBy(desc(chats.updatedAt), desc(chats.id))
+    .limit(100)
 
-  return result.rows.map(mapChat)
+  return rows.map((row) => mapChat(row as typeof chats.$inferSelect))
 }
 
 export async function createChat(
@@ -207,14 +184,12 @@ export async function createChat(
   userId: string,
   title: string,
 ): Promise<ChatSummaryDto> {
-  const result = await database.query<ChatRow>(
-    `INSERT INTO "Chat" ("userId", "title")
-     VALUES ($1, $2)
-     RETURNING "id", "title", "chatType", "status", "createdAt", "updatedAt"`,
-    [userId, title],
-  )
+  const [row] = await database
+    .insert(chats)
+    .values({ userId, title })
+    .returning(chatSelection)
 
-  return mapChat(result.rows[0])
+  return mapChat(row as typeof chats.$inferSelect)
 }
 
 export async function renameChat(
@@ -223,17 +198,19 @@ export async function renameChat(
   chatId: string,
   title: string,
 ): Promise<ChatSummaryDto | null> {
-  const result = await database.query<ChatRow>(
-    `UPDATE "Chat"
-        SET "title" = $3
-      WHERE "id" = $1
-        AND "userId" = $2
-        AND "deletedAt" IS NULL
-      RETURNING "id", "title", "chatType", "status", "createdAt", "updatedAt"`,
-    [chatId, userId, title],
-  )
+  const [row] = await database
+    .update(chats)
+    .set({ title })
+    .where(
+      and(
+        eq(chats.id, chatId),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .returning(chatSelection)
 
-  return result.rows[0] ? mapChat(result.rows[0]) : null
+  return row ? mapChat(row as typeof chats.$inferSelect) : null
 }
 
 export async function deleteChat(
@@ -241,26 +218,19 @@ export async function deleteChat(
   userId: string,
   chatId: string,
 ): Promise<boolean> {
-  const result = await database.query(
-    `UPDATE "Chat"
-        SET "deletedAt" = now()
-      WHERE "id" = $1
-        AND "userId" = $2
-        AND "deletedAt" IS NULL`,
-    [chatId, userId],
-  )
+  const rows = await database
+    .update(chats)
+    .set({ deletedAt: sql`now()` })
+    .where(
+      and(
+        eq(chats.id, chatId),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .returning({ id: chats.id })
 
-  return (result.rowCount ?? 0) > 0
-}
-
-type MessageRow = QueryResultRow & {
-  id: string
-  seq: string | number
-  role: 'user' | 'assistant'
-  status: ChatMessageDto['status']
-  parts: Array<{ type?: string; text?: string }>
-  createdAt: Date | string
-  isUpvoted?: boolean | null
+  return rows.length > 0
 }
 
 export function mapMessage(row: MessageRow): ChatMessageDto {
@@ -273,9 +243,9 @@ export function mapMessage(row: MessageRow): ChatMessageDto {
 
   return {
     id: row.id,
-    seq: Number(row.seq),
-    role: row.role,
-    status: row.status,
+    seq: toSafeNumber(row.seq, 'Message.seq'),
+    role: row.role as ChatMessageDto['role'],
+    status: row.status as ChatMessageDto['status'],
     content,
     createdAt: asIso(row.createdAt),
     vote:
@@ -299,77 +269,33 @@ export function mapMessage(row: MessageRow): ChatMessageDto {
   }
 }
 
-type GenerationRow = QueryResultRow & {
-  id: string
-  chatId: string | null
-  streamId: string | null
-  status: GenerationDto['status']
-  provider: string
-  model: string
-  inputTokens: string | number
-  outputTokens: string | number
-  errorCode: string | null
-  errorMessage: string | null
-  startedAt: Date | string | null
-  cancelRequestedAt: Date | string | null
-  cancelSource: GenerationDto['cancelSource']
-  createdAt: Date | string
-  finishedAt: Date | string | null
-}
-
 function mapGeneration(row: GenerationRow): GenerationDto {
+  const status = row.status as GenerationDto['status']
+
   return {
     id: row.id,
     chatId: row.chatId,
     streamId: row.streamId,
-    status: row.status,
+    status,
     effectiveStatus:
-      !['completed', 'failed', 'cancelled'].includes(row.status) &&
+      !['completed', 'failed', 'cancelled'].includes(status) &&
       row.cancelRequestedAt
         ? 'cancelling'
-        : row.status,
+        : status,
     provider: row.provider,
     model: row.model,
-    inputTokens: Number(row.inputTokens),
-    outputTokens: Number(row.outputTokens),
+    inputTokens: toSafeNumber(row.inputTokens, 'Generation.inputTokens'),
+    outputTokens: toSafeNumber(row.outputTokens, 'Generation.outputTokens'),
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,
     startedAt: row.startedAt ? asIso(row.startedAt) : null,
     cancelRequestedAt: row.cancelRequestedAt
       ? asIso(row.cancelRequestedAt)
       : null,
-    cancelSource: row.cancelSource,
+    cancelSource: row.cancelSource as GenerationDto['cancelSource'],
     createdAt: asIso(row.createdAt),
     finishedAt: row.finishedAt ? asIso(row.finishedAt) : null,
   }
-}
-
-const generationSelect = `
-  SELECT
-    g."id",
-    g."chatId",
-    s."id" AS "streamId",
-    g."status",
-    g."provider",
-    g."model",
-    g."inputTokens",
-    g."outputTokens",
-    g."errorCode",
-    g."errorMessage",
-    g."startedAt",
-    g."cancelRequestedAt",
-    g."cancelSource",
-    g."createdAt",
-    g."finishedAt"
-  FROM "Generation" g
-  LEFT JOIN "Stream" s ON s."generationId" = g."id"`
-
-type ActiveGenerationRow = QueryResultRow & {
-  id: string
-  streamId: string
-  status: 'pending' | 'streaming'
-  cancelRequestedAt: Date | string | null
-  replacesMessageId: string | null
 }
 
 export async function getChatDetail(
@@ -377,72 +303,98 @@ export async function getChatDetail(
   userId: string,
   chatId: string,
 ): Promise<ChatDetailDto | null> {
-  const chatResult = await database.query<ChatRow>(
-    `SELECT "id", "title", "chatType", "status", "createdAt", "updatedAt"
-       FROM "Chat"
-      WHERE "id" = $1
-        AND "userId" = $2
-        AND "deletedAt" IS NULL`,
-    [chatId, userId],
-  )
+  const [chat] = await database
+    .select(chatSelection)
+    .from(chats)
+    .where(
+      and(
+        eq(chats.id, chatId),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .limit(1)
 
-  if (!chatResult.rows[0]) {
+  if (!chat) {
     return null
   }
 
-  const [messagesResult, generationResult] = await Promise.all([
-    database.query<MessageRow>(
-      `SELECT m."id", m."seq", m."role", m."status", m."parts", m."createdAt",
-              v."isUpvoted"
-         FROM "Message_v2" m
-         LEFT JOIN "Vote_v2" v
-           ON v."messageId" = m."id" AND v."userId" = $2
-        WHERE m."chatId" = $1
-          AND m."role" IN ('user', 'assistant')
-          AND NOT EXISTS (
-            SELECT 1
-              FROM "Generation" original
-              JOIN "Generation" replacement
-                ON replacement."supersedesGenerationId" = original."id"
-             WHERE original."assistantMessageId" = m."id"
-               AND replacement."status" = 'completed'
-          )
-        ORDER BY m."seq" ASC`,
-      [chatId, userId],
-    ),
-    database.query<ActiveGenerationRow>(
-      `SELECT
-         g."id",
-         s."id" AS "streamId",
-         g."status",
-         g."cancelRequestedAt",
-         replaced."assistantMessageId" AS "replacesMessageId"
-       FROM "Generation" g
-       JOIN "Stream" s ON s."generationId" = g."id"
-       LEFT JOIN "Generation" replaced
-         ON replaced."id" = g."supersedesGenerationId"
-       WHERE g."chatId" = $1
-         AND g."userId" = $2
-         AND g."status" IN ('pending', 'streaming')
-         AND g."cancelRequestedAt" IS NULL
-       ORDER BY g."createdAt" DESC
-       LIMIT 1`,
-      [chatId, userId],
-    ),
+  const original = alias(generations, 'original')
+  const replacement = alias(generations, 'replacement')
+  const replaced = alias(generations, 'replaced')
+
+  const [messageRows, activeRows] = await Promise.all([
+    database
+      .select({
+        id: messages.id,
+        seq: messages.seq,
+        role: messages.role,
+        status: messages.status,
+        parts: messages.parts,
+        createdAt: messages.createdAt,
+        isUpvoted: votes.isUpvoted,
+      })
+      .from(messages)
+      .leftJoin(
+        votes,
+        and(eq(votes.messageId, messages.id), eq(votes.userId, userId)),
+      )
+      .where(
+        and(
+          eq(messages.chatId, chatId),
+          inArray(messages.role, ['user', 'assistant']),
+          notExists(
+            database
+              .select({ value: sql`1` })
+              .from(original)
+              .innerJoin(
+                replacement,
+                eq(replacement.supersedesGenerationId, original.id),
+              )
+              .where(
+                and(
+                  eq(original.assistantMessageId, messages.id),
+                  eq(replacement.status, 'completed'),
+                ),
+              ),
+          ),
+        ),
+      )
+      .orderBy(asc(messages.seq)),
+    database
+      .select({
+        id: generations.id,
+        streamId: streams.id,
+        status: generations.status,
+        replacesMessageId: replaced.assistantMessageId,
+      })
+      .from(generations)
+      .innerJoin(streams, eq(streams.generationId, generations.id))
+      .leftJoin(replaced, eq(replaced.id, generations.supersedesGenerationId))
+      .where(
+        and(
+          eq(generations.chatId, chatId),
+          eq(generations.userId, userId),
+          inArray(generations.status, ['pending', 'streaming']),
+          isNull(generations.cancelRequestedAt),
+        ),
+      )
+      .orderBy(desc(generations.createdAt))
+      .limit(1),
   ])
-  const active = generationResult.rows[0]
+  const active = activeRows[0]
   const activeGeneration: ActiveGenerationDto | null = active
     ? {
         id: active.id,
         streamId: active.streamId,
-        status: active.status,
+        status: active.status as ActiveGenerationDto['status'],
         replacesMessageId: active.replacesMessageId,
       }
     : null
 
   return {
-    ...mapChat(chatResult.rows[0]),
-    messages: messagesResult.rows.map(mapMessage),
+    ...mapChat(chat as typeof chats.$inferSelect),
+    messages: messageRows.map((row) => mapMessage(row)),
     activeGeneration,
   }
 }
@@ -453,24 +405,32 @@ export async function setMessageVote(
   messageId: string,
   isUpvoted: boolean,
 ): Promise<'up' | 'down' | null> {
-  const result = await database.query<{ isUpvoted: boolean }>(
-    `INSERT INTO "Vote_v2" ("messageId", "userId", "isUpvoted")
-     SELECT m."id", $1, $3
-       FROM "Message_v2" m
-       JOIN "Chat" c ON c."id" = m."chatId"
-      WHERE m."id" = $2
-        AND m."role" = 'assistant'
-        AND c."userId" = $1
-        AND c."deletedAt" IS NULL
-     ON CONFLICT ("messageId", "userId")
-     DO UPDATE SET "isUpvoted" = EXCLUDED."isUpvoted", "updatedAt" = now()
-     RETURNING "isUpvoted"`,
-    [userId, messageId, isUpvoted],
-  )
+  const authorizedMessage = database
+    .select({
+      messageId: messages.id,
+      userId: sql<string>`${userId}`.as('userId'),
+      isUpvoted: sql<boolean>`${isUpvoted}`.as('isUpvoted'),
+    })
+    .from(messages)
+    .innerJoin(chats, eq(chats.id, messages.chatId))
+    .where(
+      and(
+        eq(messages.id, messageId),
+        eq(messages.role, 'assistant'),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+  const [row] = await database
+    .insert(votes)
+    .select(authorizedMessage)
+    .onConflictDoUpdate({
+      target: [votes.messageId, votes.userId],
+      set: { isUpvoted, updatedAt: sql`now()` },
+    })
+    .returning({ isUpvoted: votes.isUpvoted })
 
-  return result.rows[0]
-    ? result.rows[0].isUpvoted ? 'up' : 'down'
-    : null
+  return row ? row.isUpvoted ? 'up' : 'down' : null
 }
 
 export async function deleteMessageVote(
@@ -478,19 +438,29 @@ export async function deleteMessageVote(
   userId: string,
   messageId: string,
 ): Promise<boolean> {
-  const result = await database.query(
-    `DELETE FROM "Vote_v2" v
-      USING "Message_v2" m, "Chat" c
-      WHERE v."messageId" = $1
-        AND v."userId" = $2
-        AND m."id" = v."messageId"
-        AND c."id" = m."chatId"
-        AND c."userId" = $2
-        AND c."deletedAt" IS NULL`,
-    [messageId, userId],
-  )
+  const ownedMessage = database
+    .select({ value: sql`1` })
+    .from(messages)
+    .innerJoin(chats, eq(chats.id, messages.chatId))
+    .where(
+      and(
+        eq(messages.id, votes.messageId),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+  const rows = await database
+    .delete(votes)
+    .where(
+      and(
+        eq(votes.messageId, messageId),
+        eq(votes.userId, userId),
+        exists(ownedMessage),
+      ),
+    )
+    .returning({ messageId: votes.messageId })
 
-  return (result.rowCount ?? 0) > 0
+  return rows.length > 0
 }
 
 export async function getRegenerationTarget(
@@ -498,18 +468,21 @@ export async function getRegenerationTarget(
   userId: string,
   messageId: string,
 ): Promise<{ chatId: string } | null> {
-  const result = await database.query<{ chatId: string }>(
-    `SELECT m."chatId"
-       FROM "Message_v2" m
-       JOIN "Chat" c ON c."id" = m."chatId"
-      WHERE m."id" = $1
-        AND m."role" = 'assistant'
-        AND c."userId" = $2
-        AND c."deletedAt" IS NULL`,
-    [messageId, userId],
-  )
+  const [row] = await database
+    .select({ chatId: messages.chatId })
+    .from(messages)
+    .innerJoin(chats, eq(chats.id, messages.chatId))
+    .where(
+      and(
+        eq(messages.id, messageId),
+        eq(messages.role, 'assistant'),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .limit(1)
 
-  return result.rows[0] ?? null
+  return row ?? null
 }
 
 export async function ownsStream(
@@ -517,18 +490,21 @@ export async function ownsStream(
   userId: string,
   streamId: string,
 ): Promise<boolean> {
-  const result = await database.query(
-    `SELECT 1
-       FROM "Stream" s
-       JOIN "Generation" g ON g."id" = s."generationId"
-       JOIN "Chat" c ON c."id" = g."chatId"
-      WHERE s."id" = $1
-        AND g."userId" = $2
-        AND c."deletedAt" IS NULL`,
-    [streamId, userId],
-  )
+  const rows = await database
+    .select({ id: streams.id })
+    .from(streams)
+    .innerJoin(generations, eq(generations.id, streams.generationId))
+    .innerJoin(chats, eq(chats.id, generations.chatId))
+    .where(
+      and(
+        eq(streams.id, streamId),
+        eq(generations.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .limit(1)
 
-  return Boolean(result.rows[0])
+  return rows.length > 0
 }
 
 export type GenerationStart = {
@@ -547,34 +523,31 @@ export async function findGenerationStart(
   chatId: string,
   requestId: string,
 ): Promise<GenerationStart | null> {
-  const result = await database.query<
-    MessageRow & {
-      generationId: string
-      generationStatus: GenerationDto['status']
-      streamId: string
-    }
-  >(
-    `SELECT
-       m."id",
-       m."seq",
-       m."role",
-       m."status",
-       m."parts",
-       m."createdAt",
-       g."id" AS "generationId",
-       g."status" AS "generationStatus",
-       s."id" AS "streamId"
-     FROM "Generation" g
-     JOIN "Chat" c ON c."id" = g."chatId"
-     JOIN "Message_v2" m ON m."id" = g."userMessageId"
-     JOIN "Stream" s ON s."generationId" = g."id"
-    WHERE g."requestId" = $1
-      AND g."chatId" = $2
-      AND g."userId" = $3
-      AND c."deletedAt" IS NULL`,
-    [requestId, chatId, userId],
-  )
-  const row = result.rows[0]
+  const [row] = await database
+    .select({
+      id: messages.id,
+      seq: messages.seq,
+      role: messages.role,
+      status: messages.status,
+      parts: messages.parts,
+      createdAt: messages.createdAt,
+      generationId: generations.id,
+      generationStatus: generations.status,
+      streamId: streams.id,
+    })
+    .from(generations)
+    .innerJoin(chats, eq(chats.id, generations.chatId))
+    .innerJoin(messages, eq(messages.id, generations.userMessageId))
+    .innerJoin(streams, eq(streams.generationId, generations.id))
+    .where(
+      and(
+        eq(generations.requestId, requestId),
+        eq(generations.chatId, chatId),
+        eq(generations.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .limit(1)
 
   return row
     ? {
@@ -582,7 +555,7 @@ export async function findGenerationStart(
         streamId: row.streamId,
         userMessage: mapMessage(row),
         reused: true,
-        status: row.generationStatus,
+        status: row.generationStatus as GenerationDto['status'],
       }
     : null
 }
@@ -602,88 +575,80 @@ export async function createGenerationStart(
     supersedesGenerationId?: string
   },
 ): Promise<GenerationStart> {
-  return withTransaction(database, async (client) => {
+  return database.transaction(async (transaction) => {
     if (input.supersedesGenerationId) {
-      await client.query(
-        `UPDATE "Generation"
-            SET "cancelRequestedAt" = COALESCE("cancelRequestedAt", now()),
-                "cancelSource" = COALESCE("cancelSource", 'superseded')
-          WHERE "id" = $1
-            AND "chatId" = $2
-            AND "userId" = $3
-            AND "status" IN ('pending', 'streaming')`,
-        [
-          input.supersedesGenerationId,
-          input.chatId,
-          input.userId,
-        ],
-      )
+      await transaction
+        .update(generations)
+        .set({
+          cancelRequestedAt: sql`coalesce(${generations.cancelRequestedAt}, now())`,
+          cancelSource: sql`coalesce(${generations.cancelSource}, 'superseded')`,
+        })
+        .where(
+          and(
+            eq(generations.id, input.supersedesGenerationId),
+            eq(generations.chatId, input.chatId),
+            eq(generations.userId, input.userId),
+            inArray(generations.status, ['pending', 'streaming']),
+          ),
+        )
     }
 
-    const sequenceResult = await client.query<{ seq: string }>(
-      `UPDATE "Chat"
-          SET "nextMessageSeq" = "nextMessageSeq" + 1,
-              "contextRevision" = "contextRevision" + 1
-        WHERE "id" = $1
-          AND "userId" = $2
-          AND "deletedAt" IS NULL
-        RETURNING "nextMessageSeq" - 1 AS "seq"`,
-      [input.chatId, input.userId],
-    )
+    const [sequence] = await transaction
+      .update(chats)
+      .set({
+        nextMessageSeq: sql`${chats.nextMessageSeq} + 1`,
+        contextRevision: sql`${chats.contextRevision} + 1`,
+      })
+      .where(
+        and(
+          eq(chats.id, input.chatId),
+          eq(chats.userId, input.userId),
+          isNull(chats.deletedAt),
+        ),
+      )
+      .returning({
+        seq: sql`${chats.nextMessageSeq} - 1`.mapWith(chats.nextMessageSeq),
+      })
 
-    if (!sequenceResult.rows[0]) {
+    if (!sequence) {
       throw new Error('CHAT_NOT_FOUND')
     }
 
-    const messageResult = await client.query<MessageRow>(
-      `INSERT INTO "Message_v2" (
-         "chatId",
-         "seq",
-         "role",
-         "status",
-         "parts",
-         "sharedText",
-         "clientMessageId"
-       )
-       VALUES ($1, $2, 'user', 'completed', $3::jsonb, $4, $5)
-       RETURNING "id", "seq", "role", "status", "parts", "createdAt"`,
-      [
-        input.chatId,
-        sequenceResult.rows[0].seq,
-        JSON.stringify([{ type: 'text', text: input.content }]),
-        input.content,
-        input.clientMessageId,
-      ],
-    )
-    const userMessage = mapMessage(messageResult.rows[0])
+    const [messageRow] = await transaction
+      .insert(messages)
+      .values({
+        chatId: input.chatId,
+        seq: sequence.seq,
+        role: 'user',
+        status: 'completed',
+        parts: [{ type: 'text', text: input.content }],
+        sharedText: input.content,
+        clientMessageId: input.clientMessageId,
+      })
+      .returning({
+        id: messages.id,
+        seq: messages.seq,
+        role: messages.role,
+        status: messages.status,
+        parts: messages.parts,
+        createdAt: messages.createdAt,
+      })
+    const userMessage = mapMessage(messageRow)
 
-    await client.query(
-      `INSERT INTO "Generation" (
-         "id",
-         "chatId",
-         "userId",
-         "userMessageId",
-         "provider",
-         "model",
-         "requestId",
-         "status"
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')`,
-      [
-        input.generationId,
-        input.chatId,
-        input.userId,
-        userMessage.id,
-        input.provider,
-        input.model,
-        input.requestId,
-      ],
-    )
-    await client.query(
-      `INSERT INTO "Stream" ("id", "generationId")
-       VALUES ($1, $2)`,
-      [input.streamId, input.generationId],
-    )
+    await transaction.insert(generations).values({
+      id: input.generationId,
+      chatId: input.chatId,
+      userId: input.userId,
+      userMessageId: userMessage.id,
+      provider: input.provider,
+      model: input.model,
+      requestId: input.requestId,
+      status: 'pending',
+    })
+    await transaction.insert(streams).values({
+      id: input.streamId,
+      generationId: input.generationId,
+    })
 
     return {
       generationId: input.generationId,
@@ -708,71 +673,103 @@ export async function createRegenerationStart(
     model: string
   },
 ): Promise<GenerationStart> {
-  return withTransaction(database, async (client) => {
-    const targetResult = await client.query<
-      MessageRow & { originalGenerationId: string }
-    >(
-      `SELECT user_message."id", user_message."seq", user_message."role",
-              user_message."status", user_message."parts", user_message."createdAt",
-              original."id" AS "originalGenerationId"
-         FROM "Generation" original
-         JOIN "Message_v2" assistant_message
-           ON assistant_message."id" = original."assistantMessageId"
-         JOIN "Message_v2" user_message
-           ON user_message."id" = original."userMessageId"
-         JOIN "Chat" c ON c."id" = original."chatId"
-        WHERE assistant_message."id" = $1
-          AND original."chatId" = $2
-          AND original."userId" = $3
-          AND c."deletedAt" IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM "Generation" active
-             WHERE active."chatId" = original."chatId"
-               AND active."status" IN ('pending', 'streaming')
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM "Message_v2" later
-             WHERE later."chatId" = assistant_message."chatId"
-               AND later."role" = 'assistant'
-               AND later."seq" > assistant_message."seq"
-               AND NOT EXISTS (
-                 SELECT 1
-                   FROM "Generation" old_generation
-                   JOIN "Generation" replacement
-                     ON replacement."supersedesGenerationId" = old_generation."id"
-                  WHERE old_generation."assistantMessageId" = later."id"
-                    AND replacement."status" = 'completed'
-               )
-          )
-        FOR UPDATE OF c`,
-      [input.replacesMessageId, input.chatId, input.userId],
-    )
-    const target = targetResult.rows[0]
+  return database.transaction(async (transaction) => {
+    const original = alias(generations, 'original')
+    const assistantMessage = alias(messages, 'assistant_message')
+    const userMessage = alias(messages, 'user_message')
+    const active = alias(generations, 'active')
+    const later = alias(messages, 'later')
+    const oldGeneration = alias(generations, 'old_generation')
+    const replacement = alias(generations, 'replacement')
+
+    const [target] = await transaction
+      .select({
+        id: userMessage.id,
+        seq: userMessage.seq,
+        role: userMessage.role,
+        status: userMessage.status,
+        parts: userMessage.parts,
+        createdAt: userMessage.createdAt,
+        originalGenerationId: original.id,
+      })
+      .from(original)
+      .innerJoin(
+        assistantMessage,
+        eq(assistantMessage.id, original.assistantMessageId),
+      )
+      .innerJoin(userMessage, eq(userMessage.id, original.userMessageId))
+      .innerJoin(chats, eq(chats.id, original.chatId))
+      .where(
+        and(
+          eq(assistantMessage.id, input.replacesMessageId),
+          eq(original.chatId, input.chatId),
+          eq(original.userId, input.userId),
+          isNull(chats.deletedAt),
+          notExists(
+            transaction
+              .select({ value: sql`1` })
+              .from(active)
+              .where(
+                and(
+                  eq(active.chatId, original.chatId),
+                  inArray(active.status, ['pending', 'streaming']),
+                ),
+              ),
+          ),
+          notExists(
+            transaction
+              .select({ value: sql`1` })
+              .from(later)
+              .where(
+                and(
+                  eq(later.chatId, assistantMessage.chatId),
+                  eq(later.role, 'assistant'),
+                  sql`${later.seq} > ${assistantMessage.seq}`,
+                  notExists(
+                    transaction
+                      .select({ value: sql`1` })
+                      .from(oldGeneration)
+                      .innerJoin(
+                        replacement,
+                        eq(
+                          replacement.supersedesGenerationId,
+                          oldGeneration.id,
+                        ),
+                      )
+                      .where(
+                        and(
+                          eq(oldGeneration.assistantMessageId, later.id),
+                          eq(replacement.status, 'completed'),
+                        ),
+                      ),
+                  ),
+                ),
+              ),
+          ),
+        ),
+      )
+      .for('update', { of: chats })
+      .limit(1)
 
     if (!target) {
       throw new Error('REGENERATION_TARGET_INVALID')
     }
 
-    await client.query(
-      `INSERT INTO "Generation" (
-         "id", "chatId", "userId", "userMessageId",
-         "supersedesGenerationId", "provider", "model", "requestId", "status"
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`,
-      [
-        input.generationId,
-        input.chatId,
-        input.userId,
-        target.id,
-        target.originalGenerationId,
-        input.provider,
-        input.model,
-        input.requestId,
-      ],
-    )
-    await client.query(
-      `INSERT INTO "Stream" ("id", "generationId") VALUES ($1, $2)`,
-      [input.streamId, input.generationId],
-    )
+    await transaction.insert(generations).values({
+      id: input.generationId,
+      chatId: input.chatId,
+      userId: input.userId,
+      userMessageId: target.id,
+      supersedesGenerationId: target.originalGenerationId,
+      provider: input.provider,
+      model: input.model,
+      requestId: input.requestId,
+      status: 'pending',
+    })
+    await transaction.insert(streams).values({
+      id: input.streamId,
+      generationId: input.generationId,
+    })
 
     return {
       generationId: input.generationId,
@@ -781,7 +778,7 @@ export async function createRegenerationStart(
       reused: false,
       status: 'pending',
       replacesMessageId: input.replacesMessageId,
-      contextMaxSeq: Number(target.seq),
+      contextMaxSeq: toSafeNumber(target.seq, 'Message.seq'),
     }
   })
 }
@@ -804,49 +801,71 @@ export async function rebuildChatContext(
   chatId: string,
   maxSeq?: number,
 ): Promise<ChatContext | null> {
-  const chatResult = await database.query<{
-    contextRevision: string | number
-  }>(
-    `SELECT "contextRevision"
-       FROM "Chat"
-      WHERE "id" = $1
-        AND "userId" = $2
-        AND "deletedAt" IS NULL`,
-    [chatId, userId],
-  )
+  const [chat] = await database
+    .select({ contextRevision: chats.contextRevision })
+    .from(chats)
+    .where(
+      and(
+        eq(chats.id, chatId),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .limit(1)
 
-  if (!chatResult.rows[0]) {
+  if (!chat) {
     return null
   }
 
-  const messagesResult = await database.query<MessageRow>(
-    `SELECT "id", "seq", "role", "status", "parts", "createdAt"
-       FROM "Message_v2"
-      WHERE "chatId" = $1
-        AND ($2::bigint IS NULL OR "seq" <= $2)
-        AND (
-          "role" = 'user'
-          OR ("role" = 'assistant' AND "status" = 'completed')
+  const original = alias(generations, 'original')
+  const replacement = alias(generations, 'replacement')
+  const conditions = [
+    eq(messages.chatId, chatId),
+    or(
+      eq(messages.role, 'user'),
+      and(eq(messages.role, 'assistant'), eq(messages.status, 'completed')),
+    ),
+    notExists(
+      database
+        .select({ value: sql`1` })
+        .from(original)
+        .innerJoin(
+          replacement,
+          eq(replacement.supersedesGenerationId, original.id),
         )
-        AND NOT EXISTS (
-          SELECT 1
-            FROM "Generation" original
-            JOIN "Generation" replacement
-              ON replacement."supersedesGenerationId" = original."id"
-           WHERE original."assistantMessageId" = "Message_v2"."id"
-             AND replacement."status" = 'completed'
-        )
-      ORDER BY "seq" DESC
-      LIMIT 80`,
-    [chatId, maxSeq ?? null],
-  )
-  const messages = messagesResult.rows.reverse().map(mapMessage)
+        .where(
+          and(
+            eq(original.assistantMessageId, messages.id),
+            eq(replacement.status, 'completed'),
+          ),
+        ),
+    ),
+  ]
+
+  if (maxSeq !== undefined) {
+    conditions.push(lte(messages.seq, BigInt(maxSeq)))
+  }
+
+  const rows = await database
+    .select({
+      id: messages.id,
+      seq: messages.seq,
+      role: messages.role,
+      status: messages.status,
+      parts: messages.parts,
+      createdAt: messages.createdAt,
+    })
+    .from(messages)
+    .where(and(...conditions))
+    .orderBy(desc(messages.seq))
+    .limit(80)
+  const mappedMessages = rows.reverse().map((row) => mapMessage(row))
 
   return {
     chatId,
-    revision: Number(chatResult.rows[0].contextRevision),
-    lastSeq: messages.at(-1)?.seq ?? 0,
-    messages: messages.map((message) => ({
+    revision: toSafeNumber(chat.contextRevision, 'Chat.contextRevision'),
+    lastSeq: mappedMessages.at(-1)?.seq ?? 0,
+    messages: mappedMessages.map((message) => ({
       role: message.role,
       content: message.content,
     })),
@@ -858,19 +877,20 @@ export async function getChatContextRevision(
   userId: string,
   chatId: string,
 ): Promise<number | null> {
-  const result = await database.query<{
-    contextRevision: string | number
-  }>(
-    `SELECT "contextRevision"
-       FROM "Chat"
-      WHERE "id" = $1
-        AND "userId" = $2
-        AND "deletedAt" IS NULL`,
-    [chatId, userId],
-  )
+  const [row] = await database
+    .select({ contextRevision: chats.contextRevision })
+    .from(chats)
+    .where(
+      and(
+        eq(chats.id, chatId),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .limit(1)
 
-  return result.rows[0]
-    ? Number(result.rows[0].contextRevision)
+  return row
+    ? toSafeNumber(row.contextRevision, 'Chat.contextRevision')
     : null
 }
 
@@ -879,38 +899,41 @@ export async function markGenerationStreaming(
   generationId: string,
   providerRequestId?: string,
 ): Promise<boolean> {
-  const result = await database.query(
-    `UPDATE "Generation"
-        SET "status" = 'streaming',
-            "startedAt" = COALESCE("startedAt", now()),
-            "providerRequestId" = COALESCE($2, "providerRequestId")
-      WHERE "id" = $1
-        AND "status" = 'pending'
-        AND "cancelRequestedAt" IS NULL`,
-    [generationId, providerRequestId || null],
-  )
+  const rows = await database
+    .update(generations)
+    .set({
+      status: 'streaming',
+      startedAt: sql`coalesce(${generations.startedAt}, now())`,
+      ...(providerRequestId ? { providerRequestId } : {}),
+    })
+    .where(
+      and(
+        eq(generations.id, generationId),
+        eq(generations.status, 'pending'),
+        isNull(generations.cancelRequestedAt),
+      ),
+    )
+    .returning({ id: generations.id })
 
-  return (result.rowCount ?? 0) > 0
+  return rows.length > 0
 }
 
 export async function isGenerationCancellationRequested(
   database: Database,
   generationId: string,
 ): Promise<boolean> {
-  const result = await database.query<{
-    cancelRequested: boolean
-  }>(
-    `SELECT
-       (
-         "cancelRequestedAt" IS NOT NULL
-         OR "status" = 'cancelled'
-       ) AS "cancelRequested"
-     FROM "Generation"
-     WHERE "id" = $1`,
-    [generationId],
-  )
+  const [row] = await database
+    .select({
+      cancelRequestedAt: generations.cancelRequestedAt,
+      status: generations.status,
+    })
+    .from(generations)
+    .where(eq(generations.id, generationId))
+    .limit(1)
 
-  return result.rows[0]?.cancelRequested ?? true
+  return row
+    ? row.cancelRequestedAt !== null || row.status === 'cancelled'
+    : true
 }
 
 export async function getGeneration(
@@ -918,31 +941,40 @@ export async function getGeneration(
   userId: string,
   generationId: string,
 ): Promise<GenerationDto | null> {
-  const result = await database.query<GenerationRow>(
-    `${generationSelect}
-     WHERE g."id" = $1
-       AND g."userId" = $2`,
-    [generationId, userId],
-  )
+  const [row] = await database
+    .select({ ...generationColumns, streamId: streams.id })
+    .from(generations)
+    .leftJoin(streams, eq(streams.generationId, generations.id))
+    .where(
+      and(
+        eq(generations.id, generationId),
+        eq(generations.userId, userId),
+      ),
+    )
+    .limit(1)
 
-  return result.rows[0] ? mapGeneration(result.rows[0]) : null
+  return row ? mapGeneration(row) : null
 }
 
 export async function requestGenerationCancellation(
   database: Database,
   userId: string,
   generationId: string,
-  source: GenerationDto['cancelSource'] = 'user_stop',
+  source: NonNullable<GenerationDto['cancelSource']> = 'user_stop',
 ): Promise<GenerationDto | null> {
-  await database.query(
-    `UPDATE "Generation"
-        SET "cancelRequestedAt" = COALESCE("cancelRequestedAt", now()),
-            "cancelSource" = COALESCE("cancelSource", $3)
-      WHERE "id" = $1
-        AND "userId" = $2
-        AND "status" IN ('pending', 'streaming')`,
-    [generationId, userId, source],
-  )
+  await database
+    .update(generations)
+    .set({
+      cancelRequestedAt: sql`coalesce(${generations.cancelRequestedAt}, now())`,
+      cancelSource: sql`coalesce(${generations.cancelSource}, ${source})`,
+    })
+    .where(
+      and(
+        eq(generations.id, generationId),
+        eq(generations.userId, userId),
+        inArray(generations.status, ['pending', 'streaming']),
+      ),
+    )
 
   return getGeneration(database, userId, generationId)
 }
@@ -979,12 +1011,8 @@ export function decideGenerationTerminalStatus(
   cancelRequestedAt: Date | string | null,
   desiredStatus: 'completed' | 'failed',
 ): 'completed' | 'failed' | 'cancelled' {
-  if (
-    currentStatus === 'completed' ||
-    currentStatus === 'failed' ||
-    currentStatus === 'cancelled'
-  ) {
-    return currentStatus
+  if (['completed', 'failed', 'cancelled'].includes(currentStatus)) {
+    return currentStatus as 'completed' | 'failed' | 'cancelled'
   }
 
   return cancelRequestedAt ? 'cancelled' : desiredStatus
@@ -994,186 +1022,143 @@ export async function finalizeGeneration(
   database: Database,
   input: FinalizeGenerationInput,
 ): Promise<FinalizedGeneration> {
-  return withTransaction(database, async (client) => {
-    const generationResult = await client.query<
-      GenerationRow & {
-        assistantMessageId: string | null
-      }
-    >(
-      `SELECT
-         g."id",
-         g."chatId",
-         s."id" AS "streamId",
-         g."status",
-         g."provider",
-         g."model",
-         g."inputTokens",
-         g."outputTokens",
-         g."errorCode",
-         g."errorMessage",
-         g."startedAt",
-         g."cancelRequestedAt",
-         g."cancelSource",
-         g."createdAt",
-         g."finishedAt",
-         g."assistantMessageId"
-       FROM "Generation" g
-       LEFT JOIN "Stream" s ON s."generationId" = g."id"
-       WHERE g."id" = $1
-         AND g."userId" = $2
-       FOR UPDATE OF g`,
-      [input.generationId, input.userId],
-    )
-    const row = generationResult.rows[0]
+  return database.transaction(async (transaction) => {
+    const [row] = await transaction
+      .select({
+        ...generationColumns,
+        streamId: streams.id,
+        assistantMessageId: generations.assistantMessageId,
+      })
+      .from(generations)
+      .leftJoin(streams, eq(streams.generationId, generations.id))
+      .where(
+        and(
+          eq(generations.id, input.generationId),
+          eq(generations.userId, input.userId),
+        ),
+      )
+      .for('update', { of: generations })
+      .limit(1)
 
     if (!row) {
       throw new Error('GENERATION_NOT_FOUND')
     }
 
     if (['completed', 'failed', 'cancelled'].includes(row.status)) {
-      const existingMessage = row.assistantMessageId
-        ? (
-            await client.query<MessageRow>(
-              `SELECT "id", "seq", "role", "status", "parts", "createdAt"
-                 FROM "Message_v2"
-                WHERE "id" = $1`,
-              [row.assistantMessageId],
-            )
-          ).rows[0]
-        : null
+      const [existingMessage] = row.assistantMessageId
+        ? await transaction
+            .select({
+              id: messages.id,
+              seq: messages.seq,
+              role: messages.role,
+              status: messages.status,
+              parts: messages.parts,
+              createdAt: messages.createdAt,
+            })
+            .from(messages)
+            .where(eq(messages.id, row.assistantMessageId))
+            .limit(1)
+        : []
 
       return {
         generation: mapGeneration(row),
-        assistantMessage: existingMessage
-          ? mapMessage(existingMessage)
-          : null,
+        assistantMessage: existingMessage ? mapMessage(existingMessage) : null,
         newlyFinalized: false,
       }
     }
 
     const finalStatus = decideGenerationTerminalStatus(
-      row.status,
+      row.status as GenerationDto['status'],
       row.cancelRequestedAt,
       input.desiredStatus,
     )
     let assistantMessage: ChatMessageDto | null = null
 
     if (input.content.trim() && row.chatId) {
-      const sequenceResult = await client.query<{ seq: string }>(
-        `UPDATE "Chat"
-            SET "nextMessageSeq" = "nextMessageSeq" + 1,
-                "contextRevision" = "contextRevision" + 1
-          WHERE "id" = $1
-            AND "userId" = $2
-            AND "deletedAt" IS NULL
-          RETURNING "nextMessageSeq" - 1 AS "seq"`,
-        [row.chatId, input.userId],
-      )
-
-      if (sequenceResult.rows[0]) {
-        const messageResult = await client.query<MessageRow>(
-          `INSERT INTO "Message_v2" (
-             "chatId",
-             "seq",
-             "role",
-             "status",
-             "parts",
-             "sharedText"
-           )
-           VALUES ($1, $2, 'assistant', $3, $4::jsonb, $5)
-           RETURNING "id", "seq", "role", "status", "parts", "createdAt"`,
-          [
-            row.chatId,
-            sequenceResult.rows[0].seq,
-            finalStatus,
-            JSON.stringify([
-              {
-                type: 'text',
-                text: input.content,
-              },
-            ]),
-            finalStatus === 'completed' ? input.content : null,
-          ],
+      const [sequence] = await transaction
+        .update(chats)
+        .set({
+          nextMessageSeq: sql`${chats.nextMessageSeq} + 1`,
+          contextRevision: sql`${chats.contextRevision} + 1`,
+        })
+        .where(
+          and(
+            eq(chats.id, row.chatId),
+            eq(chats.userId, input.userId),
+            isNull(chats.deletedAt),
+          ),
         )
-        assistantMessage = mapMessage(messageResult.rows[0])
+        .returning({
+          seq: sql`${chats.nextMessageSeq} - 1`.mapWith(chats.nextMessageSeq),
+        })
+
+      if (sequence) {
+        const [messageRow] = await transaction
+          .insert(messages)
+          .values({
+            chatId: row.chatId,
+            seq: sequence.seq,
+            role: 'assistant',
+            status: finalStatus,
+            parts: [{ type: 'text', text: input.content }],
+            sharedText: finalStatus === 'completed' ? input.content : null,
+          })
+          .returning({
+            id: messages.id,
+            seq: messages.seq,
+            role: messages.role,
+            status: messages.status,
+            parts: messages.parts,
+            createdAt: messages.createdAt,
+          })
+        assistantMessage = mapMessage(messageRow)
       }
     }
 
-    const updatedResult = await client.query<GenerationRow>(
-      `UPDATE "Generation"
-          SET "assistantMessageId" = $2,
-              "providerRequestId" = COALESCE($3, "providerRequestId"),
-              "status" = $4,
-              "inputTokens" = $5,
-              "outputTokens" = $6,
-              "cachedInputTokens" = $7,
-              "reasoningTokens" = $8,
-              "latencyMs" = $9,
-              "timeToFirstTokenMs" = $10,
-              "finishReason" = $11,
-              "errorCode" = $12,
-              "errorMessage" = $13,
-              "finishedAt" = now()
-        WHERE "id" = $1
-        RETURNING
-          "id",
-          "chatId",
-          (SELECT "id" FROM "Stream" WHERE "generationId" = $1) AS "streamId",
-          "status",
-          "provider",
-          "model",
-          "inputTokens",
-          "outputTokens",
-          "errorCode",
-          "errorMessage",
-          "startedAt",
-          "cancelRequestedAt",
-          "cancelSource",
-          "createdAt",
-          "finishedAt"`,
-      [
-        input.generationId,
-        assistantMessage?.id ?? null,
-        input.providerRequestId || null,
-        finalStatus,
-        input.usage.inputTokens,
-        input.usage.outputTokens,
-        input.usage.cachedInputTokens,
-        input.usage.reasoningTokens,
-        input.latencyMs,
-        input.timeToFirstTokenMs,
-        finalStatus === 'cancelled'
-          ? 'cancelled'
-          : input.finishReason,
-        finalStatus === 'cancelled'
-          ? 'generation_cancelled'
-          : input.errorCode || null,
-        finalStatus === 'cancelled'
-          ? 'Generation stopped'
-          : input.errorMessage || null,
-      ],
-    )
+    const [updated] = await transaction
+      .update(generations)
+      .set({
+        assistantMessageId: assistantMessage?.id ?? null,
+        ...(input.providerRequestId
+          ? { providerRequestId: input.providerRequestId }
+          : {}),
+        status: finalStatus,
+        inputTokens: BigInt(input.usage.inputTokens),
+        outputTokens: BigInt(input.usage.outputTokens),
+        cachedInputTokens: BigInt(input.usage.cachedInputTokens),
+        reasoningTokens: BigInt(input.usage.reasoningTokens),
+        latencyMs: input.latencyMs,
+        timeToFirstTokenMs: input.timeToFirstTokenMs,
+        finishReason:
+          finalStatus === 'cancelled' ? 'cancelled' : input.finishReason,
+        errorCode:
+          finalStatus === 'cancelled'
+            ? 'generation_cancelled'
+            : input.errorCode || null,
+        errorMessage:
+          finalStatus === 'cancelled'
+            ? 'Generation stopped'
+            : input.errorMessage || null,
+        finishedAt: sql`now()`,
+      })
+      .where(eq(generations.id, input.generationId))
+      .returning(generationColumns)
 
-    await client.query(
-      `INSERT INTO "UsageEvent" (
-         "userId",
-         "generationId",
-         "inputTokens",
-         "outputTokens"
-       )
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT ("generationId") WHERE "generationId" IS NOT NULL
-       DO NOTHING`,
-      [
-        input.userId,
-        input.generationId,
-        input.usage.inputTokens,
-        input.usage.outputTokens,
-      ],
-    )
+    await transaction
+      .insert(usageEvents)
+      .values({
+        userId: input.userId,
+        generationId: input.generationId,
+        inputTokens: BigInt(input.usage.inputTokens),
+        outputTokens: BigInt(input.usage.outputTokens),
+      })
+      .onConflictDoNothing({
+        target: usageEvents.generationId,
+        where: isNotNull(usageEvents.generationId),
+      })
 
     return {
-      generation: mapGeneration(updatedResult.rows[0]),
+      generation: mapGeneration({ ...updated, streamId: row.streamId }),
       assistantMessage,
       newlyFinalized: true,
     }
@@ -1186,14 +1171,20 @@ export async function getMonthlyTokenUsage(
   periodStart: Date,
   periodEnd: Date,
 ): Promise<number> {
-  const result = await database.query<{ total: string }>(
-    `SELECT COALESCE(SUM("totalTokens"), 0)::text AS "total"
-       FROM "UsageEvent"
-      WHERE "userId" = $1
-        AND "createdAt" >= $2
-        AND "createdAt" < $3`,
-    [userId, periodStart, periodEnd],
-  )
+  const [row] = await database
+    .select({
+      total: sql`coalesce(sum(${usageEvents.totalTokens}), 0)`.mapWith(
+        usageEvents.totalTokens,
+      ),
+    })
+    .from(usageEvents)
+    .where(
+      and(
+        eq(usageEvents.userId, userId),
+        sql`${usageEvents.createdAt} >= ${periodStart}`,
+        sql`${usageEvents.createdAt} < ${periodEnd}`,
+      ),
+    )
 
-  return Number(result.rows[0]?.total ?? 0)
+  return toSafeNumber(row?.total ?? 0n, 'UsageEvent.totalTokens')
 }

@@ -31,8 +31,8 @@ COPY --from=build \
 
 COPY --from=build \
     --chown=node:node \
-    /app/gpas2_chatbot_schema.sql \
-    ./gpas2_chatbot_schema.sql
+    /app/drizzle \
+    ./drizzle
 
 USER node
 

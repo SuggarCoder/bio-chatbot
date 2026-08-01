@@ -1,6 +1,10 @@
 import 'dotenv/config'
 
-import { applySchema, createDatabase } from './db.js'
+import {
+  closeDatabase,
+  createDatabase,
+  migrateDatabase,
+} from './db.js'
 
 const databaseUrl = process.env.DATABASE_URL?.trim()
 
@@ -11,8 +15,8 @@ if (!databaseUrl) {
 const database = createDatabase(databaseUrl)
 
 try {
-  await applySchema(database)
-  console.log('GPAS2 chatbot schema applied successfully')
+  await migrateDatabase(database)
+  console.log('Database migrations applied successfully')
 } finally {
-  await database.end()
+  await closeDatabase(database)
 }

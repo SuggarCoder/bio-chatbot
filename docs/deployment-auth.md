@@ -94,8 +94,9 @@ for the same-origin topology.
 
 ## Deployment and smoke tests
 
-The production image contains `gpas2_chatbot_schema.sql`. Deployment applies it
-with `node dist/server/applySchema.js` before replacing the running container.
+The production image contains the committed `drizzle/` migrations. Deployment
+applies them with `node dist/server/migrate.js` before replacing the running
+container.
 
 `/ai-chatbot/api/health` intentionally has no authentication and therefore
 cannot prove that GPAS2 authentication works. After deployment:
