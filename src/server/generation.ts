@@ -17,6 +17,7 @@ import {
 import type { AppConfig } from './config.js'
 import {
   createGenerationStart,
+  createRegenerationStart,
   findGenerationStart,
   getChatContextRevision,
   getGeneration,
@@ -52,6 +53,7 @@ type StartGenerationInput = {
   clientMessageId: string
   ip: string
   supersedesGenerationId?: string
+  replacesMessageId?: string
 }
 
 type CompletedUsage = GenerationUsage
@@ -155,7 +157,11 @@ export class GenerationService {
         throw new Error('GENERATION_NOT_FOUND')
       }
 
-      return { generation, userMessage: existing.userMessage }
+      return {
+        generation,
+        userMessage: existing.userMessage,
+        replacesMessageId: input.replacesMessageId ?? null,
+      }
     }
 
     if (input.supersedesGenerationId) {
@@ -212,17 +218,28 @@ export class GenerationService {
     let start: GenerationStart
 
     try {
-      start = await createGenerationStart(this.database, {
-        userId: input.user.id,
-        chatId: input.chatId,
-        clientMessageId: input.clientMessageId,
-        content: input.content,
-        generationId,
-        streamId,
-        requestId,
-        provider: 'qwen',
-        model: this.config.qwenModel,
-      })
+      start = input.replacesMessageId
+        ? await createRegenerationStart(this.database, {
+            userId: input.user.id,
+            chatId: input.chatId,
+            replacesMessageId: input.replacesMessageId,
+            generationId,
+            streamId,
+            requestId,
+            provider: 'qwen',
+            model: this.config.qwenModel,
+          })
+        : await createGenerationStart(this.database, {
+            userId: input.user.id,
+            chatId: input.chatId,
+            clientMessageId: input.clientMessageId,
+            content: input.content,
+            generationId,
+            streamId,
+            requestId,
+            provider: 'qwen',
+            model: this.config.qwenModel,
+          })
     } catch (error) {
       await releaseGenerationLease(
         this.redis,
@@ -236,6 +253,17 @@ export class GenerationService {
           'Chat not found',
           404,
           'chat_not_found',
+        )
+      }
+
+      if (
+        error instanceof Error &&
+        error.message === 'REGENERATION_TARGET_INVALID'
+      ) {
+        throw new GenerationRejectedError(
+          'Only the latest assistant message can be regenerated',
+          409,
+          'regeneration_target_invalid',
         )
       }
 
@@ -265,7 +293,11 @@ export class GenerationService {
         )
 
         if (generation) {
-          return { generation, userMessage: raced.userMessage }
+          return {
+            generation,
+            userMessage: raced.userMessage,
+            replacesMessageId: input.replacesMessageId ?? null,
+          }
         }
       }
 
@@ -306,7 +338,11 @@ export class GenerationService {
       throw new Error('GENERATION_NOT_FOUND')
     }
 
-    return { generation, userMessage: start.userMessage }
+    return {
+      generation,
+      userMessage: start.userMessage,
+      replacesMessageId: start.replacesMessageId ?? null,
+    }
   }
 
   async resume(
@@ -499,25 +535,30 @@ export class GenerationService {
         throw new Error('Chat not found')
       }
 
-      let context = await getCachedChatContext(
-        this.redis,
-        this.config,
-        input.chatId,
-        revision,
-      )
+      let context = start.contextMaxSeq === undefined
+        ? await getCachedChatContext(
+            this.redis,
+            this.config,
+            input.chatId,
+            revision,
+          )
+        : null
 
       if (!context) {
         context = await rebuildChatContext(
           this.database,
           input.user.id,
           input.chatId,
+          start.contextMaxSeq,
         )
 
         if (!context) {
           throw new Error('Chat not found')
         }
 
-        await setCachedChatContext(this.redis, this.config, context)
+        if (start.contextMaxSeq === undefined) {
+          await setCachedChatContext(this.redis, this.config, context)
+        }
       }
 
       await this.checkpoint(runtime)

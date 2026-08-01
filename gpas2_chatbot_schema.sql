@@ -552,6 +552,10 @@ CREATE TABLE IF NOT EXISTS "Generation" (
         REFERENCES "Message_v2"("id")
         ON DELETE SET NULL,
 
+    "supersedesGenerationId" uuid
+        REFERENCES "Generation"("id")
+        ON DELETE SET NULL,
+
     -- openai / anthropic / qwen / kimi / local / ...
     "provider" varchar(64) NOT NULL,
     "model" varchar(128) NOT NULL,
@@ -653,6 +657,15 @@ CREATE TABLE IF NOT EXISTS "Generation" (
             )
         )
 );
+
+ALTER TABLE "Generation"
+ADD COLUMN IF NOT EXISTS "supersedesGenerationId" uuid
+    REFERENCES "Generation"("id")
+    ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS "idx_generation_supersedes"
+ON "Generation" ("supersedesGenerationId")
+WHERE "supersedesGenerationId" IS NOT NULL;
 
 DO $$
 BEGIN

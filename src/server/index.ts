@@ -39,6 +39,13 @@ const app = await buildApp({
   redis,
   generations,
 })
+app.log.info(
+  {
+    nodeEnv: config.nodeEnv,
+    authMode: config.gpas2AuthMode,
+  },
+  'Authentication mode configured',
+)
 let shuttingDown = false
 
 async function shutdown(signal: string): Promise<void> {

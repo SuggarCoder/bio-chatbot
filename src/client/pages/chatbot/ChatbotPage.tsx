@@ -18,7 +18,11 @@ import { appRoutes, getAppPathname } from '../../routes'
 import {
   cancelGeneration,
   createGeneration,
+  deleteMessageVote,
+  regenerateMessage,
+  setMessageVote,
 } from '../../features/chatbot/chatApi'
+import { gsap } from 'gsap'
 import {
   runChatStream,
   StreamCompletedError,
@@ -28,6 +32,16 @@ import {
   type GenerationActivity,
 } from '../../features/chatbot/generationActivity'
 import { ChatStoreProvider, useChatStore, type ChatMessage } from '../../features/chatbot/chatStore'
+import {
+  createAdaptiveStreamSession,
+  deleteAdaptiveStreamSession,
+  getAdaptiveStreamSession,
+} from '../../features/chatbot/adaptiveStream'
+import {
+  StaticMarkdown,
+  StreamingMarkdown,
+} from '../../features/chatbot/MarkdownMessage'
+import { recordStreamOperation } from '../../features/chatbot/streamMetrics'
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
 import { PopupMenu, type PopupMenuEntry, type PopupMenuItem } from '../../shared/ui/PopupMenu'
@@ -46,17 +60,21 @@ const noop = () => undefined
 function cancelAssistantReply(generationId: string) {
   const controller = activeReplyControllers.get(generationId)
 
-  if (!controller) {
-    return
+  if (controller) {
+    activeReplyControllers.delete(generationId)
+    controller.abort()
   }
 
-  activeReplyControllers.delete(generationId)
-  controller.abort()
+  deleteAdaptiveStreamSession(generationId)
 }
 
 function cancelAllAssistantReplies() {
   for (const controller of activeReplyControllers.values()) {
     controller.abort()
+  }
+
+  for (const generationId of activeReplyControllers.keys()) {
+    deleteAdaptiveStreamSession(generationId)
   }
 
   activeReplyControllers.clear()
@@ -344,7 +362,47 @@ async function runAssistantReply(
 
   const controller = new AbortController()
   activeReplyControllers.set(generationId, controller)
+  const streamSession = getAdaptiveStreamSession(generationId) ??
+    createAdaptiveStreamSession(generationId, {
+      onTerminal: (terminal, content) => {
+        recordStreamOperation(generationId, {
+          type: 'store',
+          detail: `terminal:${terminal.kind}`,
+        })
+
+        if (terminal.kind === 'completed') {
+          chatStore.finishAssistantMessage(
+            conversationId,
+            generationId,
+            terminal.message ?? undefined,
+            content,
+          )
+        } else if (terminal.kind === 'cancelled') {
+          chatStore.cancelAssistantMessage(
+            conversationId,
+            generationId,
+            terminal.message,
+            content,
+          )
+        } else {
+          chatStore.failAssistantMessage(
+            conversationId,
+            generationId,
+            terminal.errorMessage ?? '回复生成失败，请稍后重试。',
+            terminal.message,
+            content,
+          )
+        }
+
+        queueMicrotask(() => deleteAdaptiveStreamSession(generationId))
+      },
+    })
   chatStore.startAssistantMessage(conversationId, generationId)
+  recordStreamOperation(generationId, {
+    type: 'store',
+    detail: 'start',
+  })
+  let responseMarked = false
 
   try {
     await runChatStream({
@@ -356,7 +414,12 @@ async function runAssistantReply(
           conversationId,
           generationId,
           connectionState,
+          Boolean(streamSession.canonicalText),
         )
+        recordStreamOperation(generationId, {
+          type: 'store',
+          detail: `connection:${connectionState}`,
+        })
       },
       onEvent: (event) => {
         if (controller.signal.aborted) {
@@ -381,43 +444,68 @@ async function runAssistantReply(
             conversationId,
             event.userMessage,
           )
+          recordStreamOperation(generationId, {
+            type: 'store',
+            detail: 'generation-start:placeholder',
+          })
+          recordStreamOperation(generationId, {
+            type: 'store',
+            detail: 'generation-start:activity',
+          })
+          recordStreamOperation(generationId, {
+            type: 'store',
+            detail: 'generation-start:user-confirmation',
+          })
         } else if (event.type === 'text.delta') {
-          chatStore.startAssistantMessage(conversationId, generationId)
-          chatStore.appendAssistantChunk(
-            conversationId,
-            generationId,
-            event.startIndex,
-            event.delta,
-          )
+          if (!responseMarked) {
+            responseMarked = true
+            chatStore.markAssistantResponding(conversationId, generationId)
+            recordStreamOperation(generationId, {
+              type: 'store',
+              detail: 'first-delta',
+            })
+          }
+          streamSession.push(event.startIndex, event.delta)
         } else if (event.type === 'tool.start') {
           chatStore.markToolStarted(
             conversationId,
             generationId,
             event.toolName,
           )
+          recordStreamOperation(generationId, {
+            type: 'store',
+            detail: 'tool-start',
+          })
         } else if (event.type === 'tool.result') {
           chatStore.markToolFinished(
             conversationId,
             generationId,
           )
+          recordStreamOperation(generationId, {
+            type: 'store',
+            detail: 'tool-result',
+          })
         } else if (event.type === 'generation.completed') {
-          chatStore.finishAssistantMessage(
-            conversationId,
-            generationId,
-            event.assistantMessage,
-          )
+          streamSession.finish(event.assistantMessage.content, {
+            kind: 'completed',
+            message: event.assistantMessage,
+          })
         } else if (event.type === 'generation.cancelled') {
-          chatStore.cancelAssistantMessage(
-            conversationId,
-            generationId,
-            event.assistantMessage,
+          streamSession.finish(
+            event.assistantMessage?.content ?? streamSession.canonicalText,
+            {
+              kind: 'cancelled',
+              message: event.assistantMessage,
+            },
           )
         } else if (event.type === 'generation.failed') {
-          chatStore.failAssistantMessage(
-            conversationId,
-            generationId,
-            event.message,
-            event.assistantMessage,
+          streamSession.finish(
+            event.assistantMessage?.content ?? streamSession.canonicalText,
+            {
+              kind: 'failed',
+              errorMessage: event.message,
+              message: event.assistantMessage,
+            },
           )
         }
       },
@@ -428,6 +516,7 @@ async function runAssistantReply(
     }
 
     if (error instanceof StreamCompletedError) {
+      deleteAdaptiveStreamSession(generationId)
       await chatStore.loadConversation(conversationId)
       return
     }
@@ -440,15 +529,15 @@ async function runAssistantReply(
         controller.signal,
       )
     ) {
+      deleteAdaptiveStreamSession(generationId)
       return
     }
 
     const message = error instanceof Error ? error.message : '回复生成失败，请稍后重试。'
-    chatStore.failAssistantMessage(
-      conversationId,
-      generationId,
-      message,
-    )
+    streamSession.finish(streamSession.canonicalText, {
+      kind: 'failed',
+      errorMessage: message,
+    })
   } finally {
     if (activeReplyControllers.get(generationId) === controller) {
       activeReplyControllers.delete(generationId)
@@ -1128,34 +1217,231 @@ function GenerationStatusIndicator(props: {
   )
 }
 
-function ChatMessageBubble(props: { message: ChatMessage }) {
-  const isUser = () => props.message.role === 'user'
-  const showPlaceholder = () =>
-    props.message.role === 'assistant' &&
-    props.message.status === 'streaming' &&
-    props.message.content.trim().length === 0
-  const showActivityIndicator = () =>
-    props.message.status === 'streaming' &&
-    Boolean(props.message.activity) &&
-    props.message.activity?.phase !== 'responding'
-  const showOutputCaret = () =>
-    props.message.status === 'streaming' &&
-    props.message.activity?.phase === 'responding'
-  const messagePadding = () => {
-    if (showActivityIndicator()) {
-      return 'pr-44'
+type MessageExecutionStep = ChatMessage['executionSteps'][number]
+
+function ReasoningAccordion(props: { message: ChatMessage }) {
+  const [open, setOpen] = createSignal(false)
+  let panelRef: HTMLDivElement | undefined
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+  const steps = (): MessageExecutionStep[] => {
+    const activity = props.message.activity
+
+    if (!activity) {
+      return props.message.executionSteps.length > 0
+        ? props.message.executionSteps
+        : [
+            { id: 'received', label: '已接收问题', status: 'completed' },
+            {
+              id: 'response',
+              label: props.message.status === 'done' ? '生成回答' : '生成回答已中断',
+              status: props.message.status === 'done' ? 'completed' : 'interrupted',
+            },
+          ]
     }
 
-    if (
-      props.message.status === 'failed' ||
-      props.message.status === 'cancelled'
-    ) {
-      return 'pr-24'
+    const completed = (id: string, label: string): MessageExecutionStep => ({
+      id,
+      label,
+      status: 'completed',
+    })
+    const active = (id: string, label: string): MessageExecutionStep => ({
+      id,
+      label,
+      status: 'active',
+    })
+
+    if (activity.phase === 'queued') {
+      return [active('received', '正在接收问题')]
     }
 
-    return ''
+    if (activity.phase === 'thinking') {
+      return [
+        completed('received', '已接收问题'),
+        active('analysis', '正在分析并组织回答'),
+      ]
+    }
+
+    if (activity.phase === 'tool') {
+      return [
+        completed('received', '已接收问题'),
+        completed('analysis', '已完成初步分析'),
+        active('tool', activity.toolLabel ?? '正在调用工具'),
+      ]
+    }
+
+    if (activity.phase === 'reconnecting') {
+      return [
+        completed('received', '已接收问题'),
+        active('reconnecting', '正在恢复连接'),
+      ]
+    }
+
+    return [
+      completed('received', '已接收问题'),
+      completed('analysis', '已完成分析'),
+      active('response', '正在生成回答'),
+    ]
+  }
+  const summary = () => {
+    const activeStep = steps().find((step) => step.status === 'active')
+
+    if (activeStep) {
+      return activeStep.label
+    }
+
+    if (props.message.status === 'failed') {
+      return '处理过程已中断'
+    }
+
+    if (props.message.status === 'cancelled') {
+      return '已停止生成'
+    }
+
+    return `已完成 · ${steps().length} 个步骤`
+  }
+  const toggle = () => {
+    const next = !open()
+    setOpen(next)
+
+    if (!panelRef) {
+      return
+    }
+
+    gsap.killTweensOf(panelRef)
+    if (reducedMotion.matches) {
+      gsap.set(panelRef, { height: next ? 'auto' : 0 })
+      return
+    }
+
+    gsap.to(panelRef, {
+      height: next ? 'auto' : 0,
+      duration: 0.25,
+      ease: 'power2.inOut',
+    })
   }
 
+  onMount(() => panelRef && gsap.set(panelRef, { height: 0 }))
+  onCleanup(() => panelRef && gsap.killTweensOf(panelRef))
+
+  return (
+    <section class="mb-1 ml-2 max-w-full overflow-hidden text-slate-400">
+      <button
+        type="button"
+        class="inline-flex max-w-full items-center gap-2 px-1 py-1 text-left text-sm text-slate-400 transition hover:text-slate-500"
+        aria-expanded={open()}
+        onClick={toggle}
+      >
+        <span class="flex min-w-0 items-center gap-2">
+          <span class="truncate">{summary()}</span>
+        </span>
+        <span class={`i-lucide-chevron-right h-3.5 w-3.5 shrink-0 transition-transform duration-250 ${open() ? 'rotate-90' : ''}`} aria-hidden="true" />
+      </button>
+      <div ref={panelRef} class="overflow-hidden">
+        <ol class="space-y-1.5 px-1 pb-2 pt-1">
+          <For each={steps()}>
+            {(step) => (
+              <li class="flex items-start gap-2 text-sm leading-5 text-slate-400">
+                <span
+                  aria-hidden="true"
+                  class={
+                    step.status === 'completed'
+                      ? 'i-lucide-circle-check-big mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400'
+                      : step.status === 'interrupted'
+                        ? 'i-lucide-circle-x mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400'
+                        : 'i-lucide-loader-circle generation-status-spin mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-500'
+                  }
+                />
+                <span>{step.label}</span>
+              </li>
+            )}
+          </For>
+        </ol>
+      </div>
+    </section>
+  )
+}
+
+function MessageActionToolbar(props: {
+  message: ChatMessage
+  canRegenerate: boolean
+  onVote: (vote: 'up' | 'down' | null) => Promise<void>
+  onRegenerate: () => Promise<void>
+}) {
+  const [notice, setNotice] = createSignal('')
+  const [busy, setBusy] = createSignal(false)
+  let noticeTimer: number | undefined
+  const showNotice = (value: string) => {
+    setNotice(value)
+    if (noticeTimer !== undefined) window.clearTimeout(noticeTimer)
+    noticeTimer = window.setTimeout(() => setNotice(''), 1_500)
+  }
+  const copy = async () => {
+    try {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(props.message.content)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = props.message.content
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.append(textarea)
+        textarea.select()
+        const copied = document.execCommand('copy')
+        textarea.remove()
+        if (!copied) throw new Error('Copy command failed')
+      }
+      showNotice('已复制')
+    } catch {
+      showNotice('复制失败')
+    }
+  }
+  const vote = async (value: 'up' | 'down') => {
+    if (busy() || props.message.status !== 'done') return
+    setBusy(true)
+    try {
+      await props.onVote(props.message.vote === value ? null : value)
+    } catch {
+      showNotice('评价未保存')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const regenerate = async () => {
+    if (busy() || !props.canRegenerate) return
+    setBusy(true)
+    try {
+      await props.onRegenerate()
+    } catch {
+      showNotice('重新生成失败')
+      setBusy(false)
+    }
+  }
+  const buttonClass = 'grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition duration-150 hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-35'
+  onCleanup(() => noticeTimer !== undefined && window.clearTimeout(noticeTimer))
+
+  return (
+    <div class="mt-2 flex min-h-8 items-center gap-1" role="toolbar" aria-label="消息操作">
+      <button type="button" class={buttonClass} aria-label="复制回答" onClick={() => void copy()}><span class="i-lucide-copy h-4 w-4" /></button>
+      <button type="button" class={`${buttonClass} ${props.message.vote === 'up' ? 'bg-teal-50 text-teal-700' : ''}`} aria-label="点赞" aria-pressed={props.message.vote === 'up'} disabled={busy() || props.message.status !== 'done'} onClick={() => void vote('up')}><span class="i-lucide-thumbs-up h-4 w-4" /></button>
+      <button type="button" class={`${buttonClass} ${props.message.vote === 'down' ? 'bg-teal-50 text-teal-700' : ''}`} aria-label="点踩" aria-pressed={props.message.vote === 'down'} disabled={busy() || props.message.status !== 'done'} onClick={() => void vote('down')}><span class="i-lucide-thumbs-down h-4 w-4" /></button>
+      <button type="button" class={buttonClass} aria-label="重新生成" disabled={busy() || !props.canRegenerate} onClick={() => void regenerate()}><span class={`i-lucide-refresh-cw h-4 w-4 ${busy() ? 'generation-status-spin' : ''}`} /></button>
+      <span class="ml-1 text-xs text-slate-500" role="status" aria-live="polite">{notice()}</span>
+    </div>
+  )
+}
+
+function ChatMessageBubble(props: {
+  message: ChatMessage
+  latestAssistant: boolean
+  generationActive: boolean
+  onVisibleProgress: (generationId: string) => void
+  onVote: (vote: 'up' | 'down' | null) => Promise<void>
+  onRegenerate: () => Promise<void>
+}) {
+  const isUser = () => props.message.role === 'user'
+  const [visualComplete, setVisualComplete] = createSignal(
+    props.message.status !== 'streaming',
+  )
   return (
     <div class={isUser() ? 'flex justify-end' : 'flex items-start justify-start gap-3'}>
       <Show when={!isUser()}>
@@ -1163,24 +1449,18 @@ function ChatMessageBubble(props: { message: ChatMessage }) {
           <img src={gpasUrl} alt="GPAS" class="h-5 w-5 object-contain" />
         </div>
       </Show>
-      <div
-        class={
-          isUser()
-            ? 'relative max-w-3xl rounded-3xl bg-slate-100 px-4 py-2 text-slate-400'
-            : 'relative max-w-3xl rounded-3xl bg-white px-4 py-2 text-slate-700'
-        }
-      >
-        <Show
-          when={
-            showActivityIndicator()
-              ? props.message.activity
-              : undefined
+      <div class="min-w-0 max-w-3xl">
+        <Show when={!isUser()}>
+          <ReasoningAccordion message={props.message} />
+        </Show>
+
+        <div
+          class={
+            isUser()
+              ? 'relative rounded-3xl bg-slate-100 px-4 py-2 text-slate-400'
+              : 'relative rounded-3xl bg-white px-4 py-2 text-slate-700'
           }
         >
-          {(activity) => (
-            <GenerationStatusIndicator activity={activity()} />
-          )}
-        </Show>
 
         <Show
           when={
@@ -1191,7 +1471,7 @@ function ChatMessageBubble(props: { message: ChatMessage }) {
           <span
             role="status"
             aria-live="polite"
-            class={`absolute right-3 top-2 rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
+            class={`mb-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
               props.message.status === 'failed'
                 ? 'bg-rose-50 text-rose-500'
                 : 'bg-amber-50 text-amber-700'
@@ -1203,27 +1483,38 @@ function ChatMessageBubble(props: { message: ChatMessage }) {
           </span>
         </Show>
 
-        <Show when={showOutputCaret()}>
-          <span
-            class="sr-only"
-            role="status"
-            aria-live="polite"
+        <div class="message-content text-base leading-7">
+          <Show
+            when={!isUser()}
+            fallback={<p class="whitespace-pre-wrap">{props.message.content}</p>}
           >
-            正在回答
-          </span>
-        </Show>
-
-        <p
-          class={`message-content whitespace-pre-wrap text-base leading-7 ${isUser() ? '' : messagePadding()}`}
-        >
-          {showPlaceholder() ? '正在生成回复...' : props.message.content}
-          <Show when={showOutputCaret()}>
-            <span
-              aria-hidden="true"
-              class="generation-output-caret"
-            />
+            <Show
+              when={
+                props.message.status === 'streaming' &&
+                props.message.generationId
+              }
+              keyed
+              fallback={<StaticMarkdown text={props.message.content} />}
+            >
+              {(generationId) => (
+                <StreamingMarkdown
+                  generationId={generationId}
+                  onVisibleProgress={() => props.onVisibleProgress(generationId)}
+                  onComplete={() => setVisualComplete(true)}
+                />
+              )}
+            </Show>
           </Show>
-        </p>
+        </div>
+        <Show when={!isUser() && props.message.content.length > 0 && props.message.status !== 'streaming' && visualComplete()}>
+          <MessageActionToolbar
+            message={props.message}
+            canRegenerate={props.latestAssistant && !props.generationActive}
+            onVote={props.onVote}
+            onRegenerate={props.onRegenerate}
+          />
+        </Show>
+        </div>
       </div>
     </div>
   )
@@ -1349,6 +1640,7 @@ function SessionConversationView(props: { conversationId: string }) {
   let shouldStickToBottom = true
   let isPointerScrollInteraction = false
   let wheelAnimationFrame: number | undefined
+  let followScrollFrame: number | undefined
   let wheelScrollTarget = 0
   const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 
@@ -1523,6 +1815,24 @@ function SessionConversationView(props: { conversationId: string }) {
       finishPointerScrollInteraction()
     }
   }
+  const followVisibleOutput = (generationId: string) => {
+    if (!messageListRef || !shouldStickToBottom || followScrollFrame !== undefined) {
+      return
+    }
+
+    followScrollFrame = window.requestAnimationFrame(() => {
+      followScrollFrame = undefined
+      if (!messageListRef || !shouldStickToBottom) return
+      const start = performance.now()
+      cancelWheelAnimation()
+      messageListRef.scrollTop = messageListRef.scrollHeight
+      wheelScrollTarget = messageListRef.scrollTop
+      recordStreamOperation(generationId, {
+        type: 'scroll',
+        duration: performance.now() - start,
+      })
+    })
+  }
 
   createEffect(() => {
     const activeConversation = conversation()
@@ -1554,28 +1864,22 @@ function SessionConversationView(props: { conversationId: string }) {
 
   createEffect(() => {
     const activeConversation = conversation()
-    const latestMessage = activeConversation?.messages.at(-1)
-    latestMessage?.content.length
+    const messageCount = activeConversation?.messages.length ?? 0
+    const generationId = activeConversation?.activeGeneration?.generationId
 
-    if (!activeConversation || !latestMessage || !shouldStickToBottom) {
+    if (!activeConversation || messageCount === 0 || !shouldStickToBottom) {
       return
     }
 
-    const frameId = window.requestAnimationFrame(() => {
-      if (!messageListRef || !shouldStickToBottom) {
-        return
-      }
-
-      cancelWheelAnimation()
-      messageListRef.scrollTop = messageListRef.scrollHeight
-      wheelScrollTarget = messageListRef.scrollTop
-    })
-
-    onCleanup(() => window.cancelAnimationFrame(frameId))
+    followVisibleOutput(generationId ?? 'conversation')
   })
 
   onCleanup(() => {
     cancelWheelAnimation()
+
+    if (followScrollFrame !== undefined) {
+      window.cancelAnimationFrame(followScrollFrame)
+    }
 
     if (pointerScrollEndTimer !== undefined) {
       window.clearTimeout(pointerScrollEndTimer)
@@ -1599,6 +1903,7 @@ function SessionConversationView(props: { conversationId: string }) {
     )
 
     if (message?.clientMessageId) {
+      shouldStickToBottom = true
       void runAssistantReply(
         props.conversationId,
         message.content,
@@ -1619,21 +1924,97 @@ function SessionConversationView(props: { conversationId: string }) {
     }
 
     setIsStoppingGeneration(true)
-    cancelAssistantReply(generationId)
-    chatStore.cancelAssistantMessage(
-      props.conversationId,
-      generationId,
-    )
+    const streamSession = getAdaptiveStreamSession(generationId)
+    const controller = activeReplyControllers.get(generationId)
+    activeReplyControllers.delete(generationId)
+    controller?.abort()
+
+    if (streamSession) {
+      streamSession.finish(streamSession.canonicalText, {
+        kind: 'cancelled',
+      })
+    } else {
+      chatStore.cancelAssistantMessage(
+        props.conversationId,
+        generationId,
+      )
+    }
 
     try {
       await cancelGeneration(generationId)
     } catch {
-      if (!conversation()?.activeGeneration) {
-        await chatStore.loadConversation(props.conversationId)
-      }
+      // Keep the locally received canonical text if cancellation persistence fails.
     } finally {
       setIsStoppingGeneration(false)
     }
+  }
+
+  const visibleMessages = () => {
+    const active = conversation()?.activeGeneration
+    const messages = conversation()?.messages ?? []
+
+    return active?.replacesMessageId
+      ? messages.filter(
+          (message) => message.id !== active.replacesMessageId,
+        )
+      : messages
+  }
+  const latestAssistantId = () => {
+    const messages = visibleMessages()
+
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === 'assistant') {
+        return messages[index].id
+      }
+    }
+
+    return undefined
+  }
+  const updateVote = async (
+    message: ChatMessage,
+    vote: 'up' | 'down' | null,
+  ) => {
+    const previous = message.vote
+    chatStore.setMessageVoteState(props.conversationId, message.id, vote)
+
+    try {
+      if (vote === null) {
+        await deleteMessageVote(message.id)
+      } else {
+        await setMessageVote(message.id, vote === 'up')
+      }
+    } catch (error) {
+      chatStore.setMessageVoteState(props.conversationId, message.id, previous)
+      throw error
+    }
+  }
+  const regenerate = async (message: ChatMessage) => {
+    if (conversation()?.activeGeneration || latestAssistantId() !== message.id) {
+      return
+    }
+
+    const started = await regenerateMessage(message.id, crypto.randomUUID())
+
+    if (!started.generation.streamId) {
+      throw new Error('Generation stream was not created')
+    }
+
+    chatStore.setActiveGeneration(
+      props.conversationId,
+      started.generation.id,
+      started.generation.streamId,
+      started.replacesMessageId ?? message.id,
+    )
+    void runAssistantReply(
+      props.conversationId,
+      '',
+      crypto.randomUUID(),
+      {
+        generationId: started.generation.id,
+        streamId: started.generation.streamId,
+      },
+      chatStore,
+    )
   }
 
   return (
@@ -1688,8 +2069,17 @@ function SessionConversationView(props: { conversationId: string }) {
                 onPointerCancel={finishPointerScrollInteraction}
               >
                 <div class="flex flex-col gap-4">
-                  <For each={activeConversation().messages}>
-                    {(message) => <ChatMessageBubble message={message} />}
+                  <For each={visibleMessages()}>
+                    {(message) => (
+                      <ChatMessageBubble
+                        message={message}
+                        latestAssistant={message.id === latestAssistantId()}
+                        generationActive={Boolean(activeConversation().activeGeneration)}
+                        onVisibleProgress={followVisibleOutput}
+                        onVote={(vote) => updateVote(message, vote)}
+                        onRegenerate={() => regenerate(message)}
+                      />
+                    )}
                   </For>
                 </div>
               </div>

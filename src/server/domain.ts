@@ -52,6 +52,12 @@ export type ChatMessageDto = {
   status: MessageStatus
   content: string
   createdAt: string
+  vote: 'up' | 'down' | null
+  executionSteps: Array<{
+    id: string
+    label: string
+    status: 'active' | 'completed' | 'interrupted'
+  }>
 }
 
 export type ChatSummaryDto = {
@@ -67,6 +73,7 @@ export type ActiveGenerationDto = {
   id: string
   streamId: string
   status: 'pending' | 'streaming' | 'cancelling'
+  replacesMessageId: string | null
 }
 
 export type GenerationDto = {
@@ -91,6 +98,7 @@ export type GenerationDto = {
 export type GenerationStartDto = {
   generation: GenerationDto
   userMessage: ChatMessageDto
+  replacesMessageId: string | null
 }
 
 export type ChatDetailDto = ChatSummaryDto & {

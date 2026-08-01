@@ -17,11 +17,14 @@ import {
 import type { AppConfig } from './config.js'
 import {
   createChat,
+  deleteMessageVote,
   deleteChat,
   getChatDetail,
   getGeneration,
+  getRegenerationTarget,
   listChats,
   renameChat,
+  setMessageVote,
   type Database,
 } from './db.js'
 import type { CurrentUser } from './domain.js'
@@ -227,6 +230,7 @@ export async function buildApp(
       status,
       service: 'ai-chatbot',
       commit: process.env.APP_COMMIT ?? 'local',
+      authMode: config.gpas2AuthMode,
       dependencies: {
         postgres,
         redis: redisStatus,
@@ -357,6 +361,116 @@ export async function buildApp(
     }
 
     return reply.code(204).send()
+  })
+
+  app.put<{
+    Params: { messageId: string }
+  }>(`${API_BASE}/messages/:messageId/vote`, async (request, reply) => {
+    const user = await authenticate(request)
+    const messageId = requireUuid(
+      request,
+      reply,
+      request.params.messageId,
+      'messageId',
+    )
+
+    if (!messageId) {
+      return
+    }
+
+    const isUpvoted = readObjectBody(request).isUpvoted
+
+    if (typeof isUpvoted !== 'boolean') {
+      return reply.code(400).send(
+        errorBody(request, 'invalid_is_upvoted', 'isUpvoted must be a boolean'),
+      )
+    }
+
+    const vote = await setMessageVote(database, user.id, messageId, isUpvoted)
+
+    if (!vote) {
+      return reply.code(404).send(
+        errorBody(request, 'message_not_found', 'Assistant message not found'),
+      )
+    }
+
+    return { vote }
+  })
+
+  app.delete<{
+    Params: { messageId: string }
+  }>(`${API_BASE}/messages/:messageId/vote`, async (request, reply) => {
+    const user = await authenticate(request)
+    const messageId = requireUuid(
+      request,
+      reply,
+      request.params.messageId,
+      'messageId',
+    )
+
+    if (!messageId) {
+      return
+    }
+
+    await deleteMessageVote(database, user.id, messageId)
+    return reply.code(204).send()
+  })
+
+  app.post<{
+    Params: { messageId: string }
+  }>(`${API_BASE}/messages/:messageId/regenerate`, async (request, reply) => {
+    const user = await authenticate(request)
+    const messageId = requireUuid(
+      request,
+      reply,
+      request.params.messageId,
+      'messageId',
+    )
+    const requestId = requireUuid(
+      request,
+      reply,
+      readObjectBody(request).requestId,
+      'requestId',
+    )
+
+    if (!messageId || !requestId) {
+      return
+    }
+
+    const target = await getRegenerationTarget(database, user.id, messageId)
+
+    if (!target) {
+      return reply.code(404).send(
+        errorBody(request, 'message_not_found', 'Assistant message not found'),
+      )
+    }
+
+
+    const withinLimit = await consumeGenerationRateLimit(
+      redis,
+      config,
+      user.id,
+      request.ip,
+    )
+
+    if (!withinLimit) {
+      throw new GenerationRejectedError(
+        'Too many generation requests',
+        429,
+        'generation_rate_limited',
+      )
+    }
+
+    const started = await generations.create({
+      user,
+      chatId: target.chatId,
+      content: '',
+      clientMessageId: requestId,
+      ip: request.ip,
+      replacesMessageId: messageId,
+    })
+
+    return reply.code(201).send(started)
   })
 
   app.post<{

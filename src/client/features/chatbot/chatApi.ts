@@ -21,6 +21,12 @@ export type ChatMessageDto = {
   status: 'completed' | 'cancelled' | 'failed'
   content: string
   createdAt: string
+  vote: 'up' | 'down' | null
+  executionSteps: Array<{
+    id: string
+    label: string
+    status: 'active' | 'completed' | 'interrupted'
+  }>
 }
 
 export type GenerationDto = {
@@ -60,6 +66,7 @@ export type ChatDetailDto = ChatSummaryDto & {
     id: string
     streamId: string
     status: 'pending' | 'streaming' | 'cancelling'
+    replacesMessageId: string | null
   } | null
 }
 
@@ -195,6 +202,7 @@ export function createGeneration(
   return requestJson<{
     generation: GenerationDto
     userMessage: ChatMessageDto
+    replacesMessageId: string | null
   }>(
     `/chats/${encodeURIComponent(chatId)}/generations`,
     {
@@ -202,6 +210,38 @@ export function createGeneration(
       body: JSON.stringify(input),
     },
   )
+}
+
+export function regenerateMessage(messageId: string, requestId: string) {
+  return requestJson<{
+    generation: GenerationDto
+    userMessage: ChatMessageDto
+    replacesMessageId: string | null
+  }>(`/messages/${encodeURIComponent(messageId)}/regenerate`, {
+    method: 'POST',
+    body: JSON.stringify({ requestId }),
+  })
+}
+
+export function setMessageVote(messageId: string, isUpvoted: boolean) {
+  return requestJson<{ vote: 'up' | 'down' }>(
+    `/messages/${encodeURIComponent(messageId)}/vote`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ isUpvoted }),
+    },
+  )
+}
+
+export async function deleteMessageVote(messageId: string): Promise<void> {
+  const response = await fetch(
+    `${API_BASE}/messages/${encodeURIComponent(messageId)}/vote`,
+    { method: 'DELETE', credentials: 'include' },
+  )
+
+  if (!response.ok) {
+    throw await parseApiError(response)
+  }
 }
 
 export function cancelGeneration(generationId: string) {

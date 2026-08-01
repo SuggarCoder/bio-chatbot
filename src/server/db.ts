@@ -72,19 +72,35 @@ export async function applySchema(database: Database, schemaPath?: string): Prom
 }
 
 export async function verifyCoreSchema(database: Database): Promise<void> {
-  await database.query(
-    `SELECT 1
-       FROM "User" u
-       LEFT JOIN "Chat" c ON false
-       LEFT JOIN "Message_v2" m
-         ON m."status" = 'completed' AND false
-       LEFT JOIN "Generation" g
-         ON g."cancelRequestedAt" IS NULL AND false
-       LEFT JOIN "Stream" s
-         ON s."generationId" = g."id" AND false
-       LEFT JOIN "UsageEvent" e ON false
-      LIMIT 1`,
-  )
+  try {
+    await database.query(
+      `SELECT 1
+         FROM "User" u
+         LEFT JOIN "Chat" c ON false
+         LEFT JOIN "Message_v2" m
+           ON m."status" = 'completed' AND false
+         LEFT JOIN "Generation" g
+           ON g."cancelRequestedAt" IS NULL AND false
+         LEFT JOIN "Stream" s
+           ON s."generationId" = g."id" AND false
+         LEFT JOIN "UsageEvent" e ON false
+        LIMIT 1`,
+    )
+  } catch (error) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === '42P01'
+    ) {
+      throw new Error(
+        'Database schema is missing. Run `npm run db:schema` before starting the development server.',
+        { cause: error },
+      )
+    }
+
+    throw error
+  }
 }
 
 export async function syncUser(
@@ -244,6 +260,7 @@ type MessageRow = QueryResultRow & {
   status: ChatMessageDto['status']
   parts: Array<{ type?: string; text?: string }>
   createdAt: Date | string
+  isUpvoted?: boolean | null
 }
 
 export function mapMessage(row: MessageRow): ChatMessageDto {
@@ -261,6 +278,24 @@ export function mapMessage(row: MessageRow): ChatMessageDto {
     status: row.status,
     content,
     createdAt: asIso(row.createdAt),
+    vote:
+      row.isUpvoted === true
+        ? 'up'
+        : row.isUpvoted === false
+          ? 'down'
+          : null,
+    executionSteps:
+      row.role === 'assistant'
+        ? [
+            { id: 'received', label: '接收问题', status: 'completed' },
+            { id: 'analysis', label: '分析并组织回答', status: 'completed' },
+            {
+              id: 'response',
+              label: row.status === 'completed' ? '生成回答' : '生成回答已中断',
+              status: row.status === 'completed' ? 'completed' : 'interrupted',
+            },
+          ]
+        : [],
   }
 }
 
@@ -334,6 +369,7 @@ type ActiveGenerationRow = QueryResultRow & {
   streamId: string
   status: 'pending' | 'streaming'
   cancelRequestedAt: Date | string | null
+  replacesMessageId: string | null
 }
 
 export async function getChatDetail(
@@ -356,21 +392,35 @@ export async function getChatDetail(
 
   const [messagesResult, generationResult] = await Promise.all([
     database.query<MessageRow>(
-      `SELECT "id", "seq", "role", "status", "parts", "createdAt"
-         FROM "Message_v2"
-        WHERE "chatId" = $1
-          AND "role" IN ('user', 'assistant')
-        ORDER BY "seq" ASC`,
-      [chatId],
+      `SELECT m."id", m."seq", m."role", m."status", m."parts", m."createdAt",
+              v."isUpvoted"
+         FROM "Message_v2" m
+         LEFT JOIN "Vote_v2" v
+           ON v."messageId" = m."id" AND v."userId" = $2
+        WHERE m."chatId" = $1
+          AND m."role" IN ('user', 'assistant')
+          AND NOT EXISTS (
+            SELECT 1
+              FROM "Generation" original
+              JOIN "Generation" replacement
+                ON replacement."supersedesGenerationId" = original."id"
+             WHERE original."assistantMessageId" = m."id"
+               AND replacement."status" = 'completed'
+          )
+        ORDER BY m."seq" ASC`,
+      [chatId, userId],
     ),
     database.query<ActiveGenerationRow>(
       `SELECT
          g."id",
          s."id" AS "streamId",
          g."status",
-         g."cancelRequestedAt"
+         g."cancelRequestedAt",
+         replaced."assistantMessageId" AS "replacesMessageId"
        FROM "Generation" g
        JOIN "Stream" s ON s."generationId" = g."id"
+       LEFT JOIN "Generation" replaced
+         ON replaced."id" = g."supersedesGenerationId"
        WHERE g."chatId" = $1
          AND g."userId" = $2
          AND g."status" IN ('pending', 'streaming')
@@ -386,6 +436,7 @@ export async function getChatDetail(
         id: active.id,
         streamId: active.streamId,
         status: active.status,
+        replacesMessageId: active.replacesMessageId,
       }
     : null
 
@@ -394,6 +445,71 @@ export async function getChatDetail(
     messages: messagesResult.rows.map(mapMessage),
     activeGeneration,
   }
+}
+
+export async function setMessageVote(
+  database: Database,
+  userId: string,
+  messageId: string,
+  isUpvoted: boolean,
+): Promise<'up' | 'down' | null> {
+  const result = await database.query<{ isUpvoted: boolean }>(
+    `INSERT INTO "Vote_v2" ("messageId", "userId", "isUpvoted")
+     SELECT m."id", $1, $3
+       FROM "Message_v2" m
+       JOIN "Chat" c ON c."id" = m."chatId"
+      WHERE m."id" = $2
+        AND m."role" = 'assistant'
+        AND c."userId" = $1
+        AND c."deletedAt" IS NULL
+     ON CONFLICT ("messageId", "userId")
+     DO UPDATE SET "isUpvoted" = EXCLUDED."isUpvoted", "updatedAt" = now()
+     RETURNING "isUpvoted"`,
+    [userId, messageId, isUpvoted],
+  )
+
+  return result.rows[0]
+    ? result.rows[0].isUpvoted ? 'up' : 'down'
+    : null
+}
+
+export async function deleteMessageVote(
+  database: Database,
+  userId: string,
+  messageId: string,
+): Promise<boolean> {
+  const result = await database.query(
+    `DELETE FROM "Vote_v2" v
+      USING "Message_v2" m, "Chat" c
+      WHERE v."messageId" = $1
+        AND v."userId" = $2
+        AND m."id" = v."messageId"
+        AND c."id" = m."chatId"
+        AND c."userId" = $2
+        AND c."deletedAt" IS NULL`,
+    [messageId, userId],
+  )
+
+  return (result.rowCount ?? 0) > 0
+}
+
+export async function getRegenerationTarget(
+  database: Database,
+  userId: string,
+  messageId: string,
+): Promise<{ chatId: string } | null> {
+  const result = await database.query<{ chatId: string }>(
+    `SELECT m."chatId"
+       FROM "Message_v2" m
+       JOIN "Chat" c ON c."id" = m."chatId"
+      WHERE m."id" = $1
+        AND m."role" = 'assistant'
+        AND c."userId" = $2
+        AND c."deletedAt" IS NULL`,
+    [messageId, userId],
+  )
+
+  return result.rows[0] ?? null
 }
 
 export async function ownsStream(
@@ -421,6 +537,8 @@ export type GenerationStart = {
   userMessage: ChatMessageDto
   reused: boolean
   status: GenerationDto['status']
+  replacesMessageId?: string
+  contextMaxSeq?: number
 }
 
 export async function findGenerationStart(
@@ -577,6 +695,97 @@ export async function createGenerationStart(
   })
 }
 
+export async function createRegenerationStart(
+  database: Database,
+  input: {
+    userId: string
+    chatId: string
+    replacesMessageId: string
+    generationId: string
+    streamId: string
+    requestId: string
+    provider: string
+    model: string
+  },
+): Promise<GenerationStart> {
+  return withTransaction(database, async (client) => {
+    const targetResult = await client.query<
+      MessageRow & { originalGenerationId: string }
+    >(
+      `SELECT user_message."id", user_message."seq", user_message."role",
+              user_message."status", user_message."parts", user_message."createdAt",
+              original."id" AS "originalGenerationId"
+         FROM "Generation" original
+         JOIN "Message_v2" assistant_message
+           ON assistant_message."id" = original."assistantMessageId"
+         JOIN "Message_v2" user_message
+           ON user_message."id" = original."userMessageId"
+         JOIN "Chat" c ON c."id" = original."chatId"
+        WHERE assistant_message."id" = $1
+          AND original."chatId" = $2
+          AND original."userId" = $3
+          AND c."deletedAt" IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM "Generation" active
+             WHERE active."chatId" = original."chatId"
+               AND active."status" IN ('pending', 'streaming')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM "Message_v2" later
+             WHERE later."chatId" = assistant_message."chatId"
+               AND later."role" = 'assistant'
+               AND later."seq" > assistant_message."seq"
+               AND NOT EXISTS (
+                 SELECT 1
+                   FROM "Generation" old_generation
+                   JOIN "Generation" replacement
+                     ON replacement."supersedesGenerationId" = old_generation."id"
+                  WHERE old_generation."assistantMessageId" = later."id"
+                    AND replacement."status" = 'completed'
+               )
+          )
+        FOR UPDATE OF c`,
+      [input.replacesMessageId, input.chatId, input.userId],
+    )
+    const target = targetResult.rows[0]
+
+    if (!target) {
+      throw new Error('REGENERATION_TARGET_INVALID')
+    }
+
+    await client.query(
+      `INSERT INTO "Generation" (
+         "id", "chatId", "userId", "userMessageId",
+         "supersedesGenerationId", "provider", "model", "requestId", "status"
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`,
+      [
+        input.generationId,
+        input.chatId,
+        input.userId,
+        target.id,
+        target.originalGenerationId,
+        input.provider,
+        input.model,
+        input.requestId,
+      ],
+    )
+    await client.query(
+      `INSERT INTO "Stream" ("id", "generationId") VALUES ($1, $2)`,
+      [input.streamId, input.generationId],
+    )
+
+    return {
+      generationId: input.generationId,
+      streamId: input.streamId,
+      userMessage: mapMessage(target),
+      reused: false,
+      status: 'pending',
+      replacesMessageId: input.replacesMessageId,
+      contextMaxSeq: Number(target.seq),
+    }
+  })
+}
+
 export type ContextMessage = {
   role: 'user' | 'assistant'
   content: string
@@ -593,6 +802,7 @@ export async function rebuildChatContext(
   database: Database,
   userId: string,
   chatId: string,
+  maxSeq?: number,
 ): Promise<ChatContext | null> {
   const chatResult = await database.query<{
     contextRevision: string | number
@@ -613,13 +823,22 @@ export async function rebuildChatContext(
     `SELECT "id", "seq", "role", "status", "parts", "createdAt"
        FROM "Message_v2"
       WHERE "chatId" = $1
+        AND ($2::bigint IS NULL OR "seq" <= $2)
         AND (
           "role" = 'user'
           OR ("role" = 'assistant' AND "status" = 'completed')
         )
+        AND NOT EXISTS (
+          SELECT 1
+            FROM "Generation" original
+            JOIN "Generation" replacement
+              ON replacement."supersedesGenerationId" = original."id"
+           WHERE original."assistantMessageId" = "Message_v2"."id"
+             AND replacement."status" = 'completed'
+        )
       ORDER BY "seq" DESC
       LIMIT 80`,
-    [chatId],
+    [chatId, maxSeq ?? null],
   )
   const messages = messagesResult.rows.reverse().map(mapMessage)
 

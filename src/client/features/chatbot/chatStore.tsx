@@ -37,6 +37,7 @@ export type ActiveGeneration = {
   generationId: string
   streamId: string
   status: 'pending' | 'streaming' | 'cancelling'
+  replacesMessageId?: string
 }
 
 export type ChatMessage = {
@@ -48,6 +49,8 @@ export type ChatMessage = {
   content: string
   status: ChatMessageStatus
   createdAt: number
+  vote: 'up' | 'down' | null
+  executionSteps: ChatMessageDto['executionSteps']
 }
 
 export type ChatConversation = {
@@ -89,6 +92,7 @@ type ChatStoreContextValue = {
   appendUserMessage: (id: string, content: string) => ChatMessage | undefined
   confirmUserMessage: (id: string, message: ChatMessageDto) => void
   startAssistantMessage: (id: string, generationId: string) => void
+  markAssistantResponding: (id: string, generationId: string) => void
   markGenerationStarted: (id: string, generationId: string) => void
   markToolStarted: (
     id: string,
@@ -100,34 +104,38 @@ type ChatStoreContextValue = {
     id: string,
     generationId: string,
     state: 'connected' | 'reconnecting',
+    hasReceivedText?: boolean,
   ) => void
   setActiveGeneration: (
     id: string,
     generationId: string,
     streamId: string,
+    replacesMessageId?: string,
   ) => void
-  appendAssistantChunk: (
-    id: string,
-    generationId: string,
-    startIndex: number,
-    chunk: string,
+  setMessageVoteState: (
+    conversationId: string,
+    messageId: string,
+    vote: 'up' | 'down' | null,
   ) => void
   finishAssistantMessage: (
     id: string,
     generationId: string,
     message?: ChatMessageDto,
+    content?: string,
   ) => void
   failAssistantMessage: (
     id: string,
     generationId: string,
     errorMessage: string,
     message?: ChatMessageDto | null,
+    content?: string,
   ) => void
   failGenerationStart: (id: string, errorMessage: string) => void
   cancelAssistantMessage: (
     id: string,
     generationId: string,
     message?: ChatMessageDto | null,
+    content?: string,
   ) => void
 }
 
@@ -154,6 +162,8 @@ function buildOptimisticMessage(
     content,
     status,
     createdAt: Date.now(),
+    vote: null,
+    executionSteps: [],
   }
 }
 
@@ -169,6 +179,8 @@ function mapMessage(message: ChatMessageDto): ChatMessage {
           ? 'failed'
           : 'done',
     createdAt: new Date(message.createdAt).getTime(),
+    vote: message.vote,
+    executionSteps: message.executionSteps,
   }
 }
 
@@ -200,6 +212,8 @@ function mapDetail(
           generationId: chat.activeGeneration.id,
           streamId: chat.activeGeneration.streamId,
           status: chat.activeGeneration.status,
+          replacesMessageId:
+            chat.activeGeneration.replacesMessageId ?? undefined,
         }
       : undefined,
     errorMessage: undefined,
@@ -493,6 +507,16 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     })
   }
 
+  const markAssistantResponding = (
+    id: string,
+    generationId: string,
+  ) => {
+    applyGenerationActivity(id, {
+      type: 'text-delta',
+      generationId,
+    })
+  }
+
   const markToolStarted = (
     id: string,
     generationId: string,
@@ -519,6 +543,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     id: string,
     generationId: string,
     connectionState: 'connected' | 'reconnecting',
+    hasReceivedText = false,
   ) => {
     const activeMessage =
       state.conversations[id]?.messages.at(-1)
@@ -533,7 +558,8 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         : {
             type: 'connected',
             generationId,
-            hasContent: Boolean(activeMessage?.content.trim()),
+            hasContent:
+              hasReceivedText || Boolean(activeMessage?.content.trim()),
           },
     )
   }
@@ -542,6 +568,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     id: string,
     generationId: string,
     streamId: string,
+    replacesMessageId?: string,
   ) => {
     if (!state.conversations[id]) {
       return
@@ -555,60 +582,31 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           generationId,
           streamId,
           status: 'pending',
+          replacesMessageId,
         }
       }),
     )
   }
 
-  const appendAssistantChunk = (
-    id: string,
-    generationId: string,
-    startIndex: number,
-    chunk: string,
+  const setMessageVoteState = (
+    conversationId: string,
+    messageId: string,
+    vote: 'up' | 'down' | null,
   ) => {
-    if (!state.conversations[id]) {
-      return
+    const index = state.conversations[conversationId]?.messages.findIndex(
+      (message) => message.id === messageId,
+    ) ?? -1
+
+    if (index >= 0) {
+      setState('conversations', conversationId, 'messages', index, 'vote', vote)
     }
-
-    setState(
-      'conversations',
-      id,
-      produce((conversation: ChatConversation) => {
-        if (
-          conversation.activeGeneration?.generationId !== generationId
-        ) {
-          return
-        }
-
-        const activeMessage = conversation.messages.at(-1)
-
-        if (
-          activeMessage?.role === 'assistant' &&
-          activeMessage.status === 'streaming'
-        ) {
-          activeMessage.activity = reduceGenerationActivity(
-            activeMessage.activity,
-            {
-              type: 'text-delta',
-              generationId,
-            },
-          )
-          const overlap = activeMessage.content.length - startIndex
-
-          if (overlap < chunk.length) {
-            activeMessage.content += chunk.slice(Math.max(0, overlap))
-          }
-
-          conversation.updatedAt = Date.now()
-        }
-      }),
-    )
   }
 
   const finishAssistantMessage = (
     id: string,
     generationId: string,
     message?: ChatMessageDto,
+    content = '',
   ) => {
     if (!state.conversations[id]) {
       return
@@ -625,6 +623,8 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         }
 
         const activeMessage = conversation.messages.at(-1)
+        const replacesMessageId =
+          conversation.activeGeneration?.replacesMessageId
 
         if (
           activeMessage?.role === 'assistant' &&
@@ -639,6 +639,16 @@ export const ChatStoreProvider: ParentComponent = (props) => {
             activeMessage.createdAt = new Date(
               message.createdAt,
             ).getTime()
+            activeMessage.vote = message.vote
+            activeMessage.executionSteps = message.executionSteps
+          } else {
+            activeMessage.content = content
+          }
+
+          if (replacesMessageId) {
+            conversation.messages = conversation.messages.filter(
+              (item) => item.id !== replacesMessageId,
+            )
           }
         }
 
@@ -654,6 +664,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     generationId: string,
     errorMessage: string,
     message?: ChatMessageDto | null,
+    content = '',
   ) => {
     if (!state.conversations[id]) {
       return
@@ -670,8 +681,14 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         }
 
         const activeMessage = conversation.messages.at(-1)
+        const replacesMessageId =
+          conversation.activeGeneration?.replacesMessageId
 
-        if (
+        if (replacesMessageId) {
+          if (activeMessage?.generationId === generationId) {
+            conversation.messages.pop()
+          }
+        } else if (
           activeMessage?.role === 'assistant' &&
           activeMessage.generationId === generationId
         ) {
@@ -681,6 +698,8 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           if (message) {
             activeMessage.id = message.id
             activeMessage.content = message.content
+          } else if (content) {
+            activeMessage.content = content
           } else if (!activeMessage.content.trim()) {
             activeMessage.content = errorMessage
           }
@@ -731,6 +750,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     id: string,
     generationId: string,
     message?: ChatMessageDto | null,
+    content = '',
   ) => {
     if (!state.conversations[id]) {
       return
@@ -747,8 +767,14 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         }
 
         const activeMessage = conversation.messages.at(-1)
+        const replacesMessageId =
+          conversation.activeGeneration?.replacesMessageId
 
-        if (
+        if (replacesMessageId) {
+          if (activeMessage?.generationId === generationId) {
+            conversation.messages.pop()
+          }
+        } else if (
           activeMessage?.role === 'assistant' &&
           activeMessage.generationId === generationId
         ) {
@@ -758,6 +784,8 @@ export const ChatStoreProvider: ParentComponent = (props) => {
             activeMessage.createdAt = new Date(
               message.createdAt,
             ).getTime()
+          } else if (content) {
+            activeMessage.content = content
           }
 
           if (activeMessage.content.trim()) {
@@ -795,12 +823,13 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         appendUserMessage,
         confirmUserMessage,
         startAssistantMessage,
+        markAssistantResponding,
         markGenerationStarted,
         markToolStarted,
         markToolFinished,
         setStreamConnectionState,
         setActiveGeneration,
-        appendAssistantChunk,
+        setMessageVoteState,
         finishAssistantMessage,
         failAssistantMessage,
         failGenerationStart,
