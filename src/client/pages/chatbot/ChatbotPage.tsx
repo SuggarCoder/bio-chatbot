@@ -31,7 +31,7 @@ import {
   thinkingStatusTexts,
   type GenerationActivity,
 } from '../../features/chatbot/generationActivity'
-import { ChatStoreProvider, useChatStore, type ChatMessage } from '../../features/chatbot/chatStore'
+import { ChatStoreProvider, useChatStore, type ChatConversation, type ChatMessage } from '../../features/chatbot/chatStore'
 import {
   createAdaptiveStreamSession,
   deleteAdaptiveStreamSession,
@@ -49,6 +49,7 @@ import { Tooltip } from '../../shared/ui/Tooltip'
 import { ArtifactCard } from '../../features/artifacts/ArtifactCard'
 import { ArtifactSidePanel } from '../../features/artifacts/ArtifactSidePanel'
 import { artifactStore } from '../../features/artifacts/artifactStore'
+import { StreamingArtifactMessage } from '../../features/artifacts/StreamingArtifactMessage'
 
 type LayoutContextValue = {
   isSidebarOpen: () => boolean
@@ -116,6 +117,7 @@ async function waitForPersistedReply(
     signal.throwIfAborted()
     const conversation = await chatStore.loadConversation(
       conversationId,
+      { force: true },
     )
     const latestMessage = conversation?.messages.at(-1)
 
@@ -470,7 +472,11 @@ async function runAssistantReply(
           }
           streamSession.push(event.startIndex, event.delta)
         } else if (event.type === 'artifact.start') {
-          artifactStore.start(event)
+          if (!responseMarked) {
+            responseMarked = true
+            chatStore.markAssistantResponding(conversationId, generationId)
+          }
+          artifactStore.start(event, conversationId)
         } else if (event.type === 'artifact.delta') {
           artifactStore.delta(event.artifactStreamId, event.delta)
         } else if (event.type === 'artifact.commit') {
@@ -540,7 +546,7 @@ async function runAssistantReply(
 
     if (error instanceof StreamCompletedError) {
       deleteAdaptiveStreamSession(generationId)
-      await chatStore.loadConversation(conversationId)
+      await chatStore.loadConversation(conversationId, { force: true })
       return
     }
 
@@ -1465,6 +1471,19 @@ function ChatMessageBubble(props: {
   const [visualComplete, setVisualComplete] = createSignal(
     props.message.status !== 'streaming',
   )
+  const artifactDrafts = () => props.message.generationId
+    ? Object.values(artifactStore.state.draftsByStreamId).filter(
+        (draft) => draft.generationId === props.message.generationId,
+      )
+    : []
+  const hasIncompleteArtifactDraft = () => artifactDrafts().some(
+    (draft) => draft.status !== 'complete',
+  )
+  const liveGenerationId = () => props.message.generationId && (
+    props.message.status === 'streaming' || hasIncompleteArtifactDraft()
+  )
+    ? props.message.generationId
+    : undefined
   return (
     <div class={isUser() ? 'flex justify-end' : 'flex items-start justify-start gap-3'}>
       <Show when={!isUser()}>
@@ -1512,24 +1531,34 @@ function ChatMessageBubble(props: {
             fallback={<p class="whitespace-pre-wrap">{props.message.content}</p>}
           >
             <Show
-              when={
-                props.message.status === 'streaming' &&
-                props.message.generationId
-              }
+              when={liveGenerationId()}
               keyed
               fallback={<StaticMessageParts message={props.message} />}
             >
               {(generationId) => (
-                <StreamingMarkdown
-                  generationId={generationId}
-                  onVisibleProgress={() => props.onVisibleProgress(generationId)}
-                  onComplete={() => setVisualComplete(true)}
-                />
+                <Show
+                  when={artifactDrafts().length > 0}
+                  fallback={
+                    <StreamingMarkdown
+                      generationId={generationId}
+                      onVisibleProgress={() => props.onVisibleProgress(generationId)}
+                      onComplete={() => setVisualComplete(true)}
+                    />
+                  }
+                >
+                  <StreamingArtifactMessage
+                    generationId={generationId}
+                    text={props.message.content}
+                    isStreaming={props.message.status === 'streaming'}
+                    onVisibleProgress={() => props.onVisibleProgress(generationId)}
+                    onComplete={() => setVisualComplete(true)}
+                  />
+                </Show>
               )}
             </Show>
           </Show>
         </div>
-        <Show when={!isUser() && props.message.content.length > 0 && props.message.status !== 'streaming' && visualComplete()}>
+        <Show when={!isUser() && (props.message.content.length > 0 || props.message.parts.length > 0) && props.message.status !== 'streaming' && visualComplete()}>
           <MessageActionToolbar
             message={props.message}
             canRegenerate={props.latestAssistant && !props.generationActive}
@@ -1555,6 +1584,8 @@ function StaticMessageParts(props: { message: ChatMessage }) {
             <ArtifactCard
               artifactId={part.artifactId}
               logicalId={part.logicalId}
+              title={artifactStore.state.artifactsById[part.artifactId]?.title}
+              type={artifactStore.state.artifactsById[part.artifactId]?.type}
               version={part.version}
             />
           )
@@ -1667,6 +1698,30 @@ function MissingConversationState() {
   )
 }
 
+function ConversationLoadErrorState(props: {
+  message?: string
+  onRetry: () => void
+}) {
+  return (
+    <ChatPanelFrame title="会话加载失败">
+      <div class="grid min-h-0 flex-1 place-items-center">
+        <div class="w-full max-w-md rounded-3xl border border-rose-100 bg-white p-6 text-center shadow-sm">
+          <p class="text-sm leading-6 text-rose-700">
+            {props.message ?? '无法加载该会话，请稍后重试。'}
+          </p>
+          <button
+            type="button"
+            class="mt-4 inline-flex h-10 items-center rounded-full bg-teal-700 px-5 text-sm font-semibold text-white transition hover:bg-teal-800"
+            onClick={props.onRetry}
+          >
+            重新加载
+          </button>
+        </div>
+      </div>
+    </ChatPanelFrame>
+  )
+}
+
 function SessionConversationView(props: { conversationId: string }) {
   const chatStore = useChatStore()
   const navigate = useNavigate()
@@ -1685,7 +1740,68 @@ function SessionConversationView(props: { conversationId: string }) {
   let wheelAnimationFrame: number | undefined
   let followScrollFrame: number | undefined
   let wheelScrollTarget = 0
+  let conversationLoadRevision = 0
   const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+  const hasOptimisticGeneration = (candidate: ChatConversation | undefined) =>
+    candidate?.messages.some((message) => Boolean(message.clientMessageId)) &&
+    Boolean(
+      candidate.activeGeneration ||
+      startingReplies.has(candidate.id),
+    )
+  const readyConversation = () => {
+    const candidate = conversation()
+    return candidate && (
+      candidate.detailStatus === 'loaded' ||
+      hasOptimisticGeneration(candidate)
+    )
+      ? candidate
+      : undefined
+  }
+
+  createEffect(() => {
+    artifactStore.setVisibleConversation(props.conversationId)
+  })
+  onCleanup(() => {
+    conversationLoadRevision += 1
+    if (artifactStore.state.visibleConversationId === props.conversationId) {
+      artifactStore.setVisibleConversation(null)
+    }
+  })
+
+  createEffect(() => {
+    const conversationId = props.conversationId
+    const existing = chatStore.getConversation(conversationId)
+    const revision = ++conversationLoadRevision
+    if (
+      existing?.detailStatus === 'loaded' ||
+      existing?.detailStatus === 'error' ||
+      hasOptimisticGeneration(existing)
+    ) {
+      setIsConversationLoading(false)
+      return
+    }
+    setIsConversationLoading(true)
+    if (existing?.detailStatus === 'loading') return
+    void chatStore.loadConversation(conversationId).finally(() => {
+      if (revision === conversationLoadRevision) {
+        setIsConversationLoading(false)
+      }
+    })
+  })
+
+  const retryConversationLoad = () => {
+    const conversationId = props.conversationId
+    const revision = ++conversationLoadRevision
+    setIsConversationLoading(true)
+    void chatStore.loadConversation(
+      conversationId,
+      { force: true },
+    ).finally(() => {
+      if (revision === conversationLoadRevision) {
+        setIsConversationLoading(false)
+      }
+    })
+  }
 
   const closeRenameDialog = () => {
     setRenameConversationId(null)
@@ -1726,29 +1842,6 @@ function SessionConversationView(props: { conversationId: string }) {
     void chatStore.deleteConversation(conversationId)
     closeDeleteDialog()
   }
-
-  onMount(() => {
-    const existing = chatStore.getConversation(props.conversationId)
-    const hasOptimisticMessage =
-      existing?.messages.some((message) =>
-        Boolean(message.clientMessageId),
-      ) ?? false
-
-    if (
-      hasOptimisticMessage &&
-      (
-        existing?.activeGeneration ||
-        startingReplies.has(props.conversationId)
-      )
-    ) {
-      setIsConversationLoading(false)
-      return
-    }
-
-    void chatStore
-      .loadConversation(props.conversationId)
-      .finally(() => setIsConversationLoading(false))
-  })
 
   const showMessageListScrollbar = () => {
     setIsMessageListScrolling(true)
@@ -2063,9 +2156,16 @@ function SessionConversationView(props: { conversationId: string }) {
 
   return (
     <Show
-      when={conversation()}
+      when={readyConversation()}
       fallback={
-        <Show
+        conversation()?.detailStatus === 'error'
+          ? (
+              <ConversationLoadErrorState
+                message={conversation()?.detailError}
+                onRetry={retryConversationLoad}
+              />
+            )
+          : <Show
           when={!isConversationLoading()}
           fallback={
             <ChatPanelFrame title="正在加载会话">

@@ -1,14 +1,17 @@
 import { createStore, produce } from 'solid-js/store'
 import { fetchArtifact, fetchArtifactVersion, fetchArtifactVersions } from './artifactApi'
+import { shouldRevealCommittedArtifact } from './streamingParts'
 import type { ArtifactClientEntity, ArtifactDraftClientState, ArtifactMimeType } from './types'
 
 type ArtifactStoreState = {
   artifactsById: Record<string, ArtifactClientEntity>
   draftsByStreamId: Record<string, ArtifactDraftClientState>
+  visibleConversationId: string | null
   activeArtifactId: string | null
   activeStreamId: string | null
   activeVersion: number | null
   isPanelOpen: boolean
+  panelInteractionRevision: number
   activeTab: 'preview' | 'code' | 'history'
   panelWidth: number
 }
@@ -16,16 +19,30 @@ type ArtifactStoreState = {
 const [artifactState, setArtifactState] = createStore<ArtifactStoreState>({
   artifactsById: {},
   draftsByStreamId: {},
+  visibleConversationId: null,
   activeArtifactId: null,
   activeStreamId: null,
   activeVersion: null,
   isPanelOpen: false,
+  panelInteractionRevision: 0,
   activeTab: 'preview',
   panelWidth: 520,
 })
 
 const pendingDeltas = new Map<string, string>()
 let deltaFrame: number | undefined
+let clearSelectionAfterClose = false
+
+type PanelChangeCause = 'artifact-start' | 'artifact-commit' | 'user'
+
+function clearPanelSelection() {
+  setArtifactState({
+    activeArtifactId: null,
+    activeStreamId: null,
+    activeVersion: null,
+    activeTab: 'preview',
+  })
+}
 
 function flushDeltas() {
   deltaFrame = undefined
@@ -41,31 +58,37 @@ export const artifactStore = {
   state: artifactState,
   start(input: {
     artifactStreamId: string
+    generationId: string
     messageId: string
     logicalId: string
     operation: 'create' | 'replace'
     artifactType: string
     title: string
     baseVersion: number | null
-  }) {
+    language: string | null
+    textStartIndex: number
+    partOrder: number
+  }, conversationId: string) {
+    if (artifactState.draftsByStreamId[input.artifactStreamId]) return
     setArtifactState('draftsByStreamId', input.artifactStreamId, {
       streamId: input.artifactStreamId,
       messageId: input.messageId,
+      generationId: input.generationId,
+      conversationId,
       logicalId: input.logicalId,
       operation: input.operation,
       type: input.artifactType as ArtifactMimeType,
       title: input.title,
+      language: input.language ?? undefined,
       baseVersion: input.baseVersion,
+      textStartIndex: input.textStartIndex,
+      partOrder: input.partOrder,
+      panelRevisionAtStart: artifactState.panelInteractionRevision,
       content: '',
       status: 'streaming',
     })
-    setArtifactState({
-      activeStreamId: input.artifactStreamId,
-      activeArtifactId: null,
-      activeVersion: input.baseVersion,
-      isPanelOpen: true,
-      activeTab: 'preview',
-    })
+    setArtifactState('activeStreamId', null)
+    setArtifactState('isPanelOpen', false)
   },
   delta(streamId: string, delta: string) {
     pendingDeltas.set(streamId, (pendingDeltas.get(streamId) ?? '') + delta)
@@ -81,6 +104,10 @@ export const artifactStore = {
     const draft = artifactState.draftsByStreamId[input.artifactStreamId]
     if (!draft) return
     setArtifactState('draftsByStreamId', input.artifactStreamId, 'status', 'complete')
+    setArtifactState('draftsByStreamId', input.artifactStreamId, {
+      artifactId: input.artifactId,
+      version: input.version,
+    })
     setArtifactState('artifactsById', input.artifactId, {
       id: input.artifactId,
       logicalId: input.logicalId,
@@ -92,12 +119,22 @@ export const artifactStore = {
       content: draft.content,
       renderStatus: 'ready',
     })
-    setArtifactState({
-      activeArtifactId: input.artifactId,
-      activeStreamId: null,
-      activeVersion: input.version,
-      isPanelOpen: true,
+    const shouldReveal = shouldRevealCommittedArtifact({
+      visibleConversationId: artifactState.visibleConversationId,
+      draftConversationId: draft.conversationId,
+      panelInteractionRevision: artifactState.panelInteractionRevision,
+      panelRevisionAtStart: draft.panelRevisionAtStart,
     })
+    if (shouldReveal) {
+      clearSelectionAfterClose = false
+      setArtifactState({
+        activeArtifactId: input.artifactId,
+        activeStreamId: null,
+        activeVersion: input.version,
+        isPanelOpen: true,
+        activeTab: 'preview',
+      })
+    }
   },
   error(streamId: string | undefined, code: string, message: string) {
     if (!streamId || !artifactState.draftsByStreamId[streamId]) return
@@ -109,6 +146,8 @@ export const artifactStore = {
     })
   },
   async open(artifactId: string, version?: number) {
+    clearSelectionAfterClose = false
+    setArtifactState('panelInteractionRevision', (value) => value + 1)
     setArtifactState({
       activeArtifactId: artifactId,
       activeStreamId: null,
@@ -133,14 +172,36 @@ export const artifactStore = {
     const versions = await fetchArtifactVersions(artifactId)
     setArtifactState('artifactsById', artifactId, 'versions', versions)
   },
-  close() {
+  close(cause: PanelChangeCause = 'user') {
+    if (cause === 'user') {
+      setArtifactState('panelInteractionRevision', (value) => value + 1)
+    }
     setArtifactState('isPanelOpen', false)
   },
   setTab(tab: ArtifactStoreState['activeTab']) {
+    if (tab !== artifactState.activeTab) {
+      setArtifactState('panelInteractionRevision', (value) => value + 1)
+    }
     setArtifactState('activeTab', tab)
   },
   setWidth(width: number) {
     setArtifactState('panelWidth', Math.min(840, Math.max(360, width)))
+  },
+  setVisibleConversation(conversationId: string | null) {
+    if (artifactState.visibleConversationId === conversationId) return
+    setArtifactState('visibleConversationId', conversationId)
+    if (artifactState.isPanelOpen) {
+      clearSelectionAfterClose = true
+      setArtifactState('isPanelOpen', false)
+    } else {
+      clearSelectionAfterClose = false
+      clearPanelSelection()
+    }
+  },
+  completePanelClose() {
+    if (!clearSelectionAfterClose) return
+    clearSelectionAfterClose = false
+    clearPanelSelection()
   },
   hydrateMessageParts(parts: Array<{ type: string; artifactId?: string }>) {
     for (const part of parts) {

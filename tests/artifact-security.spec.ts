@@ -5,6 +5,12 @@ type Harness = {
   sanitizeArtifactSvg(content: string): string
   renderStrictMermaid(content: string): Promise<string>
   renderMarkdown(content: string): string
+  mountCommittedArtifactPanel(): Promise<void>
+  switchArtifactPanelConversation(): Promise<{
+    isPanelOpen: boolean
+    activeArtifactId: string | null
+    activeVersion: number | null
+  }>
 }
 
 test.beforeEach(async ({ page }) => {
@@ -39,6 +45,34 @@ test('HTML runs in an opaque sandbox and cannot read host DOM or cookie', async 
   }), document)
   expect(['', 'blocked']).toContain(result.cookie)
   expect(result.parent).toBe('blocked')
+})
+
+test('committed Artifact panel enters the viewport with its renderer content', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .mountCommittedArtifactPanel()
+  ))
+  const panel = page.getByRole('complementary', { name: 'Artifact panel' })
+  await expect(panel).toBeVisible()
+  const panelBox = await panel.boundingBox()
+  const viewport = page.viewportSize()
+  expect(panelBox).not.toBeNull()
+  expect(viewport).not.toBeNull()
+  expect(panelBox!.x).toBeGreaterThanOrEqual(0)
+  expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(viewport!.width + 1)
+  const frame = panel.locator('iframe')
+  await expect(frame).toHaveAttribute('srcdoc', /panel-test-content/)
+
+  const switched = await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .switchArtifactPanelConversation()
+  ))
+  await expect(panel).toHaveCount(0)
+  expect(switched).toEqual({
+    isPanelOpen: false,
+    activeArtifactId: null,
+    activeVersion: null,
+  })
 })
 
 test('HTML CSP blocks network and sandbox blocks top navigation', async ({ page }) => {

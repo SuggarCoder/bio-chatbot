@@ -596,6 +596,7 @@ export class GenerationService {
               return
             }
             acceptedArtifactIds.add(streamArtifactId)
+            const partOrder = messageParts.length
             messageParts.push({ type: 'artifact_draft_ref', streamArtifactId })
             emit({
               type: 'artifact.start',
@@ -605,6 +606,9 @@ export class GenerationService {
               artifactType: metadata.type,
               title: metadata.title,
               baseVersion: metadata.base_version ?? null,
+              language: metadata.language ?? null,
+              textStartIndex: runtime.partialOutput.length,
+              partOrder,
             })
           },
           onArtifactDelta: ({ streamArtifactId, sequence, delta }) => {

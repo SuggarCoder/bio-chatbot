@@ -59,6 +59,8 @@ export type ChatConversation = {
   id: string
   title: string
   messages: ChatMessage[]
+  detailStatus: 'summary' | 'loading' | 'loaded' | 'error'
+  detailError?: string
   draft: string
   activeGeneration?: ActiveGeneration
   createdAt: number
@@ -87,7 +89,10 @@ type ChatStoreContextValue = {
   orderedConversations: () => ChatConversation[]
   getConversation: (id: string) => ChatConversation | undefined
   createConversation: (titleSeed: string) => Promise<ChatConversation>
-  loadConversation: (id: string) => Promise<ChatConversation | undefined>
+  loadConversation: (
+    id: string,
+    options?: { force?: boolean },
+  ) => Promise<ChatConversation | undefined>
   renameConversation: (id: string, title: string) => Promise<void>
   deleteConversation: (id: string) => Promise<void>
   updateConversationDraft: (id: string, value: string) => void
@@ -199,6 +204,8 @@ function mapSummary(
     id: chat.id,
     title: chat.title,
     messages: existing?.messages ?? [],
+    detailStatus: existing?.detailStatus ?? 'summary',
+    detailError: existing?.detailError,
     draft: existing?.draft ?? '',
     activeGeneration: existing?.activeGeneration,
     createdAt: new Date(chat.createdAt).getTime(),
@@ -214,6 +221,8 @@ function mapDetail(
   return {
     ...mapSummary(chat, existing),
     messages: chat.messages.map(mapMessage),
+    detailStatus: 'loaded',
+    detailError: undefined,
     activeGeneration: chat.activeGeneration
       ? {
           generationId: chat.activeGeneration.id,
@@ -234,6 +243,10 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     order: [],
     conversations: {},
   })
+  const pendingConversationLoads = new Map<
+    string,
+    Promise<ChatConversation | undefined>
+  >()
 
   const moveConversationToTop = (id: string) => {
     setState('order', (current) => [
@@ -302,16 +315,33 @@ export const ChatStoreProvider: ParentComponent = (props) => {
 
   const createConversation = async (titleSeed: string) => {
     const chat = await createChat(buildConversationTitle(titleSeed))
-    const conversation = mapSummary(chat)
+    const conversation: ChatConversation = {
+      ...mapSummary(chat),
+      detailStatus: 'loaded',
+    }
 
     setState('conversations', chat.id, conversation)
     moveConversationToTop(chat.id)
     return conversation
   }
 
-  const loadConversation = async (id: string) => {
-    try {
-      const detail = await fetchChat(id)
+  const loadConversation = (
+    id: string,
+    options?: { force?: boolean },
+  ): Promise<ChatConversation | undefined> => {
+    const existing = state.conversations[id]
+    if (existing?.detailStatus === 'loaded' && !options?.force) {
+      return Promise.resolve(existing)
+    }
+    const pending = pendingConversationLoads.get(id)
+    if (pending) return pending
+    if (existing) {
+      setState('conversations', id, {
+        detailStatus: 'loading',
+        detailError: undefined,
+      })
+    }
+    const request = fetchChat(id).then((detail) => {
       const conversation = mapDetail(
         detail,
         state.conversations[id],
@@ -323,9 +353,23 @@ export const ChatStoreProvider: ParentComponent = (props) => {
       }
 
       return conversation
-    } catch {
+    }).catch((error: unknown) => {
+      if (state.conversations[id]) {
+        setState('conversations', id, {
+          detailStatus: 'error',
+          detailError: error instanceof Error
+            ? error.message
+            : 'Conversation could not be loaded',
+        })
+      }
       return undefined
-    }
+    }).finally(() => {
+      if (pendingConversationLoads.get(id) === request) {
+        pendingConversationLoads.delete(id)
+      }
+    })
+    pendingConversationLoads.set(id, request)
+    return request
   }
 
   const renameConversation = async (id: string, title: string) => {

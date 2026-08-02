@@ -39,12 +39,20 @@ export type ArtifactClientEntity = {
 export type ArtifactDraftClientState = {
   streamId: string
   messageId: string
+  generationId: string
+  conversationId: string
   logicalId: string
   operation: 'create' | 'replace'
   type: ArtifactMimeType
   title: string
+  language?: string
   baseVersion: number | null
+  textStartIndex: number
+  partOrder: number
+  panelRevisionAtStart: number
   content: string
   status: 'streaming' | 'complete' | 'incomplete' | 'aborted' | 'invalid'
   error?: string
+  artifactId?: string
+  version?: number
 }

@@ -142,6 +142,9 @@ export type StreamEvent =
       artifactType: string
       title: string
       baseVersion: number | null
+      language: string | null
+      textStartIndex: number
+      partOrder: number
     }
   | StreamIdentity & {
       type: 'artifact.delta'
