@@ -1,94 +1,23 @@
 import {
   createEffect,
-  createMemo,
   createSignal,
+  For,
   onCleanup,
   onMount,
   Show,
 } from 'solid-js'
 
 import { getAdaptiveStreamSession } from './adaptiveStream'
+import { CodeBlock } from './CodeBlock'
+import { MarkdownContent } from './MarkdownContent'
 import {
-  highlightCode,
   parseStreamingMarkdownTail,
-  renderMarkdown,
   stableMarkdownPrefixLength,
   type StreamingMarkdownTail,
 } from './markdown'
 
 export function StaticMarkdown(props: { text: string }) {
-  const html = createMemo(() => renderMarkdown(props.text))
-
-  return <div class="markdown-message" innerHTML={html()} />
-}
-
-function StreamingCodeBlock(props: {
-  code: string
-  generationId: string
-  language?: string
-  showCaret: boolean
-}) {
-  let highlightTimer: number | undefined
-  let latestCode = ''
-  let latestLanguage: string | undefined
-  const [highlightedCode, setHighlightedCode] = createSignal('')
-  const [highlightedLanguage, setHighlightedLanguage] = createSignal<
-    string | undefined
-  >()
-  const [highlightedHtml, setHighlightedHtml] = createSignal('')
-
-  const scheduleHighlight = () => {
-    if (highlightTimer !== undefined) return
-    highlightTimer = window.setTimeout(() => {
-      highlightTimer = undefined
-      const code = latestCode
-      const language = latestLanguage
-      const highlighted = highlightCode(
-        code,
-        language,
-        props.generationId,
-      )
-      setHighlightedCode(code)
-      setHighlightedLanguage(language)
-      setHighlightedHtml(highlighted.html)
-
-      if (latestCode !== code || latestLanguage !== language) {
-        scheduleHighlight()
-      }
-    }, 80)
-  }
-
-  createEffect(() => {
-    latestCode = props.code
-    latestLanguage = props.language
-    scheduleHighlight()
-  })
-
-  onCleanup(() => {
-    if (highlightTimer !== undefined) window.clearTimeout(highlightTimer)
-  })
-
-  const canReuseHighlight = () => (
-    highlightedLanguage() === props.language &&
-    props.code.startsWith(highlightedCode())
-  )
-  const pendingCode = () => canReuseHighlight()
-    ? props.code.slice(highlightedCode().length)
-    : props.code
-
-  return (
-    <pre>
-      <code class="hljs">
-        <Show when={canReuseHighlight()}>
-          <span innerHTML={highlightedHtml()} />
-        </Show>
-        <span>{pendingCode()}</span>
-        <Show when={props.showCaret}>
-          <span aria-hidden="true" class="generation-output-caret" />
-        </Show>
-      </code>
-    </pre>
-  )
+  return <MarkdownContent source={props.text} />
 }
 
 export function StreamingMarkdown(props: {
@@ -96,8 +25,8 @@ export function StreamingMarkdown(props: {
   onComplete: () => void
   onVisibleProgress: () => void
 }) {
-  let committedRef: HTMLDivElement | undefined
   let activeSource = ''
+  const [committedSources, setCommittedSources] = createSignal<string[]>([])
   const [hasVisibleText, setHasVisibleText] = createSignal(false)
   const [activeTail, setActiveTail] = createSignal<StreamingMarkdownTail>(
     parseStreamingMarkdownTail(''),
@@ -107,31 +36,29 @@ export function StreamingMarkdown(props: {
     setActiveTail(parseStreamingMarkdownTail(activeSource))
   }
 
-  const appendCommittedHtml = (source: string) => {
-    if (!source || !committedRef) return
-    const template = document.createElement('template')
-    template.innerHTML = renderMarkdown(source, props.generationId)
-    committedRef.append(template.content)
+  const appendCommittedSource = (source: string) => {
+    if (!source) return
+    setCommittedSources((sources) => [...sources, source])
   }
 
   const commitStableBlocks = () => {
     const stableLength = stableMarkdownPrefixLength(activeSource)
 
     if (stableLength === 0) return
-    appendCommittedHtml(activeSource.slice(0, stableLength))
+    appendCommittedSource(activeSource.slice(0, stableLength))
     activeSource = activeSource.slice(stableLength)
     syncActiveTail()
   }
 
   const commitAll = () => {
     if (!activeSource) return
-    appendCommittedHtml(activeSource)
+    appendCommittedSource(activeSource)
     activeSource = ''
     syncActiveTail()
   }
 
   const replace = (text: string) => {
-    if (committedRef) committedRef.textContent = ''
+    setCommittedSources([])
     activeSource = text
     setHasVisibleText(Boolean(text))
     commitStableBlocks()
@@ -178,8 +105,10 @@ export function StreamingMarkdown(props: {
   })
 
   return (
-    <div class="markdown-message">
-      <div ref={committedRef} />
+    <div class="streaming-markdown">
+      <For each={committedSources()}>
+        {(source) => <MarkdownContent source={source} />}
+      </For>
       <Show when={!hasVisibleText()}>
         <span class="text-slate-400">正在生成回复...</span>
       </Show>
@@ -203,12 +132,16 @@ export function StreamingMarkdown(props: {
       >
         {(tail) => (
           <>
-            <StreamingCodeBlock
+            <CodeBlock
               code={tail().code}
               generationId={props.generationId}
               language={tail().language}
-              showCaret={!tail().remainder}
+              isStreaming
+              showLineNumbers
             />
+            <Show when={!tail().remainder}>
+              <span aria-hidden="true" class="generation-output-caret" />
+            </Show>
             <Show when={tail().remainder}>
               <span class="whitespace-pre-wrap">{tail().remainder}</span>
               <span aria-hidden="true" class="generation-output-caret" />

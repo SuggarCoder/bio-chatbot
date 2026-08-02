@@ -61,7 +61,7 @@
   .gpas-scrollbar {
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-gutter: stable;
+    scrollbar-gutter: auto;
     scrollbar-width: thin;
     scrollbar-color: rgba(103, 122, 128, 0.72) transparent;
   }
@@ -90,10 +90,16 @@
     transition: background-color 220ms ease;
   }
   
+  .scrollbar-fade:hover,
+  .scrollbar-fade:focus,
+  .scrollbar-fade:focus-within,
   .scrollbar-fade.scrollbar-visible {
     scrollbar-color: rgba(103, 122, 128, 0.58) transparent;
   }
   
+  .scrollbar-fade:hover::-webkit-scrollbar-thumb,
+  .scrollbar-fade:focus::-webkit-scrollbar-thumb,
+  .scrollbar-fade:focus-within::-webkit-scrollbar-thumb,
   .scrollbar-fade.scrollbar-visible::-webkit-scrollbar-thumb {
     background: rgba(103, 122, 128, 0.58);
   }
@@ -395,35 +401,49 @@
     text-underline-offset: 2px;
   }
 
-  .hljs-keyword,
-  .hljs-selector-tag,
-  .hljs-literal { color: rgb(196 181 253); }
-  .hljs-string,
-  .hljs-attr { color: rgb(134 239 172); }
-  .hljs-number,
-  .hljs-symbol { color: rgb(253 186 116); }
-  .hljs-comment { color: rgb(148 163 184); }
-  .hljs-title,
-  .hljs-function { color: rgb(125 211 252); }
-
-  .artifact-source-markdown pre {
-    margin: 0;
-    min-height: 1.5rem;
-    overflow: visible;
-    background: transparent;
-    padding: 0;
-    color: inherit;
+  .code-block-scroll {
+    max-width: 100%;
   }
 
-  .artifact-source-markdown pre code {
+  .code-block-lines {
+    width: max-content;
+  }
+
+  .code-block-line {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    min-height: 1.5rem;
+  }
+
+  .code-block-line-number {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    width: 3.25rem;
+    padding: 0 .75rem 0 .5rem;
+    border-right: 1px solid rgb(30 41 59);
+    background: rgb(2 6 23 / .96);
+    color: rgb(100 116 139);
+    text-align: right;
+    user-select: none;
+  }
+
+  .code-block-line-content {
     display: block;
     min-width: max-content;
+    padding: 0 1rem;
     white-space: pre;
-    background: transparent;
-    color: inherit;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    font-size: .8125rem;
-    line-height: 1.5rem;
+    color: rgb(226 232 240);
+  }
+
+  .code-block[data-wrap="true"] .code-block-lines {
+    width: 100%;
+  }
+
+  .code-block[data-wrap="true"] .code-block-line-content {
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   @media (prefers-reduced-motion: reduce) {

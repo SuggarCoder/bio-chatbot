@@ -303,7 +303,7 @@ export const ArtifactSidePanel: Component = () => {
           style={{ width: panelWidth() }}
           aria-label="Artifact panel"
         >
-          <nav class="relative z-20 flex h-16 shrink-0 items-center gap-3 border-b border-white/80 bg-white/75 px-3 shadow-[0_1px_0_rgba(148,163,184,0.18),0_10px_30px_rgba(15,23,42,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] backdrop-blur-2xl">
+          <nav class="relative z-20 flex h-16 shrink-0 items-center gap-3 bg-slate-50 px-3">
             <div class="flex shrink-0 items-center gap-1 rounded-xl bg-white/55 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.95),0_1px_8px_rgba(15,23,42,0.06)] ring-1 ring-white/90">
               <Tooltip content="Preview" placement="bottom">
                 <button
@@ -377,7 +377,7 @@ export const ArtifactSidePanel: Component = () => {
               )}
             </Show>
           </nav>
-          <div class="min-h-0 flex-1 overflow-auto bg-slate-50">
+          <div class="gpas-scrollbar scrollbar-fade min-h-0 flex-1 overflow-auto bg-slate-50">
             <Show when={artifact()} keyed>
               {(activeArtifact) => (
                 <Switch>

@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify'
-import { createEffect, createMemo, createSignal, onCleanup, Show, type Component } from 'solid-js'
-import { highlightCode, renderMarkdown } from '../chatbot/markdown'
+import { createEffect, createSignal, onCleanup, Show, type Component } from 'solid-js'
+import { CodeBlock } from '../chatbot/CodeBlock'
+import { MarkdownContent } from '../chatbot/MarkdownContent'
 import type { ArtifactMimeType } from './types'
 
 export type ArtifactRendererProps = {
@@ -22,8 +23,7 @@ export type ArtifactRendererDefinition = {
 }
 
 const MarkdownRenderer: Component<ArtifactRendererProps> = (props) => {
-  const html = createMemo(() => renderMarkdown(props.content))
-  return <div class="markdown-message p-5" innerHTML={html()} />
+  return <MarkdownContent source={props.content} class="p-5" />
 }
 
 const TextRenderer: Component<ArtifactRendererProps> = (props) => (
@@ -33,11 +33,14 @@ const TextRenderer: Component<ArtifactRendererProps> = (props) => (
 )
 
 const CodeRenderer: Component<ArtifactRendererProps> = (props) => {
-  const highlighted = createMemo(() => highlightCode(props.content, props.language))
   return (
-    <pre class="m-0 min-h-full overflow-auto bg-slate-950 p-5 text-sm text-slate-100">
-      <code class="hljs" innerHTML={highlighted().html} />
-    </pre>
+    <CodeBlock
+      class="min-h-full rounded-none border-0"
+      code={props.content}
+      language={props.language}
+      isStreaming={props.isStreaming}
+      showLineNumbers
+    />
   )
 }
 
@@ -139,7 +142,7 @@ const MermaidRenderer: Component<ArtifactRendererProps> = (props) => {
   })
   return (
     <Show when={!error()} fallback={<p class="p-5 text-sm text-rose-600">{error()}</p>}>
-      <div class="grid min-h-96 place-items-center overflow-auto p-5" innerHTML={svg()} />
+      <div class="gpas-scrollbar scrollbar-fade grid min-h-96 place-items-center overflow-auto p-5" innerHTML={svg()} />
     </Show>
   )
 }

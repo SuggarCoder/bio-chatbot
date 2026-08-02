@@ -4,7 +4,7 @@ type Harness = {
   buildHtmlSandboxDocument(content: string): string
   sanitizeArtifactSvg(content: string): string
   renderStrictMermaid(content: string): Promise<string>
-  renderMarkdown(content: string): string
+  mountMarkdownFixture(content: string): Promise<void>
   mountCommittedArtifactPanel(): Promise<void>
   switchArtifactPanelConversation(): Promise<{
     isPanelOpen: boolean
@@ -118,7 +118,7 @@ test('Artifact panel uses the glass toolbar and keeps download unavailable', asy
   const panel = page.getByRole('complementary', { name: 'Artifact panel' })
   const toolbar = panel.locator('nav')
   const preview = page.getByRole('button', { name: 'Preview' })
-  const code = page.getByRole('button', { name: 'Code' })
+  const code = page.getByRole('button', { name: 'Code', exact: true })
 
   await expect(panel.locator('header')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'History' })).toHaveCount(0)
@@ -142,11 +142,13 @@ test('Artifact panel uses the glass toolbar and keeps download unavailable', asy
 
   await code.click()
   await expect(code).toHaveAttribute('aria-pressed', 'true')
-  await expect(panel.locator('pre')).toContainText('panel-test-content')
+  const sourceView = panel.locator('.artifact-source-view')
+  await expect(sourceView).toContainText('panel-test-content')
   await expect(panel.locator('[data-line-number]')).toHaveCount(2)
   await expect(panel.locator('[data-line-number]').nth(0)).toHaveText('1')
   await expect(panel.locator('[data-line-number]').nth(1)).toHaveText('2')
-  await expect(panel.locator('.artifact-source-markdown code')).toHaveClass(/hljs/)
+  await expect(sourceView.locator('.code-block')).toHaveAttribute('data-highlighted', 'true')
+  await expect(sourceView.locator('.code-block')).toHaveAttribute('data-wrap', 'true')
   await preview.click()
   await expect(panel.locator('iframe')).toBeVisible()
 
@@ -213,15 +215,27 @@ test('SVG sanitizer removes active content and external resources', async ({ pag
   expect(clean).not.toMatch(/script|foreignObject|onload|javascript:|evil\.test|style=/i)
 })
 
-test('Markdown blocks raw HTML, JavaScript URLs, and remote images', async ({ page }) => {
-  const clean = await page.evaluate(() => (
-    (window as unknown as { artifactSecurity: Harness }).artifactSecurity.renderMarkdown(
-      '<script>alert(1)</script>\n\n[safe](https://example.com) [bad](javascript:alert(1)) ![remote](https://example.com/a.png)',
+test('Markdown code uses Shiki, preserves lines, and blocks active content', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity.mountMarkdownFixture(
+      '<script>window.markdownExecuted = true</script>\n\n[safe](https://example.com) [bad](javascript:alert(1)) ![remote](https://example.com/a.png)\n\n```python\ndef main():\n    print("ok")\n\nmain()\n```',
     )
   ))
-  expect(clean).toContain('rel="noopener noreferrer"')
-  expect(clean).toContain('target="_blank"')
-  expect(clean).not.toMatch(/<script|javascript:|<img/i)
+
+  const markdown = page.locator('#markdown-test-root')
+  await expect(markdown.locator('script')).toHaveCount(0)
+  await expect(markdown.locator('img')).toHaveCount(0)
+  await expect(markdown.locator('a').filter({ hasText: 'safe' })).toHaveAttribute(
+    'rel',
+    'noopener noreferrer',
+  )
+  await expect(markdown).toContainText('bad')
+  await expect(markdown.locator('a[href^="javascript:"]')).toHaveCount(0)
+  await expect(markdown.locator('.code-block')).toHaveAttribute('data-highlighted', 'true')
+  await expect(markdown.locator('.code-block')).toHaveAttribute('data-wrap', 'true')
+  await expect(markdown.locator('[data-line-number]')).toHaveCount(4)
+  await expect(markdown.locator('.code-block-line-content').nth(1)).toHaveText('    print("ok")')
+  expect(await page.evaluate(() => 'markdownExecuted' in window)).toBe(false)
 })
 
 test('Mermaid strict mode output is sanitized', async ({ page }) => {

@@ -11,7 +11,7 @@ export const ArtifactCard: Component<{
 }> = (props) => (
   <button
     type="button"
-    class="my-3 flex w-full max-w-xl items-center gap-3 rounded-2xl border border-teal-100 bg-teal-50/60 p-4 text-left transition hover:border-teal-300 hover:bg-teal-50"
+    class="my-3 flex w-full max-w-xl items-center gap-3 rounded-2xl border border-gray-300 bg-gray-50/60 p-4 text-left transition hover:border-gray-300 hover:bg-gray-50"
     onClick={() => void artifactStore.open(props.artifactId, props.version)}
   >
     <span class="i-lucide-panels-top-left h-5 w-5 shrink-0 text-teal-700" />

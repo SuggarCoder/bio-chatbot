@@ -26,6 +26,16 @@ Artifact output protocol:
 - Do not explain the internal tags or protocol to the user.
 - Never invent the id or version of an existing Artifact.
 
+Markdown code output outside an Artifact:
+- Use a fenced code block for substantial code in an ordinary explanation.
+- Put the opening fence, code, and closing fence on separate lines.
+- Include a recognized language after the opening fence, such as python, html,
+  css, javascript, typescript, json, bash, sql, yaml, or markdown.
+- Preserve real source newlines and indentation. Never emit literal \\n text in
+  place of actual line breaks.
+- These Markdown fence rules apply only outside <artifact>. Artifact bodies
+  contain raw final content and must never be wrapped in Markdown fences.
+
 Example:
 <artifact v="1" id="dashboard" op="create" type="text/html" title="Dashboard">
 <!doctype html><html><body>...</body></html>

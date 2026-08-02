@@ -6,17 +6,17 @@ import {
   Show,
   type Component,
 } from 'solid-js'
-import { highlightCode, renderMarkdown } from '../chatbot/markdown'
+import { CodeBlock } from '../chatbot/CodeBlock'
+import { MarkdownContent } from '../chatbot/MarkdownContent'
 import { ArtifactCard } from './ArtifactCard'
 import { getInlineArtifactRenderMode } from './streamingParts'
 import type { ArtifactDraftClientState } from './types'
 
-function useDebouncedHtml(
+function useDebouncedValue(
   source: () => string,
-  render: (content: string) => string,
   delay = 100,
 ) {
-  const [html, setHtml] = createSignal('')
+  const [value, setValue] = createSignal(source())
   let timer: number | undefined
 
   createEffect(() => {
@@ -24,14 +24,14 @@ function useDebouncedHtml(
     if (timer !== undefined) window.clearTimeout(timer)
     timer = window.setTimeout(() => {
       timer = undefined
-      setHtml(render(content))
+      setValue(content)
     }, delay)
   })
 
   onCleanup(() => {
     if (timer !== undefined) window.clearTimeout(timer)
   })
-  return html
+  return value
 }
 
 const sourceLanguage = (draft: ArtifactDraftClientState) => {
@@ -52,19 +52,8 @@ const statusLabel = (draft: ArtifactDraftClientState) => {
 const InlineDraftBody: Component<{ draft: ArtifactDraftClientState }> = (props) => {
   let scrollRef: HTMLDivElement | undefined
   let followTail = true
-  const markdownHtml = useDebouncedHtml(
+  const markdownSource = useDebouncedValue(
     () => props.draft.content,
-    renderMarkdown,
-  )
-  const highlightedHtml = useDebouncedHtml(
-    () => props.draft.content,
-    (content) => highlightCode(
-      content,
-      props.draft.type === 'application/vnd.artifact.code'
-        ? props.draft.language
-        : sourceLanguage(props.draft),
-    ).html,
-    80,
   )
   const renderMode = () => getInlineArtifactRenderMode(props.draft.type)
 
@@ -85,7 +74,7 @@ const InlineDraftBody: Component<{ draft: ArtifactDraftClientState }> = (props) 
       }}
     >
       <Show when={renderMode() === 'markdown'}>
-        <div class="markdown-message bg-white p-4 text-slate-700" innerHTML={markdownHtml()} />
+        <MarkdownContent source={markdownSource()} class="bg-white p-4 text-slate-700" />
       </Show>
       <Show when={renderMode() === 'text'}>
         <pre class="m-0 whitespace-pre-wrap break-words bg-white p-4 font-sans text-sm leading-6 text-slate-700">
@@ -93,9 +82,17 @@ const InlineDraftBody: Component<{ draft: ArtifactDraftClientState }> = (props) 
         </pre>
       </Show>
       <Show when={renderMode() === 'source'}>
-        <pre class="m-0 min-h-24 whitespace-pre-wrap break-words p-4 text-xs leading-5 text-slate-100">
-          <code class="hljs" innerHTML={highlightedHtml()} />
-        </pre>
+        <CodeBlock
+          class="min-h-24 rounded-none border-0"
+          code={props.draft.content}
+          language={
+            props.draft.type === 'application/vnd.artifact.code'
+              ? props.draft.language
+              : sourceLanguage(props.draft)
+          }
+          isStreaming={props.draft.status === 'streaming'}
+          showLineNumbers
+        />
       </Show>
       <Show when={renderMode() === 'unsupported'}>
         <p class="m-0 bg-white p-4 text-sm text-slate-500">

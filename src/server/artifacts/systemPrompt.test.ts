@@ -13,6 +13,8 @@ test('Artifact prompt supplies exact current identity and complete snapshot', ()
   assert.match(prompt, /id="dashboard" version=3/)
   assert.match(prompt, /"<h1>current<\/h1>"/)
   assert.match(prompt, /never an Artifact function\/tool call/i)
+  assert.match(prompt, /Preserve real source newlines and indentation/i)
+  assert.match(prompt, /Artifact bodies[\s\S]*must never be wrapped in Markdown fences/i)
 })
 
 test('Artifact prompt forbids replace when complete content is unavailable', () => {
@@ -25,4 +27,3 @@ test('Artifact prompt forbids replace when complete content is unavailable', () 
   }])
   assert.match(prompt, /Do not replace it/)
 })
-

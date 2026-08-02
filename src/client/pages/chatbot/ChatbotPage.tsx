@@ -942,14 +942,14 @@ function ChatComposer(props: {
       return
     }
 
-    const validFiles = files.filter((file) => file.name.toLowerCase().endsWith('.fasq'))
+    const validFiles = files.filter((file) => file.name.toLowerCase().endsWith('.fastq'))
     const hasInvalidFile = validFiles.length !== files.length
 
     if (validFiles.length > 0) {
       appendFiles(validFiles)
     }
 
-    setFileError(hasInvalidFile ? '仅支持上传 .fasq 文件' : '')
+    setFileError(hasInvalidFile ? '仅支持上传 .fastq 文件' : '')
     event.currentTarget.value = ''
   }
 
@@ -1012,7 +1012,7 @@ function ChatComposer(props: {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".fasq"
+          accept=".fastq"
           multiple
           hidden
           onChange={handleFileChange}
@@ -1022,7 +1022,7 @@ function ChatComposer(props: {
           rows={props.centered ? 3 : 2}
           value={props.value}
           placeholder={props.placeholder ?? '输入你的问题，回车发送'}
-          class="min-h-12 w-full resize-none border-none bg-transparent px-3 py-2 text-base leading-7 text-slate-700 outline-none placeholder:text-slate-400"
+          class="gpas-scrollbar scrollbar-fade min-h-12 w-full resize-none border-none bg-transparent px-3 py-2 text-base leading-7 text-slate-700 outline-none placeholder:text-slate-400"
           onInput={(event) => handleComposerInput(event.currentTarget.value)}
           onKeyDown={handleKeyDown}
         />
@@ -1047,7 +1047,7 @@ function ChatComposer(props: {
           <p class="mt-2 px-3 text-xs font-medium text-sky-700">{voiceHint()}</p>
         </Show>
 
-        <div class="mt-3 flex items-center justify-between gap-3 px-2 pt-3">
+        <div class="flex items-center justify-between gap-3 px-2">
           <PopupMenu
             buttonLabel="打开附件菜单"
             buttonClass="grid h-11 w-11 place-items-center rounded-full text-slate-500 transition duration-200 hover:border-slate-300 hover:bg-slate-50 hover:text-teal-700"

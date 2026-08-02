@@ -7,13 +7,27 @@ import {
   renderStrictMermaid,
   sanitizeArtifactSvg,
 } from './features/artifacts/renderers'
-import { renderMarkdown } from './features/chatbot/markdown'
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ArtifactSidePanel } from './features/artifacts/ArtifactSidePanel'
 import { artifactStore } from './features/artifacts/artifactStore'
+import { MarkdownContent } from './features/chatbot/MarkdownContent'
 
 let disposePanel: (() => void) | undefined
+let disposeMarkdown: (() => void) | undefined
+
+async function mountMarkdownFixture(content: string) {
+  disposeMarkdown?.()
+  document.querySelector('#markdown-test-root')?.remove()
+  const root = document.createElement('div')
+  root.id = 'markdown-test-root'
+  document.body.append(root)
+  disposeMarkdown = render(
+    () => createComponent(MarkdownContent, { source: content }),
+    root,
+  )
+  await new Promise((resolve) => window.setTimeout(resolve, 350))
+}
 
 async function mountCommittedArtifactPanel() {
   disposePanel?.()
@@ -130,7 +144,7 @@ Object.assign(window, {
     buildHtmlSandboxDocument,
     sanitizeArtifactSvg,
     renderStrictMermaid,
-    renderMarkdown,
+    mountMarkdownFixture,
     mountCommittedArtifactPanel,
     switchArtifactPanelConversation,
     mountArtifactPair,
