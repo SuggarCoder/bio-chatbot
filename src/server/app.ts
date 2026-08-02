@@ -34,6 +34,15 @@ import {
   GenerationService,
 } from './generation.js'
 import type { ObjectStore } from './storage/objectStore.js'
+import {
+  ArtifactService,
+  ArtifactServiceError,
+} from './artifacts/service.js'
+import {
+  getArtifactForUser,
+  listArtifactsForChat,
+  listArtifactVersionsForUser,
+} from './artifacts/repository.js'
 
 const APP_BASE = '/ai-chatbot/'
 const API_BASE = '/ai-chatbot/api'
@@ -139,6 +148,7 @@ export type AppDependencies = {
   redis: RedisClient
   generations: GenerationService
   objectStore: ObjectStore | null
+  artifactService: ArtifactService | null
 }
 
 export async function buildApp(
@@ -150,6 +160,7 @@ export async function buildApp(
     redis,
     generations,
     objectStore,
+    artifactService,
   } = dependencies
   const app = Fastify({
     logger: true,
@@ -167,6 +178,12 @@ export async function buildApp(
     if (error instanceof GenerationRejectedError) {
       return reply.code(error.statusCode).send(
         errorBody(request, error.code, error.message),
+      )
+    }
+
+    if (error instanceof ArtifactServiceError) {
+      return reply.code(503).send(
+        errorBody(request, 'artifact_storage_unavailable', error.message),
       )
     }
 
@@ -252,6 +269,189 @@ export async function buildApp(
   app.get(`${API_BASE}/me`, async (request) => {
     return authenticate(request)
   })
+
+  app.get<{
+    Params: { chatId: string }
+  }>(`${API_BASE}/chats/:chatId/artifacts`, async (request, reply) => {
+    const user = await authenticate(request)
+    const chatId = requireUuid(request, reply, request.params.chatId, 'chatId')
+    if (!chatId) return
+
+    const rows = await listArtifactsForChat(database, user.id, chatId)
+    return {
+      artifacts: rows.map((row) => ({
+        ...row,
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+    }
+  })
+
+  app.get<{
+    Params: { artifactId: string }
+  }>(`${API_BASE}/artifacts/:artifactId`, async (request, reply) => {
+    const user = await authenticate(request)
+    const artifactId = requireUuid(
+      request,
+      reply,
+      request.params.artifactId,
+      'artifactId',
+    )
+    if (!artifactId) return
+
+    const artifact = await getArtifactForUser(database, user.id, artifactId)
+    if (!artifact) {
+      return reply.code(404).send(
+        errorBody(request, 'artifact_not_found', 'Artifact not found'),
+      )
+    }
+
+    let content: string | undefined
+    if (artifactService && artifact.currentVersion > 0) {
+      const version = await artifactService.readVersion(
+        user.id,
+        artifactId,
+        artifact.currentVersion,
+      )
+      if (version) {
+        const chunks: Buffer[] = []
+        let total = 0
+        for await (const chunk of version.stored.body) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+          total += bytes.length
+          if (total > 1024 * 1024) {
+            version.stored.body.destroy()
+            throw new Error('Stored Artifact exceeds the v1 size limit')
+          }
+          chunks.push(bytes)
+        }
+        content = Buffer.concat(chunks).toString('utf8')
+      }
+    }
+
+    return {
+      ...artifact,
+      createdAt: artifact.createdAt.toISOString(),
+      updatedAt: artifact.updatedAt.toISOString(),
+      content,
+    }
+  })
+
+  app.get<{
+    Params: { artifactId: string }
+  }>(`${API_BASE}/artifacts/:artifactId/versions`, async (request, reply) => {
+    const user = await authenticate(request)
+    const artifactId = requireUuid(
+      request,
+      reply,
+      request.params.artifactId,
+      'artifactId',
+    )
+    if (!artifactId) return
+
+    const artifact = await getArtifactForUser(database, user.id, artifactId)
+    if (!artifact) {
+      return reply.code(404).send(
+        errorBody(request, 'artifact_not_found', 'Artifact not found'),
+      )
+    }
+    const versions = await listArtifactVersionsForUser(
+      database,
+      user.id,
+      artifactId,
+    )
+    return {
+      versions: versions.map((version) => ({
+        ...version,
+        byteLength: Number(version.byteLength),
+        createdAt: version.createdAt.toISOString(),
+      })),
+    }
+  })
+
+  const readArtifactVersion = async (
+    request: FastifyRequest<{
+      Params: { artifactId: string; version: string }
+    }>,
+    reply: FastifyReply,
+    download: boolean,
+  ) => {
+    const user = await authenticate(request)
+    const artifactId = requireUuid(
+      request,
+      reply,
+      request.params.artifactId,
+      'artifactId',
+    )
+    const versionNumber = Number(request.params.version)
+    if (!artifactId) return
+    if (!Number.isSafeInteger(versionNumber) || versionNumber < 1) {
+      return reply.code(400).send(
+        errorBody(request, 'invalid_request', 'version must be a positive integer'),
+      )
+    }
+    if (!artifactService) {
+      return reply.code(503).send(
+        errorBody(request, 'artifact_storage_unavailable', 'Artifact storage is unavailable'),
+      )
+    }
+
+    const version = await artifactService.readVersion(
+      user.id,
+      artifactId,
+      versionNumber,
+    )
+    if (!version) {
+      return reply.code(404).send(
+        errorBody(request, 'artifact_version_not_found', 'Artifact version not found'),
+      )
+    }
+
+    if (download) {
+      const extension = {
+        'text/markdown': '.md',
+        'text/plain': '.txt',
+        'text/html': '.html',
+        'image/svg+xml': '.svg',
+        'application/vnd.artifact.code': '.txt',
+        'application/vnd.artifact.mermaid': '.mmd',
+      }[version.record.type] ?? '.txt'
+      const encodedTitle = encodeURIComponent(
+        `${version.record.title}${extension}`,
+      ).replaceAll("'", '%27')
+      reply.headers({
+        'content-type': version.record.type,
+        'content-length': String(version.record.byteLength),
+        'content-disposition': `attachment; filename="artifact-v${versionNumber}${extension}"; filename*=UTF-8''${encodedTitle}`,
+        'x-content-type-options': 'nosniff',
+        'cache-control': 'private, no-store',
+      })
+      return reply.send(version.stored.body)
+    }
+
+    const chunks: Buffer[] = []
+    for await (const chunk of version.stored.body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    }
+    const { storageKey: _storageKey, ...publicRecord } = version.record
+    return {
+      ...publicRecord,
+      byteLength: Number(version.record.byteLength),
+      createdAt: version.record.createdAt.toISOString(),
+      content: Buffer.concat(chunks).toString('utf8'),
+    }
+  }
+
+  app.get<{
+    Params: { artifactId: string; version: string }
+  }>(`${API_BASE}/artifacts/:artifactId/versions/:version`, (request, reply) =>
+    readArtifactVersion(request, reply, false),
+  )
+
+  app.get<{
+    Params: { artifactId: string; version: string }
+  }>(`${API_BASE}/artifacts/:artifactId/versions/:version/download`, (request, reply) =>
+    readArtifactVersion(request, reply, true),
+  )
 
   app.get(`${API_BASE}/chats`, async (request) => {
     const user = await authenticate(request)

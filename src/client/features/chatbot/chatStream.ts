@@ -8,17 +8,51 @@ import { isCurrentGeneration } from './generationIdentity'
 type StreamIdentity = {
   generationId: string
   streamId: string
+  messageId: string
+  eventId: number
 }
 
 export type ChatStreamEvent =
   | StreamIdentity & {
-      type: 'generation.start'
+      type: 'message.start'
       userMessage: ChatMessageDto
     }
   | StreamIdentity & {
-      type: 'text.delta'
+      type: 'message.delta'
+      sequence: number
       startIndex: number
       delta: string
+    }
+  | StreamIdentity & {
+      type: 'artifact.start'
+      artifactStreamId: string
+      logicalId: string
+      operation: 'create' | 'replace'
+      artifactType: string
+      title: string
+      baseVersion: number | null
+    }
+  | StreamIdentity & {
+      type: 'artifact.delta'
+      artifactStreamId: string
+      sequence: number
+      delta: string
+    }
+  | StreamIdentity & {
+      type: 'artifact.commit'
+      artifactStreamId: string
+      artifactId: string
+      logicalId: string
+      version: number
+      sha256: string
+      byteLength: number
+    }
+  | StreamIdentity & {
+      type: 'artifact.error'
+      artifactStreamId?: string
+      code: string
+      message: string
+      recoverable: boolean
     }
   | StreamIdentity & {
       type: 'tool.start'
@@ -31,18 +65,10 @@ export type ChatStreamEvent =
       toolName: string
     }
   | StreamIdentity & {
-      type: 'generation.completed'
-      assistantMessage: ChatMessageDto
-    }
-  | StreamIdentity & {
-      type: 'generation.cancelled'
+      type: 'message.finish'
+      finishReason: 'stop' | 'cancelled' | 'error' | 'length'
       assistantMessage: ChatMessageDto | null
-    }
-  | StreamIdentity & {
-      type: 'generation.failed'
-      code: string
-      message: string
-      assistantMessage: ChatMessageDto | null
+      error?: { code: string; message: string }
     }
 
 export class StreamCompletedError extends Error {
@@ -93,7 +119,7 @@ function parseEventBlock(block: string): ChatStreamEvent | null {
 
 async function consumeSse(
   response: Response,
-  state: { buffer: string; receivedCharacters: number },
+  state: { buffer: string; receivedCharacters: number; seenEventIds: Set<number> },
   request: StreamRequest,
 ): Promise<boolean> {
   if (!response.body) {
@@ -136,12 +162,11 @@ async function consumeSse(
         continue
       }
 
+      if (state.seenEventIds.has(event.eventId)) continue
+      state.seenEventIds.add(event.eventId)
+
       request.onEvent(event)
-      terminal = [
-        'generation.completed',
-        'generation.cancelled',
-        'generation.failed',
-      ].includes(event.type)
+      terminal = event.type === 'message.finish'
     }
   }
 
@@ -149,7 +174,11 @@ async function consumeSse(
 }
 
 export async function runChatStream(request: StreamRequest): Promise<void> {
-  const state = { buffer: '', receivedCharacters: 0 }
+  const state = {
+    buffer: '',
+    receivedCharacters: 0,
+    seenEventIds: new Set<number>(),
+  }
   let retries = 0
 
   while (!request.signal.aborted) {

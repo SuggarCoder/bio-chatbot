@@ -18,6 +18,7 @@ export type AppConfig = {
   maxConcurrentGenerations: number
   monthlyTokenLimit: number
   generationLeaseSeconds: number
+  artifactProtocolEnabled: boolean
   objectStorage: ObjectStorageConfig
 }
 
@@ -208,6 +209,11 @@ export function readConfig(): AppConfig {
     maxConcurrentGenerations: positiveInteger('MAX_CONCURRENT_GENERATIONS', 1),
     monthlyTokenLimit: positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true),
     generationLeaseSeconds: positiveInteger('GENERATION_LEASE_SECONDS', 120),
+    artifactProtocolEnabled: booleanValue(
+      process.env,
+      'ARTIFACT_PROTOCOL_ENABLED',
+      false,
+    ),
     objectStorage: readObjectStorageConfig(process.env, nodeEnv),
   }
 }

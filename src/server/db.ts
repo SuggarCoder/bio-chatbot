@@ -14,6 +14,13 @@ import {
 } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 
+import {
+  commitPreparedArtifact,
+  materializeMessageParts,
+  type CommittedArtifactVersion,
+  type PreparedArtifactVersion,
+} from './artifacts/repository.js'
+
 import type {
   ActiveGenerationDto,
   ChatDetailDto,
@@ -234,12 +241,38 @@ export async function deleteChat(
 }
 
 export function mapMessage(row: MessageRow): ChatMessageDto {
-  const content = Array.isArray(row.parts)
-    ? row.parts
-        .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-        .map((part) => part.text)
-        .join('')
-    : ''
+  const parts: ChatMessageDto['parts'] = []
+  if (Array.isArray(row.parts)) {
+    row.parts.forEach((part, index) => {
+        if (part?.type === 'text' && typeof part.text === 'string') {
+          parts.push({
+            type: 'text' as const,
+            order: typeof part.order === 'number' ? part.order : index,
+            text: part.text,
+          })
+          return
+        }
+        if (
+          part?.type === 'artifact_ref' &&
+          typeof part.artifactId === 'string' &&
+          typeof part.logicalId === 'string' &&
+          typeof part.version === 'number'
+        ) {
+          parts.push({
+            type: 'artifact_ref' as const,
+            order: typeof part.order === 'number' ? part.order : index,
+            artifactId: part.artifactId,
+            logicalId: part.logicalId,
+            version: part.version,
+          })
+        }
+      })
+  }
+  parts.sort((left, right) => left.order - right.order)
+  const content = parts
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('')
 
   return {
     id: row.id,
@@ -247,6 +280,7 @@ export function mapMessage(row: MessageRow): ChatMessageDto {
     role: row.role as ChatMessageDto['role'],
     status: row.status as ChatMessageDto['status'],
     content,
+    parts,
     createdAt: asIso(row.createdAt),
     vote:
       row.isUpvoted === true
@@ -991,6 +1025,12 @@ export type FinalizeGenerationInput = {
   userId: string
   desiredStatus: 'completed' | 'failed'
   content: string
+  messageId?: string
+  messageParts?: Array<
+    | { type: 'text'; text: string }
+    | { type: 'artifact_draft_ref'; streamArtifactId: string }
+  >
+  preparedArtifacts?: PreparedArtifactVersion[]
   providerRequestId?: string
   usage: GenerationUsage
   latencyMs: number
@@ -1004,6 +1044,7 @@ export type FinalizedGeneration = {
   generation: GenerationDto
   assistantMessage: ChatMessageDto | null
   newlyFinalized: boolean
+  committedArtifacts: CommittedArtifactVersion[]
 }
 
 export function decideGenerationTerminalStatus(
@@ -1064,6 +1105,7 @@ export async function finalizeGeneration(
         generation: mapGeneration(row),
         assistantMessage: existingMessage ? mapMessage(existingMessage) : null,
         newlyFinalized: false,
+        committedArtifacts: [],
       }
     }
 
@@ -1073,8 +1115,15 @@ export async function finalizeGeneration(
       input.desiredStatus,
     )
     let assistantMessage: ChatMessageDto | null = null
+    let committedArtifacts: CommittedArtifactVersion[] = []
+    const preparedArtifacts = finalStatus === 'completed'
+      ? input.preparedArtifacts ?? []
+      : []
+    const messageParts = input.messageParts ?? [
+      { type: 'text' as const, text: input.content },
+    ]
 
-    if (input.content.trim() && row.chatId) {
+    if ((input.content.trim() || preparedArtifacts.length > 0) && row.chatId) {
       const [sequence] = await transaction
         .update(chats)
         .set({
@@ -1093,14 +1142,28 @@ export async function finalizeGeneration(
         })
 
       if (sequence) {
+        const messageId = input.messageId ?? crypto.randomUUID()
+        const expectedArtifacts = preparedArtifacts.map((prepared) => ({
+          streamArtifactId: prepared.streamArtifactId,
+          artifactId: prepared.artifactId,
+          logicalId: prepared.metadata.id,
+          version: prepared.version,
+          sha256: prepared.contentHash,
+          byteLength: prepared.byteLength,
+        }))
+        const persistedParts = materializeMessageParts(
+          messageParts,
+          expectedArtifacts,
+        )
         const [messageRow] = await transaction
           .insert(messages)
           .values({
+            id: messageId,
             chatId: row.chatId,
             seq: sequence.seq,
             role: 'assistant',
             status: finalStatus,
-            parts: [{ type: 'text', text: input.content }],
+            parts: persistedParts,
             sharedText: finalStatus === 'completed' ? input.content : null,
           })
           .returning({
@@ -1112,6 +1175,16 @@ export async function finalizeGeneration(
             createdAt: messages.createdAt,
           })
         assistantMessage = mapMessage(messageRow)
+
+        for (const prepared of preparedArtifacts) {
+          committedArtifacts.push(await commitPreparedArtifact(transaction, {
+            userId: input.userId,
+            chatId: row.chatId,
+            messageId,
+            generationId: input.generationId,
+            prepared,
+          }))
+        }
       }
     }
 
@@ -1161,6 +1234,7 @@ export async function finalizeGeneration(
       generation: mapGeneration({ ...updated, streamId: row.streamId }),
       assistantMessage,
       newlyFinalized: true,
+      committedArtifacts,
     }
   })
 }

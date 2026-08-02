@@ -51,6 +51,16 @@ export type ChatMessageDto = {
   role: 'user' | 'assistant'
   status: MessageStatus
   content: string
+  parts: Array<
+    | { type: 'text'; order: number; text: string }
+    | {
+        type: 'artifact_ref'
+        order: number
+        artifactId: string
+        logicalId: string
+        version: number
+      }
+  >
   createdAt: string
   vote: 'up' | 'down' | null
   executionSteps: Array<{
@@ -109,17 +119,51 @@ export type ChatDetailDto = ChatSummaryDto & {
 type StreamIdentity = {
   generationId: string
   streamId: string
+  messageId: string
+  eventId: number
 }
 
 export type StreamEvent =
   | StreamIdentity & {
-      type: 'generation.start'
+      type: 'message.start'
       userMessage: ChatMessageDto
     }
   | StreamIdentity & {
-      type: 'text.delta'
+      type: 'message.delta'
+      sequence: number
       startIndex: number
       delta: string
+    }
+  | StreamIdentity & {
+      type: 'artifact.start'
+      artifactStreamId: string
+      logicalId: string
+      operation: 'create' | 'replace'
+      artifactType: string
+      title: string
+      baseVersion: number | null
+    }
+  | StreamIdentity & {
+      type: 'artifact.delta'
+      artifactStreamId: string
+      sequence: number
+      delta: string
+    }
+  | StreamIdentity & {
+      type: 'artifact.commit'
+      artifactStreamId: string
+      artifactId: string
+      logicalId: string
+      version: number
+      sha256: string
+      byteLength: number
+    }
+  | StreamIdentity & {
+      type: 'artifact.error'
+      artifactStreamId?: string
+      code: string
+      message: string
+      recoverable: boolean
     }
   | StreamIdentity & {
       type: 'tool.start'
@@ -132,16 +176,8 @@ export type StreamEvent =
       toolName: string
     }
   | StreamIdentity & {
-      type: 'generation.completed'
-      assistantMessage: ChatMessageDto
-    }
-  | StreamIdentity & {
-      type: 'generation.cancelled'
+      type: 'message.finish'
+      finishReason: 'stop' | 'cancelled' | 'error' | 'length'
       assistantMessage: ChatMessageDto | null
-    }
-  | StreamIdentity & {
-      type: 'generation.failed'
-      code: string
-      message: string
-      assistantMessage: ChatMessageDto | null
+      error?: { code: string; message: string }
     }

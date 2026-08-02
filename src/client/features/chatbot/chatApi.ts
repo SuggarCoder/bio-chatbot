@@ -20,6 +20,16 @@ export type ChatMessageDto = {
   role: 'user' | 'assistant'
   status: 'completed' | 'cancelled' | 'failed'
   content: string
+  parts: Array<
+    | { type: 'text'; order: number; text: string }
+    | {
+        type: 'artifact_ref'
+        order: number
+        artifactId: string
+        logicalId: string
+        version: number
+      }
+  >
   createdAt: string
   vote: 'up' | 'down' | null
   executionSteps: Array<{

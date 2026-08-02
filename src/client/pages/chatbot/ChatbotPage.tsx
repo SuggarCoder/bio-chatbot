@@ -46,6 +46,9 @@ import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
 import { PopupMenu, type PopupMenuEntry, type PopupMenuItem } from '../../shared/ui/PopupMenu'
 import { Tooltip } from '../../shared/ui/Tooltip'
+import { ArtifactCard } from '../../features/artifacts/ArtifactCard'
+import { ArtifactSidePanel } from '../../features/artifacts/ArtifactSidePanel'
+import { artifactStore } from '../../features/artifacts/artifactStore'
 
 type LayoutContextValue = {
   isSidebarOpen: () => boolean
@@ -434,7 +437,7 @@ async function runAssistantReply(
           return
         }
 
-        if (event.type === 'generation.start') {
+        if (event.type === 'message.start') {
           chatStore.startAssistantMessage(conversationId, generationId)
           chatStore.markGenerationStarted(
             conversationId,
@@ -456,7 +459,7 @@ async function runAssistantReply(
             type: 'store',
             detail: 'generation-start:user-confirmation',
           })
-        } else if (event.type === 'text.delta') {
+        } else if (event.type === 'message.delta') {
           if (!responseMarked) {
             responseMarked = true
             chatStore.markAssistantResponding(conversationId, generationId)
@@ -466,6 +469,18 @@ async function runAssistantReply(
             })
           }
           streamSession.push(event.startIndex, event.delta)
+        } else if (event.type === 'artifact.start') {
+          artifactStore.start(event)
+        } else if (event.type === 'artifact.delta') {
+          artifactStore.delta(event.artifactStreamId, event.delta)
+        } else if (event.type === 'artifact.commit') {
+          artifactStore.commit(event)
+        } else if (event.type === 'artifact.error') {
+          artifactStore.error(
+            event.artifactStreamId,
+            event.code,
+            event.message,
+          )
         } else if (event.type === 'tool.start') {
           chatStore.markToolStarted(
             conversationId,
@@ -485,12 +500,19 @@ async function runAssistantReply(
             type: 'store',
             detail: 'tool-result',
           })
-        } else if (event.type === 'generation.completed') {
-          streamSession.finish(event.assistantMessage.content, {
-            kind: 'completed',
-            message: event.assistantMessage,
-          })
-        } else if (event.type === 'generation.cancelled') {
+        } else if (event.type === 'message.finish') {
+          if (event.assistantMessage) {
+            artifactStore.hydrateMessageParts(event.assistantMessage.parts)
+          }
+          if (event.finishReason === 'stop') {
+            streamSession.finish(
+              event.assistantMessage?.content ?? streamSession.canonicalText,
+              {
+                kind: 'completed',
+                message: event.assistantMessage ?? undefined,
+              },
+            )
+          } else if (event.finishReason === 'cancelled') {
           streamSession.finish(
             event.assistantMessage?.content ?? streamSession.canonicalText,
             {
@@ -498,15 +520,16 @@ async function runAssistantReply(
               message: event.assistantMessage,
             },
           )
-        } else if (event.type === 'generation.failed') {
-          streamSession.finish(
-            event.assistantMessage?.content ?? streamSession.canonicalText,
-            {
-              kind: 'failed',
-              errorMessage: event.message,
-              message: event.assistantMessage,
-            },
-          )
+          } else {
+            streamSession.finish(
+              event.assistantMessage?.content ?? streamSession.canonicalText,
+              {
+                kind: 'failed',
+                errorMessage: event.error?.message ?? 'Generation failed',
+                message: event.assistantMessage,
+              },
+            )
+          }
         }
       },
     })
@@ -1494,7 +1517,7 @@ function ChatMessageBubble(props: {
                 props.message.generationId
               }
               keyed
-              fallback={<StaticMarkdown text={props.message.content} />}
+              fallback={<StaticMessageParts message={props.message} />}
             >
               {(generationId) => (
                 <StreamingMarkdown
@@ -1517,6 +1540,26 @@ function ChatMessageBubble(props: {
         </div>
       </div>
     </div>
+  )
+}
+
+function StaticMessageParts(props: { message: ChatMessage }) {
+  const parts = () => props.message.parts.length > 0
+    ? props.message.parts
+    : [{ type: 'text' as const, order: 0, text: props.message.content }]
+
+  return (
+    <For each={parts()}>
+      {(part) => part.type === 'artifact_ref'
+        ? (
+            <ArtifactCard
+              artifactId={part.artifactId}
+              logicalId={part.logicalId}
+              version={part.version}
+            />
+          )
+        : <StaticMarkdown text={part.text} />}
+    </For>
   )
 }
 
@@ -1928,6 +1971,7 @@ function SessionConversationView(props: { conversationId: string }) {
     const controller = activeReplyControllers.get(generationId)
     activeReplyControllers.delete(generationId)
     controller?.abort()
+    artifactStore.abortStreamingDrafts()
 
     if (streamSession) {
       streamSession.finish(streamSession.canonicalText, {
@@ -2234,6 +2278,8 @@ function ChatbotChrome(props: ParentProps) {
           <div class="flex min-w-0 flex-1 flex-col overflow-hidden bg-slate-50 pl-20 lg:pl-0">
             {props.children}
           </div>
+
+          <ArtifactSidePanel />
 
           <Show when={chatStore.initializationError()}>
             {(message) => (

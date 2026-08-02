@@ -29,6 +29,7 @@ function config(
     maxConcurrentGenerations: 1,
     monthlyTokenLimit: 0,
     generationLeaseSeconds: 120,
+    artifactProtocolEnabled: false,
     objectStorage: {
       enabled: false,
       region: 'us-east-1',

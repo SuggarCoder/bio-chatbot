@@ -5,6 +5,7 @@ import {
   type ParentComponent,
 } from 'solid-js'
 import { createStore, produce } from 'solid-js/store'
+import { artifactStore } from '../artifacts/artifactStore'
 
 import {
   ChatApiError,
@@ -47,6 +48,7 @@ export type ChatMessage = {
   activity?: GenerationActivity
   role: ChatMessageRole
   content: string
+  parts: ChatMessageDto['parts']
   status: ChatMessageStatus
   createdAt: number
   vote: 'up' | 'down' | null
@@ -160,6 +162,9 @@ function buildOptimisticMessage(
     clientMessageId: role === 'user' ? id : undefined,
     role,
     content,
+    parts: content
+      ? [{ type: 'text', order: 0, text: content }]
+      : [],
     status,
     createdAt: Date.now(),
     vote: null,
@@ -168,10 +173,12 @@ function buildOptimisticMessage(
 }
 
 function mapMessage(message: ChatMessageDto): ChatMessage {
+  artifactStore.hydrateMessageParts(message.parts)
   return {
     id: message.id,
     role: message.role,
     content: message.content,
+    parts: message.parts,
     status:
       message.status === 'cancelled'
         ? 'cancelled'
@@ -636,6 +643,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           if (message) {
             activeMessage.id = message.id
             activeMessage.content = message.content
+            activeMessage.parts = message.parts
             activeMessage.createdAt = new Date(
               message.createdAt,
             ).getTime()
@@ -698,6 +706,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           if (message) {
             activeMessage.id = message.id
             activeMessage.content = message.content
+            activeMessage.parts = message.parts
           } else if (content) {
             activeMessage.content = content
           } else if (!activeMessage.content.trim()) {
@@ -781,6 +790,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           if (message) {
             activeMessage.id = message.id
             activeMessage.content = message.content
+            activeMessage.parts = message.parts
             activeMessage.createdAt = new Date(
               message.createdAt,
             ).getTime()

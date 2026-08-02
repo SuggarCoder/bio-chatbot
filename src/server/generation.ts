@@ -15,6 +15,18 @@ import {
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
+import { ArtifactStreamParser } from './artifacts/parser.js'
+import {
+  ArtifactCommitError,
+  listArtifactsForChat,
+  type PreparedArtifactVersion,
+} from './artifacts/repository.js'
+import {
+  ArtifactService,
+  ArtifactServiceError,
+  type CompletedArtifactDraft,
+} from './artifacts/service.js'
+import { buildArtifactSystemPrompt } from './artifacts/systemPrompt.js'
 import {
   createGenerationStart,
   createRegenerationStart,
@@ -58,8 +70,14 @@ type StartGenerationInput = {
 
 type CompletedUsage = GenerationUsage
 
+type StreamEventPayload = StreamEvent extends infer Event
+  ? Event extends StreamEvent
+    ? Omit<Event, 'generationId' | 'streamId' | 'messageId' | 'eventId'>
+    : never
+  : never
+
 function serializeEvent(event: StreamEvent): string {
-  return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+  return `id: ${event.eventId}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
 }
 
 function asNonNegativeInteger(value: unknown): number {
@@ -114,6 +132,13 @@ export class GenerationRejectedError extends Error {
   }
 }
 
+class GenerationLengthError extends Error {
+  constructor() {
+    super('Model output reached its configured token limit')
+    this.name = 'GenerationLengthError'
+  }
+}
+
 export class GenerationService {
   private readonly qwen: OpenAI
   private readonly streamContext: ResumableStreamContext
@@ -124,6 +149,7 @@ export class GenerationService {
     private readonly redis: RedisClient,
     private readonly runtimes: GenerationRuntimeRegistry,
     private readonly finalizer: GenerationFinalizer,
+    private readonly artifactService: ArtifactService | null = null,
   ) {
     this.qwen = new OpenAI({
       apiKey: config.qwenApiKey,
@@ -498,6 +524,16 @@ export class GenerationService {
   ): Promise<void> {
     const startedAt = Date.now()
     let firstTokenAt: number | null = null
+    const messageId = crypto.randomUUID()
+    let eventId = 0
+    let messageSequence = 0
+    const messageParts: Array<
+      | { type: 'text'; text: string }
+      | { type: 'artifact_draft_ref'; streamArtifactId: string }
+    > = []
+    const completedDrafts: CompletedArtifactDraft[] = []
+    const acceptedArtifactIds = new Set<string>()
+    let preparedArtifacts: PreparedArtifactVersion[] = []
     const leaseTimer = setInterval(() => {
       if (runtime.controller.signal.aborted) {
         return
@@ -511,14 +547,94 @@ export class GenerationService {
       )
     }, Math.max(10_000, (this.config.generationLeaseSeconds * 1000) / 3))
 
-    const emit = (event: StreamEvent) => {
-      controller.enqueue(serializeEvent(event))
+    const emit = (
+      event: StreamEventPayload,
+    ) => {
+      eventId += 1
+      controller.enqueue(serializeEvent({
+        ...event,
+        generationId: start.generationId,
+        streamId: start.streamId,
+        messageId,
+        eventId,
+      } as StreamEvent))
     }
 
+    const appendTextPart = (delta: string) => {
+      if (!delta) return
+      const previous = messageParts.at(-1)
+      if (previous?.type === 'text') previous.text += delta
+      else messageParts.push({ type: 'text', text: delta })
+    }
+
+    const artifactService = this.artifactService
+    const artifactEnabled =
+      this.config.artifactProtocolEnabled && artifactService !== null
+    const parser = artifactEnabled
+      ? new ArtifactStreamParser({
+          onTextDelta: (delta) => {
+            const startIndex = runtime.partialOutput.length
+            runtime.partialOutput += delta
+            appendTextPart(delta)
+            messageSequence += 1
+            emit({
+              type: 'message.delta',
+              sequence: messageSequence,
+              startIndex,
+              delta,
+            })
+          },
+          onArtifactStart: ({ streamArtifactId, metadata }) => {
+            if (acceptedArtifactIds.size >= 1) {
+              emit({
+                type: 'artifact.error',
+                artifactStreamId: streamArtifactId,
+                code: 'ARTIFACT_LIMIT_EXCEEDED',
+                message: 'Only one Artifact can be committed per assistant message.',
+                recoverable: true,
+              })
+              return
+            }
+            acceptedArtifactIds.add(streamArtifactId)
+            messageParts.push({ type: 'artifact_draft_ref', streamArtifactId })
+            emit({
+              type: 'artifact.start',
+              artifactStreamId: streamArtifactId,
+              logicalId: metadata.id,
+              operation: metadata.op,
+              artifactType: metadata.type,
+              title: metadata.title,
+              baseVersion: metadata.base_version ?? null,
+            })
+          },
+          onArtifactDelta: ({ streamArtifactId, sequence, delta }) => {
+            if (!acceptedArtifactIds.has(streamArtifactId)) return
+            emit({
+              type: 'artifact.delta',
+              artifactStreamId: streamArtifactId,
+              sequence,
+              delta,
+            })
+          },
+          onArtifactCommit: (draft) => {
+            if (acceptedArtifactIds.has(draft.streamArtifactId)) {
+              completedDrafts.push(draft)
+            }
+          },
+          onArtifactError: ({ streamArtifactId, code, message, recoverable }) => {
+            emit({
+              type: 'artifact.error',
+              artifactStreamId: streamArtifactId,
+              code,
+              message,
+              recoverable,
+            })
+          },
+        })
+      : null
+
     emit({
-      type: 'generation.start',
-      generationId: start.generationId,
-      streamId: start.streamId,
+      type: 'message.start',
       userMessage: start.userMessage,
     })
 
@@ -562,9 +678,39 @@ export class GenerationService {
       }
 
       await this.checkpoint(runtime)
+      const artifactCatalog = artifactEnabled
+        ? await listArtifactsForChat(this.database, input.user.id, input.chatId)
+        : []
+      const artifactPromptCatalog = artifactEnabled && artifactService
+        ? await Promise.all(artifactCatalog.slice(0, 50).flatMap((artifact, index) =>
+            artifact.logicalId && artifact.type
+              ? [index < 5
+                  ? artifactService.readVersionContent(
+                      input.user.id,
+                      artifact.id,
+                      artifact.currentVersion,
+                    ).catch(() => null).then((content) => ({
+                      logicalId: artifact.logicalId!,
+                      version: artifact.currentVersion,
+                      type: artifact.type!,
+                      title: artifact.title,
+                      content,
+                    }))
+                  : Promise.resolve({
+                      logicalId: artifact.logicalId,
+                      version: artifact.currentVersion,
+                      type: artifact.type,
+                      title: artifact.title,
+                    })]
+              : [],
+          ))
+        : []
       const responseStream = await this.qwen.responses.create(
         {
           model: this.config.qwenModel,
+          instructions: artifactEnabled
+            ? buildArtifactSystemPrompt(artifactPromptCatalog)
+            : undefined,
           input: context.messages.map((message) => ({
             role: message.role,
             content: message.content,
@@ -611,18 +757,27 @@ export class GenerationService {
             firstTokenAt = Date.now()
           }
 
-          const startIndex = runtime.partialOutput.length
-          runtime.partialOutput += event.delta
-          emit({
-            type: 'text.delta',
-            generationId: start.generationId,
-            streamId: start.streamId,
-            startIndex,
-            delta: event.delta,
-          })
+          if (parser) {
+            parser.push(event.delta)
+          } else {
+            const startIndex = runtime.partialOutput.length
+            runtime.partialOutput += event.delta
+            appendTextPart(event.delta)
+            messageSequence += 1
+            emit({
+              type: 'message.delta',
+              sequence: messageSequence,
+              startIndex,
+              delta: event.delta,
+            })
+          }
         } else if (event.type === 'response.completed') {
           runtime.providerRequestId = event.response.id
           runtime.usage = extractUsage(event.response)
+        } else if (event.type === 'response.incomplete') {
+          runtime.providerRequestId = event.response.id
+          runtime.usage = extractUsage(event.response)
+          throw new GenerationLengthError()
         } else if (event.type === 'response.failed') {
           throw new Error(
             event.response.error?.message || 'Qwen generation failed',
@@ -633,9 +788,38 @@ export class GenerationService {
       }
 
       await this.checkpoint(runtime)
+      parser?.finish()
 
-      if (!runtime.partialOutput.trim()) {
+      if (!runtime.partialOutput.trim() && completedDrafts.length === 0) {
         throw new Error('Qwen returned an empty response')
+      }
+
+      if (this.artifactService) {
+        for (const draft of completedDrafts) {
+          try {
+            preparedArtifacts.push(await this.artifactService.prepare(
+              input.user.id,
+              input.chatId,
+              draft,
+              runtime.controller.signal,
+            ))
+          } catch (error) {
+            const failure = error instanceof ArtifactServiceError
+              ? error
+              : new ArtifactServiceError(
+                  'ARTIFACT_STORAGE_FAILED',
+                  'Artifact could not be prepared.',
+                  { cause: error },
+                )
+            emit({
+              type: 'artifact.error',
+              artifactStreamId: draft.streamArtifactId,
+              code: failure.code,
+              message: failure.message,
+              recoverable: true,
+            })
+          }
+        }
       }
 
       const result = await this.finalizer.finalize({
@@ -643,6 +827,9 @@ export class GenerationService {
         userId: input.user.id,
         desiredStatus: 'completed',
         content: runtime.partialOutput,
+        messageId,
+        messageParts,
+        preparedArtifacts,
         providerRequestId: runtime.providerRequestId,
         usage: runtime.usage,
         latencyMs: Date.now() - startedAt,
@@ -651,62 +838,98 @@ export class GenerationService {
         finishReason: 'completed',
       })
 
-      if (result.generation.status === 'cancelled') {
-        emit({
-          type: 'generation.cancelled',
-          generationId: start.generationId,
-          streamId: start.streamId,
-          assistantMessage: result.assistantMessage,
-        })
-      } else if (result.assistantMessage) {
-        emit({
-          type: 'generation.completed',
-          generationId: start.generationId,
-          streamId: start.streamId,
-          assistantMessage: result.assistantMessage,
-        })
+      if (
+        result.generation.status !== 'completed' &&
+        preparedArtifacts.length > 0
+      ) {
+        await this.artifactService?.cleanup(preparedArtifacts)
+        preparedArtifacts = []
       }
+
+      if (result.generation.status === 'completed') {
+        for (const artifact of result.committedArtifacts) {
+          emit({
+            type: 'artifact.commit',
+            artifactStreamId: artifact.streamArtifactId,
+            artifactId: artifact.artifactId,
+            logicalId: artifact.logicalId,
+            version: artifact.version,
+            sha256: artifact.sha256,
+            byteLength: artifact.byteLength,
+          })
+        }
+      }
+      emit({
+        type: 'message.finish',
+        finishReason: result.generation.status === 'cancelled'
+          ? 'cancelled'
+          : 'stop',
+        assistantMessage: result.assistantMessage,
+      })
       controller.close()
     } catch (error) {
       const cancelled =
         error instanceof GenerationCancellationError ||
         runtime.controller.signal.aborted
+      const lengthLimited = error instanceof GenerationLengthError
       const message =
         error instanceof Error ? error.message : 'Generation failed'
+      if (lengthLimited) parser?.finish()
+      else parser?.abort(cancelled ? 'Artifact generation was stopped.' : message)
+      if (preparedArtifacts.length > 0) {
+        await this.artifactService?.cleanup(preparedArtifacts)
+      }
+      if (error instanceof ArtifactCommitError) {
+        for (const prepared of preparedArtifacts) {
+          emit({
+            type: 'artifact.error',
+            artifactStreamId: prepared.streamArtifactId,
+            code: error.code,
+            message: error.message,
+            recoverable: true,
+          })
+        }
+      }
       const result = await this.finalizer.finalize({
         generationId: start.generationId,
         userId: input.user.id,
         desiredStatus: 'failed',
         content: runtime.partialOutput,
+        messageId,
+        messageParts,
         providerRequestId: runtime.providerRequestId,
         usage: runtime.usage,
         latencyMs: Date.now() - startedAt,
         timeToFirstTokenMs:
           firstTokenAt === null ? null : firstTokenAt - startedAt,
-        finishReason: cancelled ? 'cancelled' : 'failed',
+        finishReason: cancelled
+          ? 'cancelled'
+          : lengthLimited
+            ? 'length'
+            : 'failed',
         errorCode: cancelled
           ? 'generation_cancelled'
-          : 'generation_failed',
+          : lengthLimited
+            ? 'generation_length'
+            : 'generation_failed',
         errorMessage: message,
       })
 
-      if (result.generation.status === 'cancelled') {
-        emit({
-          type: 'generation.cancelled',
-          generationId: start.generationId,
-          streamId: start.streamId,
-          assistantMessage: result.assistantMessage,
-        })
-      } else {
-        emit({
-          type: 'generation.failed',
-          generationId: start.generationId,
-          streamId: start.streamId,
-          code: result.generation.errorCode ?? 'generation_failed',
-          message: result.generation.errorMessage ?? message,
-          assistantMessage: result.assistantMessage,
-        })
-      }
+      emit({
+        type: 'message.finish',
+        finishReason: result.generation.status === 'cancelled'
+          ? 'cancelled'
+          : lengthLimited
+            ? 'length'
+            : 'error',
+        assistantMessage: result.assistantMessage,
+        error: result.generation.status === 'cancelled'
+          ? undefined
+          : {
+              code: result.generation.errorCode ?? 'generation_failed',
+              message: result.generation.errorMessage ?? message,
+            },
+      })
       controller.close()
     } finally {
       clearInterval(leaseTimer)

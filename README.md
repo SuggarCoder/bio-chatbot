@@ -2,6 +2,9 @@
 
 SeaweedFS S3 底仓配置与本地验证参见 [docs/object-storage.md](docs/object-storage.md)。
 
+Artifact Protocol v1 规范、迁移、事件和安全边界参见
+[docs/artifact-protocol-v1.md](docs/artifact-protocol-v1.md)。该能力默认关闭，启用时必须同时配置私有对象存储。
+
 基于 SolidJS、Fastify、PostgreSQL、Redis 和阿里云百炼 Qwen 的 GPAS2 Chatbot。
 
 ## 本地开发

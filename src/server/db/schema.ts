@@ -25,11 +25,23 @@ import {
 
 export type JsonRecord = Record<string, unknown>
 
-export type MessagePart = {
-  type?: string
-  text?: string
-  [key: string]: unknown
-}
+export type MessagePart =
+  | {
+      type: 'text'
+      order?: number
+      text: string
+    }
+  | {
+      type: 'artifact_ref'
+      order: number
+      artifactId: string
+      logicalId: string
+      version: number
+    }
+  | {
+      type?: string
+      [key: string]: unknown
+    }
 
 const timestampTz = (name: string) =>
   timestamp(name, { withTimezone: true, mode: 'date' })
@@ -495,6 +507,8 @@ export const artifacts = pgTable(
     analysisJobId: uuid('analysisJobId').references(() => analysisJobs.id, {
       onDelete: 'set null',
     }),
+    logicalId: varchar('logicalId', { length: 64 }),
+    currentVersion: integer('currentVersion').notNull().default(0),
     title: text('title').notNull(),
     artifactType: varchar('artifactType', { length: 32 }).notNull(),
     isChatShareable: boolean('isChatShareable')
@@ -521,11 +535,16 @@ export const artifacts = pgTable(
     ),
     check(
       'chk_artifact_format',
-      sql`${table.format} in ('html', 'markdown', 'pdf', 'csv', 'xlsx', 'json', 'png', 'jpeg', 'svg')`,
+      sql`${table.format} in ('html', 'markdown', 'text', 'code', 'mermaid', 'pdf', 'csv', 'xlsx', 'json', 'png', 'jpeg', 'svg')`,
     ),
     check(
       'chk_artifact_status',
-      sql`${table.status} in ('generating', 'ready', 'failed', 'expired')`,
+      sql`${table.status} in ('generating', 'ready', 'failed', 'expired', 'archived', 'deleted')`,
+    ),
+    check('chk_artifact_current_version', sql`${table.currentVersion} >= 0`),
+    check(
+      'chk_artifact_logical_id',
+      sql`${table.logicalId} is null or ${table.logicalId} ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`,
     ),
     check('chk_artifact_size', sql`${table.sizeBytes} is null or ${table.sizeBytes} >= 0`),
     check(
@@ -553,6 +572,11 @@ export const artifacts = pgTable(
     uniqueIndex('uq_artifact_storage')
       .on(table.storageProvider, table.storageKey)
       .where(sql`${table.storageKey} is not null`),
+    uniqueIndex('uq_artifact_chat_logical_id')
+      .on(table.userId, table.chatId, table.logicalId)
+      .where(
+        sql`${table.logicalId} is not null and ${table.deletedAt} is null`,
+      ),
     index('idx_artifact_user')
       .on(table.userId, table.createdAt.desc())
       .where(sql`${table.userId} is not null and ${table.deletedAt} is null`),
@@ -571,6 +595,59 @@ export const artifacts = pgTable(
     index('idx_artifact_expiry')
       .on(table.expiresAt)
       .where(sql`${table.expiresAt} is not null and ${table.deletedAt} is null`),
+  ],
+)
+
+export const artifactVersions = pgTable(
+  'ArtifactVersion',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    artifactId: uuid('artifactId')
+      .notNull()
+      .references(() => artifacts.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    parentVersion: integer('parentVersion'),
+    title: text('title').notNull(),
+    mimeType: varchar('mimeType', { length: 255 }).notNull(),
+    language: varchar('language', { length: 64 }),
+    storageProvider: varchar('storageProvider', { length: 32 }).notNull(),
+    storageKey: text('storageKey').notNull(),
+    contentHash: varchar('contentHash', { length: 64 }).notNull(),
+    byteLength: bigintValue('byteLength').notNull(),
+    sourceMessageId: uuid('sourceMessageId')
+      .references(() => messages.id, { onDelete: 'set null' }),
+    sourceGenerationId: uuid('sourceGenerationId')
+      .references(() => generations.id, { onDelete: 'set null' }),
+    streamArtifactId: uuid('streamArtifactId').notNull(),
+    createdBy: varchar('createdBy', { length: 20 }).notNull(),
+    createdAt: timestampTz('createdAt').notNull().defaultNow(),
+  },
+  (table) => [
+    check('chk_artifact_version_number', sql`${table.version} >= 1`),
+    check(
+      'chk_artifact_parent_version',
+      sql`${table.parentVersion} is null or ${table.parentVersion} >= 1`,
+    ),
+    check('chk_artifact_version_bytes', sql`${table.byteLength} >= 0`),
+    check(
+      'chk_artifact_version_hash',
+      sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'chk_artifact_version_creator',
+      sql`${table.createdBy} in ('assistant', 'user')`,
+    ),
+    unique('uq_artifact_version').on(table.artifactId, table.version),
+    unique('uq_artifact_version_storage').on(table.storageProvider, table.storageKey),
+    unique('uq_artifact_generation_stream').on(
+      table.sourceGenerationId,
+      table.streamArtifactId,
+    ),
+    index('idx_artifact_version_history').on(
+      table.artifactId,
+      table.version.desc(),
+    ),
+    index('idx_artifact_version_message').on(table.sourceMessageId),
   ],
 )
 

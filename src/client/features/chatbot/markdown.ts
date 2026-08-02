@@ -81,6 +81,27 @@ export function renderMarkdown(source: string, generationId?: string) {
   const renderer = new Renderer()
 
   renderer.html = ({ text }) => `<p>${escapeHtml(text)}</p>`
+  renderer.link = ({ href, title, text }) => {
+    let safeHref = ''
+    try {
+      const url = new URL(href, 'https://artifact.invalid/')
+      if (['http:', 'https:', 'mailto:'].includes(url.protocol)) {
+        safeHref = href
+      }
+    } catch {
+      safeHref = ''
+    }
+    if (!safeHref) return escapeHtml(text)
+    const titleAttribute = title ? ` title="${escapeHtml(title)}"` : ''
+    return `<a href="${escapeHtml(safeHref)}"${titleAttribute} target="_blank" rel="noopener noreferrer">${text}</a>`
+  }
+  renderer.image = ({ href, title, text }) => {
+    if (!/^(?:data:image\/(?:png|gif|jpeg|webp);base64,|blob:)/i.test(href)) {
+      return escapeHtml(text)
+    }
+    const titleAttribute = title ? ` title="${escapeHtml(title)}"` : ''
+    return `<img src="${escapeHtml(href)}" alt="${escapeHtml(text)}"${titleAttribute}>`
+  }
   renderer.code = ({ text, lang }) => {
     const highlighted = highlightCode(text, lang, generationId)
     const languageClass = highlighted.language
@@ -98,6 +119,7 @@ export function renderMarkdown(source: string, generationId?: string) {
   })
   const clean = DOMPurify.sanitize(rendered, {
     USE_PROFILES: { html: true },
+    ADD_ATTR: ['target', 'rel'],
     FORBID_TAGS: [
       'script',
       'style',
