@@ -92,10 +92,176 @@ test('switching directly between sessions loads the destination messages', async
 
   const sidebar = page.locator('aside').first()
   await sidebar.getByAltText('GPAS').first().click()
-  await page.getByText('Conversation B', { exact: true }).click()
+  const conversationLink = page.locator(
+    'a[href="/ai-chatbot/conversation-b"]',
+  )
+  await expect(conversationLink).toBeVisible()
+  const linkBox = await conversationLink.boundingBox()
+  expect(linkBox?.height).toBeGreaterThanOrEqual(60)
+  await conversationLink.click({
+    position: {
+      x: 8,
+      y: (linkBox?.height ?? 60) - 4,
+    },
+  })
 
   await expect(page).toHaveURL(/\/ai-chatbot\/conversation-b$/)
   await expect(page.getByText('Message from B')).toBeVisible()
   await expect(page.getByText('Message from A')).toHaveCount(0)
   expect(detailRequests).toEqual(['conversation-a', 'conversation-b'])
+})
+
+test('a rejected generation start retries the original request instead of regenerating a local placeholder', async ({ page }) => {
+  const chatId = '11111111-1111-4111-8111-111111111111'
+  const generationId = '22222222-2222-4222-8222-222222222222'
+  const streamId = '33333333-3333-4333-8333-333333333333'
+  const userMessageId = '44444444-4444-4444-8444-444444444444'
+  const assistantMessageId = '55555555-5555-4555-8555-555555555555'
+  const generationBodies: Array<Record<string, unknown>> = []
+  const regenerateRequests: string[] = []
+
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const request = route.request()
+    const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/api/health')) {
+      await route.fulfill({ json: {
+        status: 'ok',
+        service: 'ai-chatbot',
+        commit: 'test',
+        time: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/me')) {
+      await route.fulfill({ json: {
+        id: 'test-user',
+        externalUserId: 'test-user',
+        externalTeamId: null,
+        realName: 'Test User',
+        userName: 'tester',
+        jobTitle: null,
+        researchField: null,
+        email: 'test@example.com',
+        name: 'Test User',
+        image: null,
+        gpas2Role: null,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/chats') && request.method() === 'GET') {
+      await route.fulfill({ json: { chats: [] } })
+      return
+    }
+    if (pathname.endsWith('/api/chats') && request.method() === 'POST') {
+      await route.fulfill({ json: {
+        id: chatId,
+        title: 'Retry this request',
+        chatType: 'chat',
+        status: 'active',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith(`/api/chats/${chatId}/generations`)) {
+      generationBodies.push(request.postDataJSON() as Record<string, unknown>)
+      if (generationBodies.length === 1) {
+        await route.fulfill({
+          status: 429,
+          json: { error: {
+            code: 'generation_concurrency_exceeded',
+            message: 'Another generation is already running',
+          } },
+        })
+        return
+      }
+      await route.fulfill({
+        status: 201,
+        json: {
+          generation: {
+            id: generationId,
+            chatId,
+            streamId,
+            status: 'pending',
+            effectiveStatus: 'pending',
+            cancelRequestedAt: null,
+            cancelSource: null,
+          },
+          userMessage: {
+            id: userMessageId,
+            seq: 1,
+            role: 'user',
+            status: 'completed',
+            content: 'Retry this request',
+            parts: [{ type: 'text', order: 0, text: 'Retry this request' }],
+            createdAt: timestamp,
+            vote: null,
+            executionSteps: [],
+          },
+          replacesMessageId: null,
+        },
+      })
+      return
+    }
+    if (pathname.includes('/api/messages/') && pathname.endsWith('/regenerate')) {
+      regenerateRequests.push(pathname)
+      await route.fulfill({ status: 404, json: { error: {
+        code: 'message_not_found',
+        message: 'Assistant message not found',
+      } } })
+      return
+    }
+    if (pathname.endsWith(`/api/generations/${generationId}/stream`)) {
+      const identity = { generationId, streamId, messageId: assistantMessageId }
+      const userMessage = {
+        id: userMessageId,
+        seq: 1,
+        role: 'user',
+        status: 'completed',
+        content: 'Retry this request',
+        parts: [{ type: 'text', order: 0, text: 'Retry this request' }],
+        createdAt: timestamp,
+        vote: null,
+        executionSteps: [],
+      }
+      const assistantMessage = {
+        id: assistantMessageId,
+        seq: 2,
+        role: 'assistant',
+        status: 'completed',
+        content: 'Recovered answer',
+        parts: [{ type: 'text', order: 0, text: 'Recovered answer' }],
+        createdAt: timestamp,
+        vote: null,
+        executionSteps: [],
+      }
+      const events = [
+        { ...identity, eventId: 1, type: 'message.start', userMessage },
+        { ...identity, eventId: 2, type: 'message.delta', sequence: 1, startIndex: 0, delta: 'Recovered answer' },
+        { ...identity, eventId: 3, type: 'message.finish', finishReason: 'stop', assistantMessage },
+      ]
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+      })
+      return
+    }
+    await route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/')
+  const composer = page.locator('textarea').first()
+  await composer.fill('Retry this request')
+  await composer.press('Enter')
+
+  await expect(page.getByText('Another generation is already running')).toBeVisible()
+  await page.locator('button:has(.i-lucide-refresh-cw)').click()
+
+  await expect(page.getByText('Recovered answer')).toBeVisible()
+  expect(generationBodies).toHaveLength(2)
+  expect(generationBodies[1].clientMessageId).toBe(
+    generationBodies[0].clientMessageId,
+  )
+  expect(regenerateRequests).toEqual([])
 })

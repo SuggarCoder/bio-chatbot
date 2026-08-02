@@ -34,6 +34,11 @@ export type ChatMessageStatus =
   | 'cancelled'
   | 'failed'
 
+export type GenerationStartRetry = {
+  content: string
+  clientMessageId: string
+}
+
 export type ActiveGeneration = {
   generationId: string
   streamId: string
@@ -43,6 +48,8 @@ export type ActiveGeneration = {
 
 export type ChatMessage = {
   id: string
+  persisted: boolean
+  generationStartRetry?: GenerationStartRetry
   clientMessageId?: string
   generationId?: string
   activity?: GenerationActivity
@@ -137,7 +144,15 @@ type ChatStoreContextValue = {
     message?: ChatMessageDto | null,
     content?: string,
   ) => void
-  failGenerationStart: (id: string, errorMessage: string) => void
+  failGenerationStart: (
+    id: string,
+    errorMessage: string,
+    retry: GenerationStartRetry,
+  ) => void
+  prepareGenerationStartRetry: (
+    id: string,
+    failedMessageId: string,
+  ) => GenerationStartRetry | undefined
   cancelAssistantMessage: (
     id: string,
     generationId: string,
@@ -164,6 +179,7 @@ function buildOptimisticMessage(
 
   return {
     id,
+    persisted: false,
     clientMessageId: role === 'user' ? id : undefined,
     role,
     content,
@@ -181,6 +197,7 @@ function mapMessage(message: ChatMessageDto): ChatMessage {
   artifactStore.hydrateMessageParts(message.parts)
   return {
     id: message.id,
+    persisted: true,
     role: message.role,
     content: message.content,
     parts: message.parts,
@@ -495,6 +512,8 @@ export const ChatStoreProvider: ParentComponent = (props) => {
 
         if (optimistic) {
           optimistic.id = message.id
+          optimistic.persisted = true
+          optimistic.clientMessageId = undefined
           optimistic.content = message.content
           optimistic.createdAt = new Date(message.createdAt).getTime()
         }
@@ -686,6 +705,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
 
           if (message) {
             activeMessage.id = message.id
+            activeMessage.persisted = true
             activeMessage.content = message.content
             activeMessage.parts = message.parts
             activeMessage.createdAt = new Date(
@@ -749,6 +769,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
 
           if (message) {
             activeMessage.id = message.id
+            activeMessage.persisted = true
             activeMessage.content = message.content
             activeMessage.parts = message.parts
           } else if (content) {
@@ -777,6 +798,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
   const failGenerationStart = (
     id: string,
     errorMessage: string,
+    retry: GenerationStartRetry,
   ) => {
     if (!state.conversations[id]) {
       return
@@ -786,17 +808,57 @@ export const ChatStoreProvider: ParentComponent = (props) => {
       'conversations',
       id,
       produce((conversation: ChatConversation) => {
-        conversation.messages.push(
-          buildOptimisticMessage(
+        conversation.messages.push({
+          ...buildOptimisticMessage(
             'assistant',
             errorMessage,
             'failed',
           ),
-        )
+          generationStartRetry: retry,
+        })
         conversation.errorMessage = errorMessage
         conversation.updatedAt = Date.now()
       }),
     )
+  }
+
+  const prepareGenerationStartRetry = (
+    id: string,
+    failedMessageId: string,
+  ) => {
+    let retryRequest: GenerationStartRetry | undefined
+
+    if (!state.conversations[id]) {
+      return retryRequest
+    }
+
+    setState(
+      'conversations',
+      id,
+      produce((conversation: ChatConversation) => {
+        const failedIndex = conversation.messages.findIndex(
+          (message) => message.id === failedMessageId,
+        )
+        const failedMessage = conversation.messages[failedIndex]
+
+        if (
+          failedIndex < 0 ||
+          failedMessage.role !== 'assistant' ||
+          failedMessage.status !== 'failed' ||
+          failedMessage.persisted ||
+          !failedMessage.generationStartRetry
+        ) {
+          return
+        }
+
+        retryRequest = { ...failedMessage.generationStartRetry }
+        conversation.messages.splice(failedIndex, 1)
+        conversation.errorMessage = undefined
+        conversation.updatedAt = Date.now()
+      }),
+    )
+
+    return retryRequest
   }
 
   const cancelAssistantMessage = (
@@ -833,6 +895,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         ) {
           if (message) {
             activeMessage.id = message.id
+            activeMessage.persisted = true
             activeMessage.content = message.content
             activeMessage.parts = message.parts
             activeMessage.createdAt = new Date(
@@ -887,6 +950,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         finishAssistantMessage,
         failAssistantMessage,
         failGenerationStart,
+        prepareGenerationStartRetry,
         cancelAssistantMessage,
       }}
     >

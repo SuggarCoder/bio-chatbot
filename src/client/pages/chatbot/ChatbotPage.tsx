@@ -354,6 +354,10 @@ async function runAssistantReply(
         error instanceof Error
           ? error.message
           : 'Generation could not be started',
+        {
+          content: prompt,
+          clientMessageId,
+        },
       )
       return
     } finally {
@@ -785,36 +789,38 @@ function ExpandedSidebarPanel(props: {
                       <div
                         class={
                           isActive()
-                            ? 'relative flex w-full items-center justify-between rounded-2xl bg-teal-600 px-4 py-3 text-white'
-                            : 'relative flex w-full items-center justify-between rounded-2xl border border-transparent px-4 py-3 text-slate-600 transition duration-200 hover:border-slate-200 hover:bg-white/70'
+                            ? 'relative w-full rounded-2xl bg-teal-600 text-white'
+                            : 'relative w-full rounded-2xl border border-transparent text-slate-600 transition duration-200 hover:border-slate-200 hover:bg-white/70'
                         }
                       >
                         <A
                           href={href}
                           onClick={props.onConversationSelect}
-                          class="min-w-0 flex-1 text-left"
+                          class="flex min-h-15 w-full items-center rounded-2xl px-4 py-3 pr-16 text-left outline-none focus-visible:ring-2 focus-visible:ring-teal-300 focus-visible:ring-offset-2"
                         >
                           <div class="min-w-0">
                             <p class="truncate text-sm font-semibold">{getSidebarLabel(conversation.title)}</p>
                           </div>
                         </A>
 
-                        <PopupMenu
+                        <div class="absolute right-4 top-1/2 z-10 -translate-y-1/2">
+                          <PopupMenu
                           buttonLabel="打开会话操作菜单"
-                          buttonClass={
-                            isActive()
-                              ? 'grid h-9 w-9 place-items-center rounded-xl bg-transparent text-white transition duration-200 hover:bg-white/20'
-                              : 'grid h-9 w-9 place-items-center rounded-xl bg-transparent text-slate-500 transition duration-200 hover:bg-slate-200'
-                          }
-                          items={buildConversationActionItems(
-                            conversation.id,
-                            conversation.title,
-                            openRenameDialog,
-                            openDeleteDialog,
-                          )}
-                        >
+                            buttonClass={
+                              isActive()
+                                ? 'grid h-9 w-9 place-items-center rounded-xl bg-transparent text-white transition duration-200 hover:bg-white/20'
+                                : 'grid h-9 w-9 place-items-center rounded-xl bg-transparent text-slate-500 transition duration-200 hover:bg-slate-200'
+                            }
+                            items={buildConversationActionItems(
+                              conversation.id,
+                              conversation.title,
+                              openRenameDialog,
+                              openDeleteDialog,
+                            )}
+                          >
                             <MoreIcon />
-                        </PopupMenu>
+                          </PopupMenu>
+                        </div>
                       </div>
                     )
                   }}
@@ -2127,6 +2133,26 @@ function SessionConversationView(props: { conversationId: string }) {
   }
   const regenerate = async (message: ChatMessage) => {
     if (conversation()?.activeGeneration || latestAssistantId() !== message.id) {
+      return
+    }
+
+    if (!message.persisted) {
+      const retryRequest = chatStore.prepareGenerationStartRetry(
+        props.conversationId,
+        message.id,
+      )
+
+      if (!retryRequest) {
+        throw new Error('Original user message is unavailable')
+      }
+
+      void runAssistantReply(
+        props.conversationId,
+        retryRequest.content,
+        retryRequest.clientMessageId,
+        undefined,
+        chatStore,
+      )
       return
     }
 
