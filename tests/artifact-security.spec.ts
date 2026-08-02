@@ -11,6 +11,8 @@ type Harness = {
     activeArtifactId: string | null
     activeVersion: number | null
   }>
+  mountArtifactPair(): Promise<void>
+  openSecondArtifactPanel(): Promise<void>
 }
 
 test.beforeEach(async ({ page }) => {
@@ -73,6 +75,114 @@ test('committed Artifact panel enters the viewport with its renderer content', a
     activeArtifactId: null,
     activeVersion: null,
   })
+})
+
+test('Artifact panel divider resizes the panel with pointer and keyboard input', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .mountCommittedArtifactPanel()
+  ))
+  const panel = page.getByRole('complementary', { name: 'Artifact panel' })
+  const divider = page.getByRole('separator', { name: 'Resize Artifact panel' })
+  await expect(divider).toBeVisible()
+
+  const initialPanelBox = await panel.boundingBox()
+  const dividerBox = await divider.boundingBox()
+  expect(initialPanelBox).not.toBeNull()
+  expect(dividerBox).not.toBeNull()
+
+  await page.mouse.move(
+    dividerBox!.x + dividerBox!.width / 2,
+    dividerBox!.y + dividerBox!.height / 2,
+  )
+  await page.mouse.down()
+  await page.mouse.move(dividerBox!.x - 80, dividerBox!.y + dividerBox!.height / 2)
+  await page.mouse.up()
+
+  await expect.poll(async () => (await panel.boundingBox())?.width).toBeGreaterThan(
+    initialPanelBox!.width + 60,
+  )
+  const pointerWidth = (await panel.boundingBox())!.width
+  await divider.focus()
+  await divider.press('ArrowRight')
+  await expect.poll(async () => (await panel.boundingBox())?.width).toBeLessThan(
+    pointerWidth,
+  )
+})
+
+test('Artifact panel uses the glass toolbar and keeps download unavailable', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .mountCommittedArtifactPanel()
+  ))
+  const panel = page.getByRole('complementary', { name: 'Artifact panel' })
+  const toolbar = panel.locator('nav')
+  const preview = page.getByRole('button', { name: 'Preview' })
+  const code = page.getByRole('button', { name: 'Code' })
+
+  await expect(panel.locator('header')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'History' })).toHaveCount(0)
+  await expect(preview).toHaveAttribute('aria-pressed', 'true')
+  await expect(toolbar.getByText('Panel test')).toBeVisible()
+  await expect(toolbar.getByText('Version 1')).toBeVisible()
+  await preview.hover()
+  await expect(page.getByRole('tooltip').filter({ hasText: 'Preview' })).toBeVisible()
+  await preview.click()
+  await expect(page.getByRole('tooltip').filter({ hasText: 'Preview' })).toHaveCount(0)
+  await page.mouse.move(0, 0)
+  await preview.evaluate((element) => element.blur())
+  await preview.focus()
+  await expect(page.getByRole('tooltip').filter({ hasText: 'Preview' })).toBeVisible()
+  await preview.evaluate((element) => element.blur())
+  await code.hover()
+  await expect(page.getByRole('tooltip').filter({ hasText: 'Preview' })).toHaveCount(0)
+  await expect(page.getByRole('tooltip').filter({ hasText: 'Code' })).toBeVisible()
+  await page.mouse.move(0, 0)
+  await expect(page.getByRole('tooltip').filter({ hasText: 'Code' })).toHaveCount(0)
+
+  await code.click()
+  await expect(code).toHaveAttribute('aria-pressed', 'true')
+  await expect(panel.locator('pre')).toContainText('panel-test-content')
+  await expect(panel.locator('[data-line-number]')).toHaveCount(2)
+  await expect(panel.locator('[data-line-number]').nth(0)).toHaveText('1')
+  await expect(panel.locator('[data-line-number]').nth(1)).toHaveText('2')
+  await expect(panel.locator('.artifact-source-markdown code')).toHaveClass(/hljs/)
+  await preview.click()
+  await expect(panel.locator('iframe')).toBeVisible()
+
+  const beforeDownload = page.url()
+  await page.getByRole('button', { name: 'Download Artifact' }).click()
+  await expect(page.getByRole('status')).toHaveText('下载功能暂未开放')
+  expect(page.url()).toBe(beforeDownload)
+  await expect(toolbar).toHaveCSS('backdrop-filter', /blur/)
+})
+
+test('opening Artifact B after closing A code view mounts B preview only', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .mountArtifactPair()
+  ))
+  let panel = page.getByRole('complementary', { name: 'Artifact panel' })
+  await page.getByRole('button', { name: 'Code' }).click()
+  await expect(panel.locator('.artifact-source-view')).toBeVisible()
+  await expect(panel.locator('.artifact-source-view')).toContainText('artifact-a-preview')
+
+  await page.getByRole('button', { name: 'Close Artifact panel' }).click()
+  await expect(panel).toHaveCount(0)
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .openSecondArtifactPanel()
+  ))
+
+  panel = page.getByRole('complementary', { name: 'Artifact panel' })
+  await expect(page.getByRole('button', { name: 'Preview' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  await expect(panel.locator('.artifact-source-view')).toHaveCount(0)
+  const frame = panel.locator('iframe')
+  await expect(frame).toBeVisible()
+  await expect(frame).toHaveAttribute('srcdoc', /artifact-b-preview/)
 })
 
 test('HTML CSP blocks network and sandbox blocks top navigation', async ({ page }) => {

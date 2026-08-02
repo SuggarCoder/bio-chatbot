@@ -96,8 +96,10 @@ test('switching directly between sessions loads the destination messages', async
     'a[href="/ai-chatbot/conversation-b"]',
   )
   await expect(conversationLink).toBeVisible()
+  await expect.poll(async () => (
+    (await conversationLink.boundingBox())?.height ?? 0
+  )).toBeGreaterThanOrEqual(60)
   const linkBox = await conversationLink.boundingBox()
-  expect(linkBox?.height).toBeGreaterThanOrEqual(60)
   await conversationLink.click({
     position: {
       x: 8,

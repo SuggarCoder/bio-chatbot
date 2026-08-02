@@ -3,14 +3,16 @@ import {
   createEffect,
   createMemo,
   createSignal,
-  For,
   onCleanup,
   onMount,
+  Match,
   Show,
+  Switch,
   untrack,
   type Component,
 } from 'solid-js'
-import { artifactDownloadUrl } from './artifactApi'
+import { Tooltip } from '../../shared/ui/Tooltip'
+import { ArtifactSourceView } from './ArtifactSourceView'
 import { artifactStore } from './artifactStore'
 import { artifactRenderers, UnsupportedArtifactRenderer } from './renderers'
 import { artifactMimeTypes } from './types'
@@ -22,17 +24,19 @@ export const ArtifactSidePanel: Component = () => {
   const [mounted, setMounted] = createSignal(false)
   const [phase, setPhase] = createSignal<PanelPhase>('closed')
   const [isDesktop, setIsDesktop] = createSignal(false)
+  const [notice, setNotice] = createSignal('')
   let slotRef: HTMLDivElement | undefined
   let panelRef: HTMLElement | undefined
   let timeline: gsap.core.Timeline | undefined
   let animationRevision = 0
+  let stopResize: (() => void) | undefined
   let desktopQuery: MediaQueryList | undefined
   let reducedMotionQuery: MediaQueryList | undefined
+  let noticeTimer: number | undefined
 
   const artifact = createMemo(() => state.activeArtifactId
     ? state.artifactsById[state.activeArtifactId]
     : undefined)
-  const content = () => artifact()?.content ?? ''
   const type = () => artifact()?.type
   const title = () => artifact()?.title ?? 'Artifact'
   const version = () => state.activeVersion ?? artifact()?.currentVersion ?? 1
@@ -184,23 +188,90 @@ export const ArtifactSidePanel: Component = () => {
 
   onCleanup(() => {
     animationRevision += 1
+    stopResize?.()
+    if (noticeTimer !== undefined) window.clearTimeout(noticeTimer)
     timeline?.kill()
     if (slotRef) gsap.killTweensOf(slotRef)
     if (panelRef) gsap.killTweensOf(panelRef)
   })
 
-  const beginResize = (event: PointerEvent) => {
+  const resizeBounds = () => {
+    const slotWidth = slotRef?.getBoundingClientRect().width ?? state.panelWidth
+    const mainWidth = slotRef?.previousElementSibling?.getBoundingClientRect().width
+    const availableWidth = mainWidth === undefined
+      ? slotRef?.parentElement?.getBoundingClientRect().width ?? window.innerWidth
+      : mainWidth + slotWidth
+
+    return {
+      min: 360,
+      max: Math.max(360, Math.min(840, availableWidth - 360)),
+    }
+  }
+
+  const setConstrainedWidth = (width: number) => {
+    const bounds = resizeBounds()
+    artifactStore.setWidth(Math.min(bounds.max, Math.max(bounds.min, width)))
+  }
+
+  const beginResize = (event: PointerEvent & { currentTarget: HTMLDivElement }) => {
+    if (!isDesktop() || event.button !== 0) return
+    event.preventDefault()
+    stopResize?.()
     const startX = event.clientX
     const startWidth = state.panelWidth
-    const move = (next: PointerEvent) => artifactStore.setWidth(
-      startWidth + startX - next.clientX,
-    )
+    const pointerId = event.pointerId
+    const handle = event.currentTarget
+    const previousCursor = document.body.style.cursor
+    const previousUserSelect = document.body.style.userSelect
+    handle.setPointerCapture(pointerId)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId) return
+      setConstrainedWidth(startWidth + startX - next.clientX)
+    }
     const stop = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', stop)
+      window.removeEventListener('pointercancel', stop)
+      window.removeEventListener('blur', stop)
+      if (handle.hasPointerCapture(pointerId)) {
+        handle.releasePointerCapture(pointerId)
+      }
+      document.body.style.cursor = previousCursor
+      document.body.style.userSelect = previousUserSelect
+      stopResize = undefined
     }
+    stopResize = stop
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', stop)
+    window.addEventListener('pointercancel', stop)
+    window.addEventListener('blur', stop)
+  }
+
+  const resizeWithKeyboard = (event: KeyboardEvent) => {
+    const bounds = resizeBounds()
+    const nextWidth = event.key === 'ArrowLeft'
+      ? state.panelWidth + 16
+      : event.key === 'ArrowRight'
+        ? state.panelWidth - 16
+        : event.key === 'Home'
+          ? bounds.min
+          : event.key === 'End'
+            ? bounds.max
+            : undefined
+    if (nextWidth === undefined) return
+    event.preventDefault()
+    setConstrainedWidth(nextWidth)
+  }
+
+  const showDownloadUnavailable = () => {
+    setNotice('下载功能暂未开放')
+    if (noticeTimer !== undefined) window.clearTimeout(noticeTimer)
+    noticeTimer = window.setTimeout(() => {
+      setNotice('')
+      noticeTimer = undefined
+    }, 1_800)
   }
 
   return (
@@ -211,101 +282,132 @@ export const ArtifactSidePanel: Component = () => {
         classList={{ 'pointer-events-none': phase() === 'closing' }}
         aria-hidden={phase() === 'closing' ? 'true' : undefined}
       >
+        <div
+          role="separator"
+          aria-label="Resize Artifact panel"
+          aria-orientation="vertical"
+          aria-valuemin={resizeBounds().min}
+          aria-valuemax={resizeBounds().max}
+          aria-valuenow={state.panelWidth}
+          tabIndex={0}
+          class="group absolute inset-y-0 -left-1 z-30 hidden w-2 touch-none cursor-col-resize place-items-center outline-none print:hidden lg:grid"
+          onPointerDown={beginResize}
+          onKeyDown={resizeWithKeyboard}
+        >
+          <div class="absolute bottom-0 right-1 top-0 w-[0.5px] bg-slate-300 transition-all group-hover:w-px group-hover:translate-x-[0.5px] group-hover:bg-teal-300 group-focus-visible:w-px group-focus-visible:bg-teal-400" />
+          <div class="relative h-6 w-2 cursor-col-resize rounded-full border border-slate-300 bg-white shadow transition duration-200 group-hover:border-teal-700 group-hover:bg-teal-700 group-focus-visible:border-teal-700 group-focus-visible:bg-teal-700" />
+        </div>
         <aside
           ref={panelRef}
           class="absolute inset-y-0 right-0 flex min-w-0 flex-col border-l border-slate-200 bg-white opacity-0 shadow-2xl will-change-transform"
           style={{ width: panelWidth() }}
           aria-label="Artifact panel"
         >
-          <button
-            type="button"
-            aria-label="Resize Artifact panel"
-            class="absolute inset-y-0 -left-1 hidden w-2 cursor-col-resize lg:block"
-            onPointerDown={beginResize}
-          />
-          <header class="flex h-16 items-center gap-3 border-b border-slate-200 px-4">
+          <nav class="relative z-20 flex h-16 shrink-0 items-center gap-3 border-b border-white/80 bg-white/75 px-3 shadow-[0_1px_0_rgba(148,163,184,0.18),0_10px_30px_rgba(15,23,42,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] backdrop-blur-2xl">
+            <div class="flex shrink-0 items-center gap-1 rounded-xl bg-white/55 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.95),0_1px_8px_rgba(15,23,42,0.06)] ring-1 ring-white/90">
+              <Tooltip content="Preview" placement="bottom">
+                <button
+                  type="button"
+                  aria-label="Preview"
+                  aria-pressed={state.activeTab === 'preview'}
+                  class={
+                    state.activeTab === 'preview'
+                      ? 'grid h-8 w-8 place-items-center rounded-lg bg-white text-teal-700 shadow-sm ring-1 ring-slate-200/70 transition'
+                      : 'grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-white/80 hover:text-slate-800'
+                  }
+                  onClick={() => artifactStore.setTab('preview')}
+                >
+                  <span aria-hidden="true" class="i-lucide-eye h-4 w-4" />
+                </button>
+              </Tooltip>
+              <Tooltip content="Code" placement="bottom">
+                <button
+                  type="button"
+                  aria-label="Code"
+                  aria-pressed={state.activeTab === 'code'}
+                  class={
+                    state.activeTab === 'code'
+                      ? 'grid h-8 w-8 place-items-center rounded-lg bg-white text-teal-700 shadow-sm ring-1 ring-slate-200/70 transition'
+                      : 'grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-white/80 hover:text-slate-800'
+                  }
+                  onClick={() => artifactStore.setTab('code')}
+                >
+                  <span aria-hidden="true" class="i-lucide-code-2 h-4 w-4" />
+                </button>
+              </Tooltip>
+            </div>
+
             <div class="min-w-0 flex-1">
               <h2 class="truncate text-sm font-semibold text-slate-900">{title()}</h2>
-              <p class="text-xs text-slate-500">Version {version()}</p>
+              <p class="truncate text-[11px] font-medium text-slate-500">Version {version()}</p>
             </div>
-            <Show when={state.activeArtifactId}>
-              {(artifactId) => (
-                <a
-                  class="grid h-9 w-9 place-items-center rounded-full text-slate-500 hover:bg-slate-100"
-                  href={artifactDownloadUrl(artifactId(), version())}
+
+            <div class="flex shrink-0 items-center gap-1">
+              <Tooltip content="Download" placement="bottom">
+                <button
+                  type="button"
+                  class="grid h-9 w-9 place-items-center rounded-full text-slate-500 transition hover:bg-white/90 hover:text-slate-800 hover:shadow-sm"
+                  onClick={showDownloadUnavailable}
                   aria-label="Download Artifact"
                 >
                   <span class="i-lucide-download h-4 w-4" />
-                </a>
-              )}
-            </Show>
-            <button
-              type="button"
-              class="grid h-9 w-9 place-items-center rounded-full text-slate-500 hover:bg-slate-100"
-              onClick={() => artifactStore.close()}
-              aria-label="Close Artifact panel"
-            >
-              <span class="i-lucide-x h-4 w-4" />
-            </button>
-          </header>
-          <nav class="flex gap-1 border-b border-slate-200 px-3 py-2">
-            <For each={['preview', 'code', 'history'] as const}>
-              {(tab) => (
+                </button>
+              </Tooltip>
+              <Tooltip content="Close" placement="bottom">
                 <button
                   type="button"
-                  class={`rounded-lg px-3 py-1.5 text-xs font-medium ${state.activeTab === tab ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'}`}
-                  onClick={() => {
-                    artifactStore.setTab(tab)
-                    if (tab === 'history' && state.activeArtifactId) {
-                      void artifactStore.loadHistory(state.activeArtifactId)
-                    }
-                  }}
+                  class="grid h-9 w-9 place-items-center rounded-full text-slate-500 transition hover:bg-white/90 hover:text-slate-800 hover:shadow-sm"
+                  onClick={() => artifactStore.close()}
+                  aria-label="Close Artifact panel"
                 >
-                  {tab}
+                  <span class="i-lucide-x h-4 w-4" />
                 </button>
+              </Tooltip>
+            </div>
+
+            <Show when={notice()}>
+              {(message) => (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  class="absolute right-3 top-[calc(100%+0.5rem)] rounded-xl border border-white/80 bg-white/90 px-3 py-2 text-xs font-medium text-slate-700 shadow-lg backdrop-blur-xl"
+                >
+                  {message()}
+                </div>
               )}
-            </For>
+            </Show>
           </nav>
           <div class="min-h-0 flex-1 overflow-auto bg-slate-50">
-            <Show when={state.activeTab === 'preview'}>
-              <Show when={renderer()} fallback={<UnsupportedArtifactRenderer type={type() ?? 'unknown'} />}>
-                {(definition) => {
-                  const Renderer = definition().render
-                  return (
-                    <Renderer
-                      artifactId={artifact()?.id ?? ''}
-                      version={version()}
-                      type={type()!}
-                      title={title()}
-                      content={content()}
-                      language={artifact()?.language}
-                      isStreaming={false}
+            <Show when={artifact()} keyed>
+              {(activeArtifact) => (
+                <Switch>
+                  <Match when={state.activeTab === 'preview'}>
+                    <Show when={renderer()} fallback={<UnsupportedArtifactRenderer type={activeArtifact.type} />}>
+                      {(definition) => {
+                        const Renderer = definition().render
+                        return (
+                          <Renderer
+                            artifactId={activeArtifact.id}
+                            version={version()}
+                            type={activeArtifact.type}
+                            title={activeArtifact.title}
+                            content={activeArtifact.content ?? ''}
+                            language={activeArtifact.language}
+                            isStreaming={false}
+                          />
+                        )
+                      }}
+                    </Show>
+                  </Match>
+                  <Match when={state.activeTab === 'code'}>
+                    <ArtifactSourceView
+                      type={activeArtifact.type}
+                      content={activeArtifact.content ?? ''}
+                      language={activeArtifact.language}
                     />
-                  )
-                }}
-              </Show>
-            </Show>
-            <Show when={state.activeTab === 'code'}>
-              <pre class="m-0 whitespace-pre-wrap break-words p-5 text-xs leading-5 text-slate-700">{content()}</pre>
-            </Show>
-            <Show when={state.activeTab === 'history'}>
-              <div class="space-y-2 p-3">
-                <For each={artifact()?.versions ?? []} fallback={<p class="p-3 text-sm text-slate-500">No version history loaded.</p>}>
-                  {(item) => (
-                    <button
-                      type="button"
-                      class="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-left"
-                      onClick={() => void artifactStore.open(item.artifactId, item.version)}
-                    >
-                      <span>
-                        <span class="block text-sm font-medium">Version {item.version}</span>
-                        <span class="text-xs text-slate-500">{new Date(item.createdAt).toLocaleString()}</span>
-                      </span>
-                      <span class="text-xs text-slate-400">{item.byteLength} bytes</span>
-                    </button>
-                  )}
-                </For>
-              </div>
+                  </Match>
+                </Switch>
+              )}
             </Show>
           </div>
         </aside>

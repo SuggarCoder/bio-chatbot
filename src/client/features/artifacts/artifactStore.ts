@@ -12,7 +12,7 @@ type ArtifactStoreState = {
   activeVersion: number | null
   isPanelOpen: boolean
   panelInteractionRevision: number
-  activeTab: 'preview' | 'code' | 'history'
+  activeTab: 'preview' | 'code'
   panelWidth: number
 }
 
@@ -153,6 +153,7 @@ export const artifactStore = {
       activeStreamId: null,
       isPanelOpen: true,
       activeVersion: version ?? artifactState.artifactsById[artifactId]?.currentVersion ?? null,
+      activeTab: 'preview',
     })
     if (!artifactState.artifactsById[artifactId]) {
       setArtifactState('artifactsById', artifactId, await fetchArtifact(artifactId))
@@ -176,7 +177,10 @@ export const artifactStore = {
     if (cause === 'user') {
       setArtifactState('panelInteractionRevision', (value) => value + 1)
     }
-    setArtifactState('isPanelOpen', false)
+    setArtifactState({
+      isPanelOpen: false,
+      activeTab: 'preview',
+    })
   },
   setTab(tab: ArtifactStoreState['activeTab']) {
     if (tab !== artifactState.activeTab) {
@@ -192,7 +196,10 @@ export const artifactStore = {
     setArtifactState('visibleConversationId', conversationId)
     if (artifactState.isPanelOpen) {
       clearSelectionAfterClose = true
-      setArtifactState('isPanelOpen', false)
+      setArtifactState({
+        isPanelOpen: false,
+        activeTab: 'preview',
+      })
     } else {
       clearSelectionAfterClose = false
       clearPanelSelection()

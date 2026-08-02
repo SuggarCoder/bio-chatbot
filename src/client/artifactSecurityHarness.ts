@@ -1,3 +1,7 @@
+import '@unocss/reset/tailwind.css'
+import 'virtual:uno.css'
+import './main.css'
+
 import {
   buildHtmlSandboxDocument,
   renderStrictMermaid,
@@ -16,7 +20,7 @@ async function mountCommittedArtifactPanel() {
   document.querySelector('#artifact-panel-test-root')?.remove()
   const root = document.createElement('div')
   root.id = 'artifact-panel-test-root'
-  root.style.cssText = 'position:relative;display:flex;width:100vw;height:600px;overflow:hidden'
+  root.style.cssText = 'position:relative;display:flex;justify-content:flex-end;width:100vw;height:600px;overflow:hidden'
   document.body.append(root)
   disposePanel = render(() => createComponent(ArtifactSidePanel, {}), root)
   artifactStore.setVisibleConversation('panel-test-conversation')
@@ -35,7 +39,7 @@ async function mountCommittedArtifactPanel() {
   }, 'panel-test-conversation')
   artifactStore.delta(
     'panel-test-stream',
-    '<h1 id="panel-test-content">Visible content</h1>',
+    '<h1 id="panel-test-content">Visible content</h1>\n<p>Second line</p>',
   )
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
   artifactStore.commit({
@@ -57,6 +61,70 @@ async function switchArtifactPanelConversation() {
   }
 }
 
+async function commitPanelArtifact(input: {
+  streamId: string
+  artifactId: string
+  logicalId: string
+  title: string
+  content: string
+}) {
+  artifactStore.start({
+    artifactStreamId: input.streamId,
+    generationId: `${input.streamId}-generation`,
+    messageId: `${input.streamId}-message`,
+    logicalId: input.logicalId,
+    operation: 'create',
+    artifactType: 'text/html',
+    title: input.title,
+    baseVersion: null,
+    language: 'html',
+    textStartIndex: 0,
+    partOrder: 0,
+  }, 'panel-pair-conversation')
+  artifactStore.delta(input.streamId, input.content)
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  artifactStore.commit({
+    artifactStreamId: input.streamId,
+    artifactId: input.artifactId,
+    logicalId: input.logicalId,
+    version: 1,
+  })
+}
+
+async function mountArtifactPair() {
+  disposePanel?.()
+  document.querySelector('#artifact-panel-test-root')?.remove()
+  const root = document.createElement('div')
+  root.id = 'artifact-panel-test-root'
+  root.style.cssText = 'position:relative;display:flex;justify-content:flex-end;width:100vw;height:600px;overflow:hidden'
+  document.body.append(root)
+  disposePanel = render(() => createComponent(ArtifactSidePanel, {}), root)
+
+  artifactStore.setVisibleConversation('panel-pair-catalog')
+  await commitPanelArtifact({
+    streamId: 'panel-pair-a-stream',
+    artifactId: 'panel-pair-a',
+    logicalId: 'panel-pair-a',
+    title: 'Artifact A',
+    content: '<h1 id="artifact-a-preview">Artifact A preview</h1>',
+  })
+  await commitPanelArtifact({
+    streamId: 'panel-pair-b-stream',
+    artifactId: 'panel-pair-b',
+    logicalId: 'panel-pair-b',
+    title: 'Artifact B',
+    content: '<h1 id="artifact-b-preview">Artifact B preview</h1>',
+  })
+  artifactStore.setVisibleConversation('panel-pair-conversation')
+  await artifactStore.open('panel-pair-a', 1)
+  await new Promise((resolve) => window.setTimeout(resolve, 350))
+}
+
+async function openSecondArtifactPanel() {
+  await artifactStore.open('panel-pair-b', 1)
+  await new Promise((resolve) => window.setTimeout(resolve, 350))
+}
+
 Object.assign(window, {
   artifactSecurity: {
     buildHtmlSandboxDocument,
@@ -65,5 +133,7 @@ Object.assign(window, {
     renderMarkdown,
     mountCommittedArtifactPanel,
     switchArtifactPanelConversation,
+    mountArtifactPair,
+    openSecondArtifactPanel,
   },
 })

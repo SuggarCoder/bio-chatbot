@@ -796,7 +796,8 @@ function ExpandedSidebarPanel(props: {
                         <A
                           href={href}
                           onClick={props.onConversationSelect}
-                          class="flex min-h-15 w-full items-center rounded-2xl px-4 py-3 pr-16 text-left outline-none focus-visible:ring-2 focus-visible:ring-teal-300 focus-visible:ring-offset-2"
+                          class="flex w-full items-center rounded-2xl px-4 py-3 pr-16 text-left outline-none focus-visible:ring-2 focus-visible:ring-teal-300 focus-visible:ring-offset-2"
+                          style={{ 'min-height': '60px' }}
                         >
                           <div class="min-w-0">
                             <p class="truncate text-sm font-semibold">{getSidebarLabel(conversation.title)}</p>
