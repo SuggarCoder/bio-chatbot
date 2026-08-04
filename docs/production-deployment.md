@@ -33,14 +33,28 @@ QWEN_MODEL=qwen3.8-max-preview
 GPAS2_AUTH_MODE=upstream
 GPAS2_USER_INFO_URL=https://<internal-gpas-host>/api/gpas2/v1/user/info
 
-# 只填写实际连接 Fastify 的 Nginx/Gateway 地址或 CIDR。
+# 必填。只填写实际连接 Fastify 的 Nginx/Gateway 地址或 CIDR。
 TRUSTED_PROXY_CIDRS=<proxy-ip-or-cidr>
 GENERATION_DISCONNECT_GRACE_SECONDS=45
 ```
 
-`TRUSTED_PROXY_CIDRS` 留空时，Fastify 会忽略 `X-Forwarded-*`。如果应用位于代理后却
-留空，所有用户可能共享代理 IP 的限流额度；不要为了省事填写 `true`、`0.0.0.0/0`
-或其他不受控网段。
+生产环境缺少 `TRUSTED_PROXY_CIDRS` 时应用会拒绝启动，Compose 也会在变量展开阶段
+报错。这可以防止所有用户意外共享代理 IP 的生成限流额度。该值必须是 Fastify
+实际看到的直连代理 socket 地址或最小 CIDR；在 Docker 网络中，它不一定等于代理的
+公网地址。不要为了省事填写 `true`、`0.0.0.0/0`、`::/0`、整个容器网络或其他
+不受控网段，其中两个全地址 CIDR 会被应用明确拒绝。
+
+单层 Nginx 应覆盖客户端传入的地址头，避免攻击者注入伪造链：
+
+```nginx
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+只有存在多层、全部受控且全部列入信任边界的代理链时，才应采用追加
+`X-Forwarded-For` 的配置。修改网络拓扑后必须重新确认 Fastify 看到的直连地址，
+并同步更新 `TRUSTED_PROXY_CIDRS`。
 
 `GENERATION_DISCONNECT_GRACE_SECONDS` 是 SSE 客户端断开后的恢复窗口。窗口内允许
 页面刷新或网络重连；窗口结束仍无订阅者时，服务端取消上游模型请求。建议保持默认
@@ -110,6 +124,8 @@ docker compose --env-file /secure/path/bio-chatbot.env up -d app
    刷新后仍可重新加载。
 5. 测试刷新页面和短暂断网后的流恢复；超过恢复窗口后确认上游生成被取消。
 6. 检查限流使用真实客户端 IP，而不是代理 IP 或可伪造的 Header。
+   从非可信地址直接请求 Fastify 并携带伪造 `X-Forwarded-For`，确认应用忽略该头；
+   再通过可信代理请求，确认不同客户端进入不同 IP 限流桶。
 7. 检查应用和代理日志，确保 Cookie、数据库 URL、Qwen key 和 S3 credential 未被
    输出。
 

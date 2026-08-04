@@ -24,7 +24,7 @@ export const ArtifactSourceView: Component<ArtifactSourceViewProps> = (props) =>
   const language = () => sourceLanguage(props.type, props.language)
 
   return (
-    <div class="artifact-source-view gpas-scrollbar scrollbar-fade h-full min-h-0 overflow-auto bg-slate-950 text-slate-100">
+    <div class="artifact-source-view gpas-scrollbar scrollbar-fade h-full min-h-0 overflow-auto bg-teal-600 text-slate-100">
       <CodeBlock
         class="min-h-full rounded-none border-0"
         code={props.content}

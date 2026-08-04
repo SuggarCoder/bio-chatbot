@@ -53,3 +53,41 @@ test('all Fastify route schemas compile at startup', async () => {
     await app.close()
   }
 })
+
+test('client IP headers are accepted only from a trusted proxy', async () => {
+  const app = await buildApp({
+    config: {
+      nodeEnv: 'test',
+      serveClient: false,
+      trustedProxyCidrs: '10.0.0.10',
+      gpas2AuthMode: 'mock',
+    } as AppConfig,
+    database: {} as Database,
+    redis: {} as RedisClient,
+    generations: {} as GenerationService,
+    objectStore: null,
+    artifactService: null,
+  })
+
+  app.get('/test-client-ip', async (request) => ({ ip: request.ip }))
+
+  try {
+    const proxied = await app.inject({
+      method: 'GET',
+      url: '/test-client-ip',
+      remoteAddress: '10.0.0.10',
+      headers: { 'x-forwarded-for': '198.51.100.20' },
+    })
+    assert.equal(proxied.json().ip, '198.51.100.20')
+
+    const spoofed = await app.inject({
+      method: 'GET',
+      url: '/test-client-ip',
+      remoteAddress: '203.0.113.30',
+      headers: { 'x-forwarded-for': '198.51.100.20' },
+    })
+    assert.equal(spoofed.json().ip, '203.0.113.30')
+  } finally {
+    await app.close()
+  }
+})

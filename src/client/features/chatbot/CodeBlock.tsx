@@ -165,17 +165,17 @@ export function CodeBlock(props: CodeBlockProps) {
 
   return (
     <section
-      class={`code-block overflow-hidden rounded-xl border border-slate-800 bg-slate-950 text-slate-100 ${props.class ?? ''}`}
+      class={`code-block overflow-hidden rounded-xl border border-teal-700 bg-teal-600 text-slate-100 ${props.class ?? ''}`}
       data-highlighted={highlighted().highlighted ? 'true' : 'false'}
       data-wrap={shouldWrap() ? 'true' : 'false'}
     >
-      <div class="code-block-toolbar flex min-h-9 items-center gap-2 border-b border-slate-800 bg-slate-900/90 px-3 text-xs text-slate-400">
+      <div class="code-block-toolbar flex min-h-9 items-center gap-2 border-b border-teal-700 bg-teal-600 px-3 text-xs text-teal-50">
         <span class="min-w-0 flex-1 truncate font-mono">
           {props.filename ?? languageLabel()}
         </span>
         <button
           type="button"
-          class={`grid h-7 w-7 place-items-center rounded-md transition hover:bg-slate-800 hover:text-slate-100 ${shouldWrap() ? 'text-teal-300' : ''}`}
+          class={`grid h-7 w-7 place-items-center rounded-md transition hover:bg-teal-700 hover:text-white ${shouldWrap() ? 'text-teal-200' : ''}`}
           aria-label={shouldWrap() ? 'Disable code wrapping' : 'Enable code wrapping'}
           aria-pressed={shouldWrap()}
           title={shouldWrap() ? 'Disable code wrapping' : 'Enable code wrapping'}
@@ -185,7 +185,7 @@ export function CodeBlock(props: CodeBlockProps) {
         </button>
         <button
           type="button"
-          class="grid h-7 w-7 place-items-center rounded-md transition hover:bg-slate-800 hover:text-slate-100"
+          class="grid h-7 w-7 place-items-center rounded-md transition hover:bg-teal-700 hover:text-white"
           aria-label="Copy code"
           title="Copy code"
           onClick={() => void copy()}

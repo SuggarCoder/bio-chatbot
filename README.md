@@ -32,6 +32,7 @@ npm run dev
 NODE_ENV=production
 GPAS2_AUTH_MODE=upstream
 GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
+TRUSTED_PROXY_CIDRS=<direct-proxy-ip-or-cidr>
 ```
 
 Fastify 会把浏览器请求携带的同域 Cookie 转发给 GPAS2，并以响应中的 `data.userId` 自动创建或更新 Chatbot 用户。请求体、查询参数和自定义 Header 中的 userId 不参与身份判定。

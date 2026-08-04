@@ -40,6 +40,7 @@ Required production configuration:
 NODE_ENV=production
 GPAS2_AUTH_MODE=upstream
 GPAS2_USER_INFO_URL=https://<internal-gpas-host>/api/gpas2/v1/user/info
+TRUSTED_PROXY_CIDRS=<direct-proxy-ip-or-cidr>
 ```
 
 The self-hosted GitHub Actions runner reads these values from
@@ -90,6 +91,20 @@ must be Secure.
 The proxy must preserve the Cookie and full `/ai-chatbot/*` URI. Disable proxy
 buffering and use a long read timeout for SSE. No CORS configuration is needed
 for the same-origin topology.
+
+Production startup rejects an empty `TRUSTED_PROXY_CIDRS`. Configure only the
+IP address or narrow CIDR of the proxy that connects directly to Fastify. For
+the single Nginx hop shown in `deploy/nginx.ai-chatbot.conf.example`, overwrite
+client-supplied forwarding information with:
+
+```nginx
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+Do not use `true`, `0.0.0.0/0`, `::/0`, or a broad container network. Fastify
+must not be reachable publicly around the trusted proxy.
 
 ## Deployment and smoke tests
 

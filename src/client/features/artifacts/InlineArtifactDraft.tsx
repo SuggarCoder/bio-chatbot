@@ -67,7 +67,7 @@ const InlineDraftBody: Component<{ draft: ArtifactDraftClientState }> = (props) 
   return (
     <div
       ref={scrollRef}
-      class="max-h-96 overflow-auto bg-slate-950"
+      class="max-h-96 overflow-auto bg-teal-600"
       onScroll={() => {
         if (!scrollRef) return
         followTail = scrollRef.scrollHeight - scrollRef.scrollTop - scrollRef.clientHeight < 40
