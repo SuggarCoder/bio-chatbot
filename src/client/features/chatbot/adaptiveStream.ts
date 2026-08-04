@@ -36,10 +36,12 @@ const ratePoints: Array<[number, number]> = [
   [0, 38],
   [5, 44],
   [16, 64],
-  [40, 96],
-  [80, 148],
-  [160, 220],
-  [320, 300],
+  [40, 120],
+  [80, 220],
+  [160, 400],
+  [320, 700],
+  [640, 1_000],
+  [1_000, 1_200],
 ]
 
 export function getAdaptiveRate(backlog: number) {
@@ -56,7 +58,7 @@ export function getAdaptiveRate(backlog: number) {
     }
   }
 
-  return 300
+  return 1_200
 }
 
 function defaultScheduler(): FrameScheduler {
@@ -160,6 +162,7 @@ export class AdaptiveStreamSession {
   private visibleText = ''
   private accepting = true
   private terminal?: StreamTerminal
+  private terminalAt?: number
   private completed = false
   private replacementRequired = false
   private firstArrivalAt?: number
@@ -219,6 +222,7 @@ export class AdaptiveStreamSession {
     if (this.completed || this.terminal) return
     this.accepting = false
     this.terminal = terminal
+    this.terminalAt = this.scheduler.now()
     this.receivedText = finalText
     recordStreamTerminal(this.generationId, terminal.kind)
 
@@ -314,13 +318,29 @@ export class AdaptiveStreamSession {
       now - this.firstArrivalAt < 48
     let rate = 0
 
+    if (rawDt > 250 && this.queue.length > 0) {
+      this.appendVisible(this.queue.take(this.queue.length))
+    }
+
+    if (
+      this.terminal &&
+      this.terminalAt !== undefined &&
+      now - this.terminalAt >= 750
+    ) {
+      this.completeNow()
+      return
+    }
+
     if (!waitingForBuffer && this.queue.length > 0) {
       const normalRate = getAdaptiveRate(this.queue.length)
       rate = this.terminal
-        ? Math.min(Math.max(normalRate * 1.5, 180), 360)
+        ? Math.min(
+            Math.max(normalRate * 2, this.queue.length / 0.5, 240),
+            2_000,
+          )
         : normalRate
       this.budget += rate * dt / 1000
-      const count = Math.min(Math.floor(this.budget), 24)
+      const count = Math.min(Math.floor(this.budget), 64)
 
       if (count > 0) {
         this.budget -= count
@@ -353,6 +373,7 @@ export class AdaptiveStreamSession {
     this.cancelFrame()
 
     if (this.replacementRequired || this.visibleText !== this.receivedText) {
+      this.queue.replace('')
       this.visibleText = this.receivedText
       for (const observer of this.observers) {
         observer.replace(this.receivedText)

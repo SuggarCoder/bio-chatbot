@@ -76,8 +76,7 @@ The frontend redirects 401 responses to the same-origin `/login`. It displays
 identity-service failures.
 
 Every protected request is checked through GPAS2, including stream connection
-and reconnection. Redis `user:profile:*` data is only a realtime projection and
-is never accepted as authentication.
+and reconnection. Redis is never accepted as authentication.
 
 ## Reverse proxy
 

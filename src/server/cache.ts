@@ -2,7 +2,6 @@ import { createClient, type RedisClientType } from 'redis'
 
 import type { AppConfig } from './config.js'
 import { getMonthlyTokenUsage, type ChatContext, type Database } from './db.js'
-import type { CurrentUser } from './domain.js'
 
 export type RedisClient = RedisClientType
 
@@ -28,78 +27,86 @@ export function redisKey(config: AppConfig, key: string): string {
   return `${config.redisPrefix}${key}`
 }
 
-export async function cacheUserProfile(
-  redis: RedisClient,
-  config: AppConfig,
-  user: CurrentUser,
-): Promise<void> {
-  if (!redis.isReady) {
-    return
-  }
-
-  const values: Record<string, string> = {
-    internalUserId: user.id,
-    externalUserId: user.externalUserId,
-    cachedAt: String(Math.floor(Date.now() / 1000)),
-  }
-
-  const optionalValues = {
-    externalTeamId: user.externalTeamId,
-    realName: user.realName,
-    userName: user.userName,
-    jobTitle: user.jobTitle,
-    researchField: user.researchField,
-    gpas2Role: user.gpas2Role === null ? null : String(user.gpas2Role),
-    image: user.image,
-  }
-
-  for (const [key, value] of Object.entries(optionalValues)) {
-    if (value !== null) {
-      values[key] = value
-    }
-  }
-
-  const key = redisKey(config, `user:profile:${user.externalUserId}`)
-  await redis.hSet(key, values)
-  await redis.expire(key, 30 * 60)
-}
-
 const rateLimitScript = `
-local count = redis.call('INCR', KEYS[1])
-if count == 1 then
-  redis.call('EXPIRE', KEYS[1], ARGV[1])
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local userLimit = tonumber(ARGV[3])
+local ipLimit = tonumber(ARGV[4])
+local member = ARGV[5]
+local ttl = tonumber(ARGV[6])
+local cutoff = now - window
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
+
+local userCount = redis.call('ZCARD', KEYS[1])
+local ipCount = redis.call('ZCARD', KEYS[2])
+
+if userCount >= userLimit or ipCount >= ipLimit then
+  local retryAfter = 0
+  if userCount >= userLimit then
+    local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+    if oldest[2] then
+      retryAfter = math.max(retryAfter, tonumber(oldest[2]) + window - now)
+    end
+  end
+  if ipCount >= ipLimit then
+    local oldest = redis.call('ZRANGE', KEYS[2], 0, 0, 'WITHSCORES')
+    if oldest[2] then
+      retryAfter = math.max(retryAfter, tonumber(oldest[2]) + window - now)
+    end
+  end
+  return {0, math.max(retryAfter, 1), math.max(userLimit - userCount, 0), math.max(ipLimit - ipCount, 0)}
 end
-return count
+
+redis.call('ZADD', KEYS[1], now, member)
+redis.call('ZADD', KEYS[2], now, member)
+redis.call('PEXPIRE', KEYS[1], ttl)
+redis.call('PEXPIRE', KEYS[2], ttl)
+return {1, 0, userLimit - userCount - 1, ipLimit - ipCount - 1}
 `
+
+export type GenerationRateLimitResult = {
+  allowed: boolean
+  retryAfterMs: number
+  remainingUser: number
+  remainingIp: number
+}
 
 export async function consumeGenerationRateLimit(
   redis: RedisClient,
   config: AppConfig,
   userId: string,
   ip: string,
-): Promise<boolean> {
+): Promise<GenerationRateLimitResult> {
   if (!redis.isReady) {
     throw new Error('Redis is unavailable')
   }
 
-  const window = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')
-  const userKey = redisKey(config, `rl:user:${userId}:req:${window}`)
-  const ipKey = redisKey(config, `rl:ip:${ip}:req:${window}`)
-  const [userCount, ipCount] = await Promise.all([
-    redis.eval(rateLimitScript, {
-      keys: [userKey],
-      arguments: ['120'],
-    }),
-    redis.eval(rateLimitScript, {
-      keys: [ipKey],
-      arguments: ['120'],
-    }),
-  ])
+  const now = Date.now()
+  const windowMs = 60_000
+  const result = await redis.eval(rateLimitScript, {
+    keys: [
+      redisKey(config, `rl:user:${userId}:generation`),
+      redisKey(config, `rl:ip:${ip}:generation`),
+    ],
+    arguments: [
+      String(now),
+      String(windowMs),
+      String(config.chatRateLimitPerMinute),
+      String(config.chatRateLimitPerMinute * 5),
+      `${now}:${crypto.randomUUID()}`,
+      String(windowMs + 1_000),
+    ],
+  })
+  const values = Array.isArray(result) ? result : []
 
-  return (
-    Number(userCount) <= config.chatRateLimitPerMinute &&
-    Number(ipCount) <= config.chatRateLimitPerMinute * 5
-  )
+  return {
+    allowed: Number(values[0]) === 1,
+    retryAfterMs: Math.max(0, Number(values[1]) || 0),
+    remainingUser: Math.max(0, Number(values[2]) || 0),
+    remainingIp: Math.max(0, Number(values[3]) || 0),
+  }
 }
 
 const acquireConcurrencyScript = `
@@ -258,14 +265,13 @@ export async function getCachedChatContext(
   redis: RedisClient,
   config: AppConfig,
   chatId: string,
-  revision: number,
 ): Promise<ChatContext | null> {
   if (!redis.isReady) {
     return null
   }
 
   const value = await redis.get(
-    redisKey(config, `chat:ctx:${chatId}:r${revision}`),
+    redisKey(config, `chat:ctx:${chatId}`),
   )
 
   if (!value) {
@@ -291,13 +297,47 @@ export async function setCachedChatContext(
   await redis.set(
     redisKey(
       config,
-      `chat:ctx:${context.chatId}:r${context.revision}`,
+      `chat:ctx:${context.chatId}`,
     ),
     JSON.stringify(context),
     {
       EX: 2 * 60 * 60,
     },
   )
+}
+
+const advanceChatContextScript = `
+local current = redis.call('GET', KEYS[1])
+if not current then
+  return 0
+end
+local ok, decoded = pcall(cjson.decode, current)
+if not ok or tonumber(decoded.revision) ~= tonumber(ARGV[1]) then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+return 1
+`
+
+export async function advanceCachedChatContext(
+  redis: RedisClient,
+  config: AppConfig,
+  expectedRevision: number,
+  context: ChatContext,
+): Promise<boolean> {
+  if (!redis.isReady) {
+    return false
+  }
+
+  const result = await redis.eval(advanceChatContextScript, {
+    keys: [redisKey(config, `chat:ctx:${context.chatId}`)],
+    arguments: [
+      String(expectedRevision),
+      JSON.stringify(context),
+      String(2 * 60 * 60),
+    ],
+  })
+  return Number(result) === 1
 }
 
 export async function setGenerationRealtimeState(

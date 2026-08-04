@@ -12,6 +12,7 @@ import {
   createChat,
   deleteChat,
   fetchChat,
+  fetchChatMessages,
   fetchChats,
   fetchCurrentUser,
   renameChat,
@@ -70,6 +71,10 @@ export type ChatConversation = {
   detailError?: string
   draft: string
   activeGeneration?: ActiveGeneration
+  hasMoreMessages: boolean
+  beforeMessageSeq?: number
+  loadingOlderMessages: boolean
+  olderMessagesError?: string
   createdAt: number
   updatedAt: number
   errorMessage?: string
@@ -100,6 +105,7 @@ type ChatStoreContextValue = {
     id: string,
     options?: { force?: boolean },
   ) => Promise<ChatConversation | undefined>
+  loadOlderMessages: (id: string) => Promise<void>
   renameConversation: (id: string, title: string) => Promise<void>
   deleteConversation: (id: string) => Promise<void>
   updateConversationDraft: (id: string, value: string) => void
@@ -225,6 +231,10 @@ function mapSummary(
     detailError: existing?.detailError,
     draft: existing?.draft ?? '',
     activeGeneration: existing?.activeGeneration,
+    hasMoreMessages: existing?.hasMoreMessages ?? false,
+    beforeMessageSeq: existing?.beforeMessageSeq,
+    loadingOlderMessages: existing?.loadingOlderMessages ?? false,
+    olderMessagesError: existing?.olderMessagesError,
     createdAt: new Date(chat.createdAt).getTime(),
     updatedAt: new Date(chat.updatedAt).getTime(),
     errorMessage: existing?.errorMessage,
@@ -249,6 +259,10 @@ function mapDetail(
             chat.activeGeneration.replacesMessageId ?? undefined,
         }
       : undefined,
+    hasMoreMessages: chat.pageInfo.hasMore,
+    beforeMessageSeq: chat.pageInfo.beforeSeq ?? undefined,
+    loadingOlderMessages: false,
+    olderMessagesError: undefined,
     errorMessage: undefined,
   }
 }
@@ -387,6 +401,50 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     })
     pendingConversationLoads.set(id, request)
     return request
+  }
+
+  const loadOlderMessages = async (id: string): Promise<void> => {
+    const conversation = state.conversations[id]
+    if (
+      !conversation ||
+      !conversation.hasMoreMessages ||
+      !conversation.beforeMessageSeq ||
+      conversation.loadingOlderMessages
+    ) {
+      return
+    }
+
+    const beforeSeq = conversation.beforeMessageSeq
+    setState('conversations', id, {
+      loadingOlderMessages: true,
+      olderMessagesError: undefined,
+    })
+
+    try {
+      const page = await fetchChatMessages(id, beforeSeq)
+      const olderMessages = page.messages.map(mapMessage)
+      setState(
+        'conversations',
+        id,
+        produce((current: ChatConversation) => {
+          const existingIds = new Set(current.messages.map((message) => message.id))
+          current.messages = [
+            ...olderMessages.filter((message) => !existingIds.has(message.id)),
+            ...current.messages,
+          ]
+          current.hasMoreMessages = page.pageInfo.hasMore
+          current.beforeMessageSeq = page.pageInfo.beforeSeq ?? undefined
+          current.loadingOlderMessages = false
+        }),
+      )
+    } catch (error) {
+      setState('conversations', id, {
+        loadingOlderMessages: false,
+        olderMessagesError: error instanceof Error
+          ? error.message
+          : 'Earlier messages could not be loaded',
+      })
+    }
   }
 
   const renameConversation = async (id: string, title: string) => {
@@ -934,6 +992,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         getConversation: (id) => state.conversations[id],
         createConversation,
         loadConversation,
+        loadOlderMessages,
         renameConversation,
         deleteConversation,
         updateConversationDraft,

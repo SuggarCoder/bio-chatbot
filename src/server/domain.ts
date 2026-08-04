@@ -113,7 +113,18 @@ export type GenerationStartDto = {
 
 export type ChatDetailDto = ChatSummaryDto & {
   messages: ChatMessageDto[]
+  pageInfo: ChatMessagePageInfo
   activeGeneration: ActiveGenerationDto | null
+}
+
+export type ChatMessagePageInfo = {
+  hasMore: boolean
+  beforeSeq: number | null
+}
+
+export type ChatMessagePageDto = {
+  messages: ChatMessageDto[]
+  pageInfo: ChatMessagePageInfo
 }
 
 type StreamIdentity = {

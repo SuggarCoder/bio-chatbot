@@ -4,6 +4,7 @@ import type { ResumableStreamContext } from 'resumable-stream'
 
 import {
   acquireGenerationLease,
+  advanceCachedChatContext,
   getCachedChatContext,
   getGenerationRunnerId,
   publishGenerationCancellation,
@@ -18,7 +19,8 @@ import type { AppConfig } from './config.js'
 import { ArtifactStreamParser } from './artifacts/parser.js'
 import {
   ArtifactCommitError,
-  listArtifactsForChat,
+  getArtifactForUser,
+  listArtifactPromptCatalogForChat,
   type PreparedArtifactVersion,
 } from './artifacts/repository.js'
 import {
@@ -26,7 +28,10 @@ import {
   ArtifactServiceError,
   type CompletedArtifactDraft,
 } from './artifacts/service.js'
-import { buildArtifactSystemPrompt } from './artifacts/systemPrompt.js'
+import {
+  buildArtifactSystemPrompt,
+  type ArtifactPromptCatalogItem,
+} from './artifacts/systemPrompt.js'
 import {
   createGenerationStart,
   createRegenerationStart,
@@ -38,6 +43,7 @@ import {
   rebuildChatContext,
   requestGenerationCancellation,
   type Database,
+  type ChatContext,
   type GenerationStart,
   type GenerationUsage,
 } from './db.js'
@@ -64,6 +70,7 @@ type StartGenerationInput = {
   content: string
   clientMessageId: string
   ip: string
+  artifactId?: string
   supersedesGenerationId?: string
   replacesMessageId?: string
 }
@@ -78,6 +85,22 @@ type StreamEventPayload = StreamEvent extends infer Event
 
 function serializeEvent(event: StreamEvent): string {
   return `id: ${event.eventId}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+}
+
+function appendContextMessage(
+  context: ChatContext,
+  revision: number,
+  message: { seq: number; role: 'user' | 'assistant'; content: string },
+): ChatContext {
+  return {
+    ...context,
+    revision,
+    lastSeq: message.seq,
+    messages: [
+      ...context.messages,
+      { role: message.role, content: message.content },
+    ].slice(-80),
+  }
 }
 
 function asNonNegativeInteger(value: unknown): number {
@@ -187,6 +210,28 @@ export class GenerationService {
         generation,
         userMessage: existing.userMessage,
         replacesMessageId: input.replacesMessageId ?? null,
+      }
+    }
+
+    if (input.artifactId) {
+      if (!this.config.artifactProtocolEnabled || !this.artifactService) {
+        throw new GenerationRejectedError(
+          'Artifact support is disabled',
+          400,
+          'artifact_disabled',
+        )
+      }
+      const artifact = await getArtifactForUser(
+        this.database,
+        input.user.id,
+        input.artifactId,
+      )
+      if (!artifact || artifact.chatId !== input.chatId) {
+        throw new GenerationRejectedError(
+          'Artifact not found',
+          404,
+          'artifact_not_found',
+        )
       }
     }
 
@@ -498,8 +543,11 @@ export class GenerationService {
     })
   }
 
-  private async checkpoint(runtime: GenerationRuntime): Promise<void> {
-    const execution = new GenerationExecutionContext(
+  private async checkpoint(
+    runtime: GenerationRuntime,
+    forceDatabasePoll = false,
+  ): Promise<void> {
+    const execution = runtime.execution ?? new GenerationExecutionContext(
       runtime.generationId,
       runtime.controller.signal,
       () => isGenerationCancellationRequested(
@@ -507,9 +555,10 @@ export class GenerationService {
         runtime.generationId,
       ),
     )
+    runtime.execution = execution
 
     try {
-      await execution.checkpoint()
+      await execution.checkpoint(forceDatabasePoll)
     } catch (error) {
       runtime.controller.abort()
       throw error
@@ -643,7 +692,7 @@ export class GenerationService {
     })
 
     try {
-      await this.checkpoint(runtime)
+      await this.checkpoint(runtime, true)
 
       const revision = await getChatContextRevision(
         this.database,
@@ -660,9 +709,31 @@ export class GenerationService {
             this.redis,
             this.config,
             input.chatId,
-            revision,
           )
         : null
+
+      if (
+        context &&
+        context.revision === revision - 1 &&
+        start.contextMaxSeq === undefined &&
+        start.userMessage.seq > context.lastSeq
+      ) {
+        const previousRevision = context.revision
+        context = appendContextMessage(
+          context,
+          revision,
+          start.userMessage,
+        )
+        const advanced = await advanceCachedChatContext(
+          this.redis,
+          this.config,
+          previousRevision,
+          context,
+        )
+        if (!advanced) context = null
+      } else if (context?.revision !== revision) {
+        context = null
+      }
 
       if (!context) {
         context = await rebuildChatContext(
@@ -681,39 +752,71 @@ export class GenerationService {
         }
       }
 
-      await this.checkpoint(runtime)
+      await this.checkpoint(runtime, true)
       const artifactCatalog = artifactEnabled
-        ? await listArtifactsForChat(this.database, input.user.id, input.chatId)
+        ? await listArtifactPromptCatalogForChat(
+            this.database,
+            input.user.id,
+            input.chatId,
+          )
         : []
-      const artifactPromptCatalog = artifactEnabled && artifactService
-        ? await Promise.all(artifactCatalog.slice(0, 50).flatMap((artifact, index) =>
-            artifact.logicalId && artifact.type
-              ? [index < 5
-                  ? artifactService.readVersionContent(
-                      input.user.id,
-                      artifact.id,
-                      artifact.currentVersion,
-                    ).catch(() => null).then((content) => ({
-                      logicalId: artifact.logicalId!,
-                      version: artifact.currentVersion,
-                      type: artifact.type!,
-                      title: artifact.title,
-                      content,
-                    }))
-                  : Promise.resolve({
-                      logicalId: artifact.logicalId,
-                      version: artifact.currentVersion,
-                      type: artifact.type,
-                      title: artifact.title,
-                    })]
-              : [],
-          ))
-        : []
+      const artifactPromptCatalog = artifactCatalog.flatMap((artifact) =>
+        artifact.logicalId && artifact.type
+          ? [{
+              artifactId: artifact.id,
+              logicalId: artifact.logicalId,
+              version: artifact.currentVersion,
+              type: artifact.type,
+              title: artifact.title,
+            }]
+          : [],
+      )
+      const promptText = (input.content || start.userMessage.content).toLocaleLowerCase()
+      const referencedArtifacts = artifactPromptCatalog.filter((artifact) =>
+        artifact.artifactId === input.artifactId ||
+        promptText.includes(artifact.logicalId.toLocaleLowerCase()) ||
+        (
+          artifact.title.trim().length >= 2 &&
+          promptText.includes(artifact.title.trim().toLocaleLowerCase())
+        ),
+      )
+      const selectedArtifact = input.artifactId
+        ? artifactPromptCatalog.find((artifact) => artifact.artifactId === input.artifactId)
+        : referencedArtifacts.length === 1
+          ? referencedArtifacts[0]
+          : undefined
+      let promptCatalog: ArtifactPromptCatalogItem[] = artifactPromptCatalog.map(
+        ({ artifactId: _, ...artifact }) => artifact,
+      )
+      let artifactInstructions = buildArtifactSystemPrompt(promptCatalog)
+
+      if (artifactEnabled && artifactService && selectedArtifact) {
+        const content = await artifactService.readVersionContent(
+          input.user.id,
+          selectedArtifact.artifactId,
+          selectedArtifact.version,
+          32 * 1024,
+        ).catch(() => null)
+        promptCatalog = promptCatalog.map((artifact) =>
+          artifact.logicalId === selectedArtifact.logicalId
+            ? { ...artifact, content }
+            : artifact,
+        )
+        const candidate = buildArtifactSystemPrompt(promptCatalog)
+        artifactInstructions = Buffer.byteLength(candidate, 'utf8') <= 48 * 1024
+          ? candidate
+          : buildArtifactSystemPrompt(promptCatalog.map((artifact) => ({
+              ...artifact,
+              content: artifact.logicalId === selectedArtifact.logicalId
+                ? null
+                : artifact.content,
+            })))
+      }
       const responseStream = await this.qwen.responses.create(
         {
           model: this.config.qwenModel,
           instructions: artifactEnabled
-            ? buildArtifactSystemPrompt(artifactPromptCatalog)
+            ? artifactInstructions
             : undefined,
           input: context.messages.map((message) => ({
             role: message.role,
@@ -724,7 +827,7 @@ export class GenerationService {
         },
         { signal: runtime.controller.signal },
       )
-      await this.checkpoint(runtime)
+      await this.checkpoint(runtime, true)
 
       for await (const event of responseStream) {
         await this.checkpoint(runtime)
@@ -738,7 +841,7 @@ export class GenerationService {
           )
 
           if (!marked) {
-            await this.checkpoint(runtime)
+            await this.checkpoint(runtime, true)
           }
 
           await setGenerationRealtimeState(
@@ -791,7 +894,7 @@ export class GenerationService {
         }
       }
 
-      await this.checkpoint(runtime)
+      await this.checkpoint(runtime, true)
       parser?.finish()
 
       if (!runtime.partialOutput.trim() && completedDrafts.length === 0) {
@@ -826,6 +929,7 @@ export class GenerationService {
         }
       }
 
+      await this.checkpoint(runtime, true)
       const result = await this.finalizer.finalize({
         generationId: start.generationId,
         userId: input.user.id,
@@ -841,6 +945,33 @@ export class GenerationService {
           firstTokenAt === null ? null : firstTokenAt - startedAt,
         finishReason: 'completed',
       })
+
+      if (result.newlyFinalized && result.generation.status === 'completed') {
+        const finalRevision = await getChatContextRevision(
+          this.database,
+          input.user.id,
+          input.chatId,
+        )
+        if (finalRevision !== null) {
+          const nextContext = result.assistantMessage
+            ? appendContextMessage(
+                context,
+                finalRevision,
+                {
+                  seq: result.assistantMessage.seq,
+                  role: 'assistant',
+                  content: result.assistantMessage.content,
+                },
+              )
+            : { ...context, revision: finalRevision }
+          await advanceCachedChatContext(
+            this.redis,
+            this.config,
+            context.revision,
+            nextContext,
+          ).catch(() => false)
+        }
+      }
 
       if (
         result.generation.status !== 'completed' &&

@@ -349,6 +349,11 @@ export const generations = pgTable(
     index('idx_generation_supersedes')
       .on(table.supersedesGenerationId)
       .where(sql`${table.supersedesGenerationId} is not null`),
+    index('idx_generation_completed_supersedes')
+      .on(table.supersedesGenerationId)
+      .where(
+        sql`${table.supersedesGenerationId} is not null and ${table.status} = 'completed'`,
+      ),
     index('idx_generation_user_created')
       .on(table.userId, table.createdAt.desc())
       .where(sql`${table.userId} is not null`),

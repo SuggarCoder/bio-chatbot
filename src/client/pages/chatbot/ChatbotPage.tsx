@@ -337,6 +337,11 @@ async function runAssistantReply(
       const started = await createGeneration(conversationId, {
         content: prompt,
         clientMessageId,
+        artifactId:
+          artifactStore.state.visibleConversationId === conversationId &&
+          artifactStore.state.isPanelOpen
+            ? artifactStore.state.activeArtifactId ?? undefined
+            : undefined,
         supersedesGenerationId: previousGenerationId,
       })
 
@@ -1957,6 +1962,23 @@ function SessionConversationView(props: { conversationId: string }) {
       updateShouldStickToBottom()
       finishPointerScrollInteraction()
     }
+    if (
+      messageListRef &&
+      messageListRef.scrollTop < 96 &&
+      conversation()?.hasMoreMessages &&
+      !conversation()?.loadingOlderMessages
+    ) {
+      const previousHeight = messageListRef.scrollHeight
+      const previousTop = messageListRef.scrollTop
+      void chatStore.loadOlderMessages(props.conversationId).then(() => {
+        window.requestAnimationFrame(() => {
+          if (!messageListRef) return
+          const addedHeight = messageListRef.scrollHeight - previousHeight
+          messageListRef.scrollTop = previousTop + addedHeight
+          wheelScrollTarget = messageListRef.scrollTop
+        })
+      })
+    }
   }
   const followVisibleOutput = (generationId: string) => {
     if (!messageListRef || !shouldStickToBottom || followScrollFrame !== undefined) {
@@ -2157,7 +2179,16 @@ function SessionConversationView(props: { conversationId: string }) {
       return
     }
 
-    const started = await regenerateMessage(message.id, crypto.randomUUID())
+    const activeArtifactId =
+      artifactStore.state.visibleConversationId === props.conversationId &&
+      artifactStore.state.isPanelOpen
+        ? artifactStore.state.activeArtifactId ?? undefined
+        : undefined
+    const started = await regenerateMessage(
+      message.id,
+      crypto.randomUUID(),
+      activeArtifactId,
+    )
 
     if (!started.generation.streamId) {
       throw new Error('Generation stream was not created')
@@ -2240,6 +2271,20 @@ function SessionConversationView(props: { conversationId: string }) {
                 onPointerCancel={finishPointerScrollInteraction}
               >
                 <div class="flex flex-col gap-4">
+                  <Show when={activeConversation().hasMoreMessages}>
+                    <button
+                      type="button"
+                      class="mx-auto rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-100 disabled:opacity-50"
+                      disabled={activeConversation().loadingOlderMessages}
+                      onClick={() => handleMessageListScroll()}
+                    >
+                      {activeConversation().loadingOlderMessages
+                        ? 'Loading earlier messages...'
+                        : activeConversation().olderMessagesError
+                          ? 'Retry loading earlier messages'
+                          : 'Load earlier messages'}
+                    </button>
+                  </Show>
                   <For each={visibleMessages()}>
                     {(message) => (
                       <ChatMessageBubble

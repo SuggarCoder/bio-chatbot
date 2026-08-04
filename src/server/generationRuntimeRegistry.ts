@@ -4,6 +4,7 @@ import {
 } from './cache.js'
 import type { AppConfig } from './config.js'
 import type { GenerationUsage } from './db.js'
+import type { GenerationExecutionContext } from './generationExecution.js'
 
 export type GenerationRuntime = {
   generationId: string
@@ -15,6 +16,7 @@ export type GenerationRuntime = {
   providerRequestId?: string
   usage: GenerationUsage
   completion?: Promise<void>
+  execution?: GenerationExecutionContext
 }
 
 type ControlMessage = {

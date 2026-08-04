@@ -7,8 +7,10 @@ import {
   inArray,
   isNotNull,
   isNull,
+  lt,
   lte,
   notExists,
+  notInArray,
   or,
   sql,
 } from 'drizzle-orm'
@@ -24,6 +26,7 @@ import {
 import type {
   ActiveGenerationDto,
   ChatDetailDto,
+  ChatMessagePageDto,
   ChatMessageDto,
   ChatSummaryDto,
   CurrentUser,
@@ -353,48 +356,10 @@ export async function getChatDetail(
     return null
   }
 
-  const original = alias(generations, 'original')
-  const replacement = alias(generations, 'replacement')
   const replaced = alias(generations, 'replaced')
 
-  const [messageRows, activeRows] = await Promise.all([
-    database
-      .select({
-        id: messages.id,
-        seq: messages.seq,
-        role: messages.role,
-        status: messages.status,
-        parts: messages.parts,
-        createdAt: messages.createdAt,
-        isUpvoted: votes.isUpvoted,
-      })
-      .from(messages)
-      .leftJoin(
-        votes,
-        and(eq(votes.messageId, messages.id), eq(votes.userId, userId)),
-      )
-      .where(
-        and(
-          eq(messages.chatId, chatId),
-          inArray(messages.role, ['user', 'assistant']),
-          notExists(
-            database
-              .select({ value: sql`1` })
-              .from(original)
-              .innerJoin(
-                replacement,
-                eq(replacement.supersedesGenerationId, original.id),
-              )
-              .where(
-                and(
-                  eq(original.assistantMessageId, messages.id),
-                  eq(replacement.status, 'completed'),
-                ),
-              ),
-          ),
-        ),
-      )
-      .orderBy(asc(messages.seq)),
+  const [messagePage, activeRows] = await Promise.all([
+    queryChatMessagesPage(database, userId, chatId, undefined, 50),
     database
       .select({
         id: generations.id,
@@ -428,9 +393,95 @@ export async function getChatDetail(
 
   return {
     ...mapChat(chat as typeof chats.$inferSelect),
-    messages: messageRows.map((row) => mapMessage(row)),
+    ...messagePage,
     activeGeneration,
   }
+}
+
+async function queryChatMessagesPage(
+  database: Database,
+  userId: string,
+  chatId: string,
+  beforeSeq: number | undefined,
+  limit: number,
+): Promise<ChatMessagePageDto> {
+  const original = alias(generations, 'original')
+  const replacement = alias(generations, 'replacement')
+  const supersededMessageIds = database
+    .select({ id: original.assistantMessageId })
+    .from(original)
+    .innerJoin(
+      replacement,
+      eq(replacement.supersedesGenerationId, original.id),
+    )
+    .where(
+      and(
+        eq(original.chatId, chatId),
+        isNotNull(original.assistantMessageId),
+        eq(replacement.status, 'completed'),
+      ),
+    )
+  const conditions = [
+    eq(messages.chatId, chatId),
+    inArray(messages.role, ['user', 'assistant']),
+    notInArray(messages.id, supersededMessageIds),
+  ]
+  if (beforeSeq !== undefined) {
+    conditions.push(lt(messages.seq, BigInt(beforeSeq)))
+  }
+
+  const rows = await database
+    .select({
+      id: messages.id,
+      seq: messages.seq,
+      role: messages.role,
+      status: messages.status,
+      parts: messages.parts,
+      createdAt: messages.createdAt,
+      isUpvoted: votes.isUpvoted,
+    })
+    .from(messages)
+    .leftJoin(
+      votes,
+      and(eq(votes.messageId, messages.id), eq(votes.userId, userId)),
+    )
+    .where(and(...conditions))
+    .orderBy(desc(messages.seq))
+    .limit(limit + 1)
+  const hasMore = rows.length > limit
+  const pageRows = rows.slice(0, limit).reverse()
+  const mapped = pageRows.map((row) => mapMessage(row))
+
+  return {
+    messages: mapped,
+    pageInfo: {
+      hasMore,
+      beforeSeq: hasMore ? mapped[0]?.seq ?? null : null,
+    },
+  }
+}
+
+export async function getChatMessagesPage(
+  database: Database,
+  userId: string,
+  chatId: string,
+  beforeSeq: number,
+  limit: number,
+): Promise<ChatMessagePageDto | null> {
+  const [chat] = await database
+    .select({ id: chats.id })
+    .from(chats)
+    .where(
+      and(
+        eq(chats.id, chatId),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .limit(1)
+  return chat
+    ? queryChatMessagesPage(database, userId, chatId, beforeSeq, limit)
+    : null
 }
 
 export async function setMessageVote(

@@ -172,15 +172,27 @@ export class ArtifactService {
     version: number,
     maxBytes = 256 * 1024,
   ): Promise<string | null> {
-    const value = await this.readVersion(userId, artifactId, version)
-    if (!value || value.record.byteLength > BigInt(maxBytes)) return null
+    const record = await getArtifactVersionForUser(
+      this.database,
+      userId,
+      artifactId,
+      version,
+    )
+    if (!record || record.byteLength > BigInt(maxBytes)) return null
+    const stored = await this.objectStore.getStream(record.storageKey)
+    if (!stored) {
+      throw new ArtifactServiceError(
+        'ARTIFACT_STORAGE_FAILED',
+        'Artifact content is missing from object storage.',
+      )
+    }
     const chunks: Buffer[] = []
     let total = 0
-    for await (const chunk of value.stored.body) {
+    for await (const chunk of stored.body) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
       total += bytes.length
       if (total > maxBytes) {
-        value.stored.body.destroy()
+        stored.body.destroy()
         return null
       }
       chunks.push(bytes)

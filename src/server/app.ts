@@ -10,7 +10,6 @@ import { fileURLToPath } from 'node:url'
 
 import { AuthenticationError, resolveCurrentUser } from './auth.js'
 import {
-  cacheUserProfile,
   consumeGenerationRateLimit,
   type RedisClient,
 } from './cache.js'
@@ -21,6 +20,7 @@ import {
   deleteMessageVote,
   deleteChat,
   getChatDetail,
+  getChatMessagesPage,
   getGeneration,
   getRegenerationTarget,
   listChats,
@@ -120,6 +120,19 @@ function requireText(
   }
 
   return normalized
+}
+
+function parsePositiveInteger(
+  value: unknown,
+  fallback: number,
+  maximum: number,
+): number | null {
+  if (value === undefined) return fallback
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= maximum
+    ? parsed
+    : null
 }
 
 function sendStringStream(
@@ -222,8 +235,40 @@ export async function buildApp(
       config,
       database,
     )
-    void cacheUserProfile(redis, config, user).catch(() => undefined)
     return user
+  }
+
+  const enforceGenerationRateLimit = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    user: CurrentUser,
+  ): Promise<void> => {
+    if (!redis.isReady) {
+      throw new GenerationRejectedError(
+        'Generation is temporarily unavailable',
+        503,
+        'redis_unavailable',
+      )
+    }
+
+    const result = await consumeGenerationRateLimit(
+      redis,
+      config,
+      user.id,
+      request.ip,
+    )
+
+    if (!result.allowed) {
+      reply.header(
+        'Retry-After',
+        String(Math.max(1, Math.ceil(result.retryAfterMs / 1_000))),
+      )
+      throw new GenerationRejectedError(
+        'Too many generation requests',
+        429,
+        'generation_rate_limited',
+      )
+    }
   }
 
   app.get(`${API_BASE}/health`, async (_request, reply) => {
@@ -506,6 +551,52 @@ export async function buildApp(
     return chat
   })
 
+  app.get<{
+    Params: { chatId: string }
+    Querystring: { beforeSeq?: string; limit?: string }
+  }>(`${API_BASE}/chats/:chatId/messages`, async (request, reply) => {
+    const user = await authenticate(request)
+    const chatId = requireUuid(
+      request,
+      reply,
+      request.params.chatId,
+      'chatId',
+    )
+    const beforeSeq = parsePositiveInteger(
+      request.query.beforeSeq,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    )
+    const limit = parsePositiveInteger(request.query.limit, 50, 100)
+
+    if (!chatId || beforeSeq === null || beforeSeq === 0 || limit === null) {
+      if (chatId && (beforeSeq === null || beforeSeq === 0 || limit === null)) {
+        return reply.code(400).send(
+          errorBody(
+            request,
+            'invalid_request',
+            'beforeSeq must be a positive integer and limit must be between 1 and 100',
+          ),
+        )
+      }
+      return
+    }
+
+    const page = await getChatMessagesPage(
+      database,
+      user.id,
+      chatId,
+      beforeSeq,
+      limit,
+    )
+    if (!page) {
+      return reply.code(404).send(
+        errorBody(request, 'chat_not_found', 'Chat not found'),
+      )
+    }
+    return page
+  })
+
   app.patch<{
     Params: { chatId: string }
   }>(`${API_BASE}/chats/:chatId`, async (request, reply) => {
@@ -630,6 +721,7 @@ export async function buildApp(
     Params: { messageId: string }
   }>(`${API_BASE}/messages/:messageId/regenerate`, async (request, reply) => {
     const user = await authenticate(request)
+    const body = readObjectBody(request)
     const messageId = requireUuid(
       request,
       reply,
@@ -639,11 +731,18 @@ export async function buildApp(
     const requestId = requireUuid(
       request,
       reply,
-      readObjectBody(request).requestId,
+      body.requestId,
       'requestId',
     )
+    const artifactId = body.artifactId === undefined
+      ? undefined
+      : requireUuid(request, reply, body.artifactId, 'artifactId')
 
-    if (!messageId || !requestId) {
+    if (
+      !messageId ||
+      !requestId ||
+      (body.artifactId !== undefined && !artifactId)
+    ) {
       return
     }
 
@@ -656,20 +755,7 @@ export async function buildApp(
     }
 
 
-    const withinLimit = await consumeGenerationRateLimit(
-      redis,
-      config,
-      user.id,
-      request.ip,
-    )
-
-    if (!withinLimit) {
-      throw new GenerationRejectedError(
-        'Too many generation requests',
-        429,
-        'generation_rate_limited',
-      )
-    }
+    await enforceGenerationRateLimit(request, reply, user)
 
     const started = await generations.create({
       user,
@@ -677,6 +763,7 @@ export async function buildApp(
       content: '',
       clientMessageId: requestId,
       ip: request.ip,
+      artifactId: artifactId || undefined,
       replacesMessageId: messageId,
     })
 
@@ -714,8 +801,15 @@ export async function buildApp(
         body.clientMessageId,
         'clientMessageId',
       )
+      const artifactId = body.artifactId === undefined
+        ? undefined
+        : requireUuid(request, reply, body.artifactId, 'artifactId')
 
-      if (!content || !clientMessageId) {
+      if (
+        !content ||
+        !clientMessageId ||
+        (body.artifactId !== undefined && !artifactId)
+      ) {
         return
       }
       const supersedesGenerationId =
@@ -735,28 +829,7 @@ export async function buildApp(
         return
       }
 
-      if (!redis.isReady) {
-        throw new GenerationRejectedError(
-          'Generation is temporarily unavailable',
-          503,
-          'redis_unavailable',
-        )
-      }
-
-      const withinLimit = await consumeGenerationRateLimit(
-        redis,
-        config,
-        user.id,
-        request.ip,
-      )
-
-      if (!withinLimit) {
-        throw new GenerationRejectedError(
-          'Too many generation requests',
-          429,
-          'generation_rate_limited',
-        )
-      }
+      await enforceGenerationRateLimit(request, reply, user)
 
       const started = await generations.create({
         user,
@@ -764,6 +837,7 @@ export async function buildApp(
         content,
         clientMessageId,
         ip: request.ip,
+        artifactId: artifactId || undefined,
         supersedesGenerationId: supersedesGenerationId || undefined,
       })
 

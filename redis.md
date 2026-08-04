@@ -65,7 +65,7 @@ Examples:
 
 ```text
 gpas2cb:prod:v2:identity:resolve:{cookieHash}
-gpas2cb:prod:v2:chat:ctx:{chatId}:r{revision}
+gpas2cb:prod:v2:chat:ctx:{chatId}
 gpas2cb:prod:v2:quota:user:{userId}:{yyyyMM}
 ```
 
@@ -78,8 +78,7 @@ All key examples below omit this prefix for readability.
 | Key | Redis Type | TTL | Purpose |
 |---|---|---:|---|
 | `identity:resolve:{cookieHash}` | Hash | 30–120 s (optional) | Cache GPAS2 `/info` identity resolution result |
-| `user:profile:{externalUserId}` | Hash | 30 min | GPAS2 user profile cache |
-| `chat:ctx:{chatId}:r{revision}` | String JSON | 2 h | Versioned LLM context cache |
+| `chat:ctx:{chatId}` | String JSON | 2 h | Latest revisioned LLM context snapshot |
 | `generation:{generationId}` | Hash | running: sliding / terminal: 1 h | Realtime Generation projection and runner location |
 | `stream:{streamId}:*` | library-managed | 24 h | Resumable streaming data for one Generation |
 | `control:runner:{runnerId}` | Pub/Sub | none | Best-effort low-latency Generation cancellation command |
@@ -334,60 +333,10 @@ what that user is allowed to access
 Redis must never bypass this authorization path.
 
 
-# 5. User Profile Cache
+# 5. Authentication Profile Handling
 
-## Key
-
-```text
-user:profile:{externalUserId}
-```
-
-## Type
-
-```text
-HASH
-```
-
-## Purpose
-
-Caches non-authoritative GPAS2 profile information used by the Chatbot UI and request context.
-
-This cache is separate from identity resolution. A valid profile cache entry does **not** prove that the current browser Cookie is authenticated.
-
-## Example fields
-
-```text
-internalUserId
-externalUserId
-externalTeamId
-realName
-userName
-jobTitle
-researchField
-gpas2Role
-image
-cachedAt
-```
-
-## TTL
-
-```text
-30 minutes
-```
-
-## Security rule
-
-Profile cache is not a substitute for identity validation or resource-level authorization.
-
-A cached:
-
-```text
-gpas2Role=admin
-```
-
-must not by itself authorize access to a specific project/sample/report.
-
-For sensitive Tool calls, authorization must still be enforced by the backend/GPAS2 authorization layer.
+GPAS2 profiles are validated on every protected request and synchronized to
+PostgreSQL. The application does not maintain a Redis user-profile projection.
 
 ---
 
@@ -396,13 +345,13 @@ For sensitive Tool calls, authorization must still be enforced by the backend/GP
 ## Key
 
 ```text
-chat:ctx:{chatId}:r{contextRevision}
+chat:ctx:{chatId}
 ```
 
 Example:
 
 ```text
-chat:ctx:8b1d...:r37
+chat:ctx:8b1d...
 ```
 
 ## Type
@@ -453,29 +402,11 @@ in PostgreSQL.
 
 ## Invalidation strategy
 
-Do **not** manually delete the old cache key.
-
-When a new Message is committed:
-
-```text
-Chat.contextRevision: 37 → 38
-```
-
-The application now requests:
-
-```text
-chat:ctx:{chatId}:r38
-```
-
-The old:
-
-```text
-chat:ctx:{chatId}:r37
-```
-
-becomes unreachable and expires naturally.
-
-This avoids cache invalidation races.
+The key stores only the latest snapshot. Normal user and completed assistant
+messages advance it with a compare-and-set on `revision` and retain the latest
+80 context messages. A revision mismatch, regeneration, missing key, or invalid
+JSON falls back to rebuilding context from PostgreSQL before replacing the
+snapshot. The TTL is refreshed after every successful update.
 
 ## Required transaction behavior
 
@@ -1637,9 +1568,8 @@ Minimum v2 Redis implementation:
 
 ```text
 identity:resolve:{cookieHash}   # optional; omit initially if /info is fast enough
-user:profile:{externalUserId}
 
-chat:ctx:{chatId}:r{revision}
+chat:ctx:{chatId}
 
 generation:{generationId}
 stream:{streamId}:*

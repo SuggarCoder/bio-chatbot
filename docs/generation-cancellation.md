@@ -42,10 +42,10 @@ Stop click
   -> GenerationFinalizer locks row and commits one terminal result
 ```
 
-Redis is a low-latency projection and control plane only. If Pub/Sub is lost or
-Redis is flushed, checkpoints query PostgreSQL before LLM calls, after LLM
-calls, before/after tools, before another Agent iteration, and before
-finalization.
+Redis is a low-latency projection and control plane only. Stream-event
+checkpoints poll PostgreSQL at most once per second; LLM, tool, Agent-iteration,
+and finalization boundaries force an authoritative query. This keeps durable
+cancellation available if Pub/Sub is lost or Redis is flushed.
 
 Network/SSE disconnect is intentionally absent from this path. The background
 producer continues and the browser may resume its Generation stream.

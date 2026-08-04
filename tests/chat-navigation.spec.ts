@@ -36,6 +36,7 @@ function detail(id: 'conversation-a' | 'conversation-b') {
       vote: null,
       executionSteps: [],
     }],
+    pageInfo: { hasMore: false, beforeSeq: null },
     activeGeneration: null,
   }
 }

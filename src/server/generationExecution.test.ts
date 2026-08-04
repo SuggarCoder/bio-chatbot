@@ -49,3 +49,34 @@ test('a non-cancellable side effect can finish but stops the agent afterward', a
   )
   assert.deepEqual(calls, ['side-effect-committed'])
 })
+
+test('stream checkpoints throttle durable cancellation polling', async () => {
+  let now = 10_000
+  let polls = 0
+  const context = new GenerationExecutionContext(
+    crypto.randomUUID(),
+    new AbortController().signal,
+    async () => {
+      polls += 1
+      return false
+    },
+    1_000,
+    () => now,
+  )
+
+  for (let index = 0; index < 100; index += 1) {
+    await context.checkpoint()
+  }
+  assert.equal(polls, 1)
+
+  now += 999
+  await context.checkpoint()
+  assert.equal(polls, 1)
+
+  now += 1
+  await context.checkpoint()
+  assert.equal(polls, 2)
+
+  await context.checkpoint(true)
+  assert.equal(polls, 3)
+})

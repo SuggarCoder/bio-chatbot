@@ -311,6 +311,40 @@ export async function listArtifactsForChat(
     .orderBy(desc(artifacts.updatedAt))
 }
 
+export async function listArtifactPromptCatalogForChat(
+  database: Database,
+  userId: string,
+  chatId: string,
+) {
+  return database
+    .select({
+      id: artifacts.id,
+      logicalId: artifacts.logicalId,
+      title: artifacts.title,
+      type: artifacts.mimeType,
+      currentVersion: artifacts.currentVersion,
+      updatedAt: artifacts.updatedAt,
+    })
+    .from(artifacts)
+    .innerJoin(
+      chats,
+      and(
+        eq(chats.id, artifacts.chatId),
+        eq(chats.userId, userId),
+        isNull(chats.deletedAt),
+      ),
+    )
+    .where(
+      and(
+        eq(artifacts.chatId, chatId),
+        eq(artifacts.userId, userId),
+        isNull(artifacts.deletedAt),
+      ),
+    )
+    .orderBy(desc(artifacts.updatedAt))
+    .limit(50)
+}
+
 export async function getArtifactForUser(
   database: Database,
   userId: string,
@@ -411,4 +445,3 @@ export async function getArtifactVersionForUser(
     .limit(1)
   return row ?? null
 }
-

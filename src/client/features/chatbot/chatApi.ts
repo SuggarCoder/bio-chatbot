@@ -72,12 +72,23 @@ export type ChatSummaryDto = {
 
 export type ChatDetailDto = ChatSummaryDto & {
   messages: ChatMessageDto[]
+  pageInfo: ChatMessagePageInfo
   activeGeneration: {
     id: string
     streamId: string
     status: 'pending' | 'streaming' | 'cancelling'
     replacesMessageId: string | null
   } | null
+}
+
+export type ChatMessagePageInfo = {
+  hasMore: boolean
+  beforeSeq: number | null
+}
+
+export type ChatMessagePageDto = {
+  messages: ChatMessageDto[]
+  pageInfo: ChatMessagePageInfo
 }
 
 type ApiErrorBody = {
@@ -173,6 +184,20 @@ export function fetchChat(chatId: string) {
   )
 }
 
+export function fetchChatMessages(
+  chatId: string,
+  beforeSeq: number,
+  limit = 50,
+) {
+  const params = new URLSearchParams({
+    beforeSeq: String(beforeSeq),
+    limit: String(limit),
+  })
+  return requestJson<ChatMessagePageDto>(
+    `/chats/${encodeURIComponent(chatId)}/messages?${params}`,
+  )
+}
+
 export function renameChat(chatId: string, title: string) {
   return requestJson<ChatSummaryDto>(
     `/chats/${encodeURIComponent(chatId)}`,
@@ -206,6 +231,7 @@ export function createGeneration(
   input: {
     content: string
     clientMessageId: string
+    artifactId?: string
     supersedesGenerationId?: string
   },
 ) {
@@ -222,14 +248,18 @@ export function createGeneration(
   )
 }
 
-export function regenerateMessage(messageId: string, requestId: string) {
+export function regenerateMessage(
+  messageId: string,
+  requestId: string,
+  artifactId?: string,
+) {
   return requestJson<{
     generation: GenerationDto
     userMessage: ChatMessageDto
     replacesMessageId: string | null
   }>(`/messages/${encodeURIComponent(messageId)}/regenerate`, {
     method: 'POST',
-    body: JSON.stringify({ requestId }),
+    body: JSON.stringify({ requestId, artifactId }),
   })
 }
 

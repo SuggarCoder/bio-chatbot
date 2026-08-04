@@ -34,7 +34,7 @@ class FakeFrames {
 test('adaptive rate increases with backlog and remains capped', () => {
   assert.ok(getAdaptiveRate(5) < getAdaptiveRate(40))
   assert.ok(getAdaptiveRate(40) < getAdaptiveRate(160))
-  assert.equal(getAdaptiveRate(1_000), 300)
+  assert.equal(getAdaptiveRate(1_000), 1_200)
 })
 
 test('grapheme splitting keeps emoji and combining sequences intact', () => {
@@ -88,7 +88,7 @@ test('bursty ingestion is paced and reconciles to canonical final text', () => {
   assert.equal(frames.callbacks.size, 0)
 })
 
-test('a huge background dt is clamped instead of flushing the queue', () => {
+test('a huge background dt catches the visible stream up immediately', () => {
   const frames = new FakeFrames()
   let visible = ''
   const session = new AdaptiveStreamSession('generation-2', {
@@ -108,9 +108,37 @@ test('a huge background dt is clamped instead of flushing the queue', () => {
   frames.step(0)
   frames.step(5_000)
 
-  assert.ok(visible.length > 0)
-  assert.ok(visible.length <= 24)
-  assert.ok(session.backlog > 900)
+  assert.equal(visible.length, 1_000)
+  assert.equal(session.backlog, 0)
+})
+
+test('terminal output reconciles by the 750ms deadline', () => {
+  const frames = new FakeFrames()
+  let visible = ''
+  const finalText = 'x'.repeat(5_000)
+  const session = new AdaptiveStreamSession('generation-terminal-deadline', {
+    scheduler: frames.scheduler,
+    reducedMotion: false,
+    onTerminal: () => undefined,
+  })
+  session.subscribe({
+    append: (text) => {
+      visible += text
+    },
+    replace: (text) => {
+      visible = text
+    },
+  })
+  session.push(0, finalText)
+  frames.step(0)
+  session.finish(finalText, { kind: 'completed' })
+
+  for (let now = 16; now <= 752; now += 16) {
+    frames.step(now)
+  }
+
+  assert.equal(visible, finalText)
+  assert.equal(frames.callbacks.size, 0)
 })
 
 test('finish rejects late deltas and replaces a corrected visible prefix once', () => {

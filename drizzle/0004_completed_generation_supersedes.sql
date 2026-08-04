@@ -1,0 +1,1 @@
+CREATE INDEX "idx_generation_completed_supersedes" ON "Generation" USING btree ("supersedesGenerationId") WHERE "Generation"."supersedesGenerationId" is not null and "Generation"."status" = 'completed';
