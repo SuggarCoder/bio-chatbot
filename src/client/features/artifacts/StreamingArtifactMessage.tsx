@@ -8,8 +8,9 @@ import {
   Show,
   type Component,
 } from 'solid-js'
+import { createStore, reconcile } from 'solid-js/store'
 import { getAdaptiveStreamSession } from '../chatbot/adaptiveStream'
-import { StaticMarkdown } from '../chatbot/MarkdownMessage'
+import { IncrementalMarkdownContent } from '../chatbot/IncrementalMarkdownContent'
 import { artifactStore } from './artifactStore'
 import { InlineArtifactDraft } from './InlineArtifactDraft'
 import { projectStreamingArtifactParts } from './streamingParts'
@@ -25,10 +26,16 @@ export const StreamingArtifactMessage: Component<{
   const drafts = createMemo(() => Object.values(
     artifactStore.state.draftsByStreamId,
   ).filter((draft) => draft.generationId === props.generationId))
-  const parts = createMemo(() => projectStreamingArtifactParts(
-    visibleText(),
-    drafts(),
-  ))
+  const [parts, setParts] = createStore(
+    projectStreamingArtifactParts(visibleText(), drafts()),
+  )
+
+  createEffect(() => {
+    setParts(reconcile(
+      projectStreamingArtifactParts(visibleText(), drafts()),
+      { key: 'key' },
+    ))
+  })
 
   onMount(() => {
     if (!props.isStreaming) return
@@ -60,10 +67,17 @@ export const StreamingArtifactMessage: Component<{
 
   return (
     <div>
-      <Show when={parts().length > 0} fallback={<span class="text-slate-400">正在生成回复...</span>}>
-        <For each={parts()}>
+      <Show when={parts.length > 0} fallback={<span class="text-slate-400">正在生成回复...</span>}>
+        <For each={parts}>
           {(part) => part.type === 'text'
-            ? <StaticMarkdown text={part.text} />
+            ? (
+                <IncrementalMarkdownContent
+                  source={part.text}
+                  isStreaming={props.isStreaming}
+                  generationId={props.generationId}
+                  showCaret={false}
+                />
+              )
             : <InlineArtifactDraft draft={part.draft} />}
         </For>
       </Show>

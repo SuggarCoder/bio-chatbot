@@ -516,17 +516,18 @@ async function runAssistantReply(
             detail: 'tool-result',
           })
         } else if (event.type === 'message.finish') {
-          if (event.assistantMessage) {
-            artifactStore.hydrateMessageParts(event.assistantMessage.parts)
-          }
           if (event.finishReason === 'stop') {
-            streamSession.finish(
-              event.assistantMessage?.content ?? streamSession.canonicalText,
-              {
+            if (!event.assistantMessage) {
+              streamSession.finish(streamSession.canonicalText, {
+                kind: 'failed',
+                errorMessage: '回复生成完成，但未能保存。请检查对象存储后重试。',
+              })
+            } else {
+              streamSession.finish(event.assistantMessage.content, {
                 kind: 'completed',
-                message: event.assistantMessage ?? undefined,
-              },
-            )
+                message: event.assistantMessage,
+              })
+            }
           } else if (event.finishReason === 'cancelled') {
           streamSession.finish(
             event.assistantMessage?.content ?? streamSession.canonicalText,

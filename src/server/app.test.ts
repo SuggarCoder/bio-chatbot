@@ -1,0 +1,55 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { buildApp } from './app.js'
+import type { AppConfig } from './config.js'
+import type { Database } from './db.js'
+import type { GenerationService } from './generation.js'
+import type { RedisClient } from './cache.js'
+
+test('all Fastify route schemas compile at startup', async () => {
+  const app = await buildApp({
+    config: {
+      nodeEnv: 'test',
+      serveClient: false,
+      trustedProxyCidrs: false,
+      gpas2AuthMode: 'mock',
+    } as AppConfig,
+    database: {} as Database,
+    redis: {} as RedisClient,
+    generations: {} as GenerationService,
+    objectStore: null,
+    artifactService: null,
+  })
+
+  try {
+    await app.ready()
+    const routes = app.printRoutes()
+    assert.match(routes, /ai-chatbot\/api\//)
+    assert.match(routes, /chats/)
+    assert.match(routes, /generations/)
+
+    const invalidBody = await app.inject({
+      method: 'POST',
+      url: '/ai-chatbot/api/chats',
+      payload: { title: '' },
+    })
+    assert.equal(invalidBody.statusCode, 400)
+    assert.equal(invalidBody.json().error.code, 'invalid_request')
+
+    const invalidParams = await app.inject({
+      method: 'GET',
+      url: '/ai-chatbot/api/chats/not-a-uuid',
+    })
+    assert.equal(invalidParams.statusCode, 400)
+
+    const health = await app.inject({
+      method: 'GET',
+      url: '/ai-chatbot/api/health',
+    })
+    assert.equal(health.statusCode, 503)
+    assert.equal(health.json().dependencies.postgres, 'unavailable')
+  } finally {
+    await app.close()
+  }
+})

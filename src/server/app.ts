@@ -38,11 +38,13 @@ import {
   ArtifactService,
   ArtifactServiceError,
 } from './artifacts/service.js'
+import { ARTIFACT_BODY_MAX_BYTES } from './artifacts/protocol.js'
 import {
   getArtifactForUser,
   listArtifactsForChat,
   listArtifactVersionsForUser,
 } from './artifacts/repository.js'
+import { httpSchemas } from './httpSchemas.js'
 
 const APP_BASE = '/ai-chatbot/'
 const API_BASE = '/ai-chatbot/api'
@@ -155,6 +157,44 @@ function sendStringStream(
   )
 }
 
+async function readBoundedText(
+  stream: Readable,
+  maxBytes: number,
+): Promise<string> {
+  const chunks: Buffer[] = []
+  let total = 0
+  for await (const chunk of stream) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    total += bytes.length
+    if (total > maxBytes) {
+      stream.destroy()
+      throw new Error('Stored Artifact exceeds the supported preview size')
+    }
+    chunks.push(bytes)
+  }
+  return Buffer.concat(chunks, total).toString('utf8')
+}
+
+function createStorageAbortScope(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const controller = new AbortController()
+  const cleanup = () => {
+    request.raw.removeListener('aborted', abort)
+    reply.raw.removeListener('close', abort)
+    reply.raw.removeListener('finish', cleanup)
+  }
+  const abort = () => {
+    controller.abort()
+    cleanup()
+  }
+  request.raw.once('aborted', abort)
+  reply.raw.once('close', abort)
+  reply.raw.once('finish', cleanup)
+  return { signal: controller.signal, cleanup }
+}
+
 export type AppDependencies = {
   config: AppConfig
   database: Database
@@ -177,7 +217,8 @@ export async function buildApp(
   } = dependencies
   const app = Fastify({
     logger: true,
-    trustProxy: true,
+    trustProxy: config.trustedProxyCidrs,
+    requestTimeout: 120_000,
     bodyLimit: 64 * 1024,
   })
 
@@ -271,7 +312,10 @@ export async function buildApp(
     }
   }
 
-  app.get(`${API_BASE}/health`, async (_request, reply) => {
+  app.get(
+    `${API_BASE}/health`,
+    { schema: httpSchemas.health },
+    async (_request, reply) => {
     let postgres = 'ok'
     let objectStorage = objectStore ? 'ok' : 'disabled'
 
@@ -293,7 +337,7 @@ export async function buildApp(
           ? 'degraded'
           : 'unavailable'
 
-    if (postgres !== 'ok') {
+    if (status !== 'ok') {
       reply.code(503)
     }
 
@@ -309,15 +353,21 @@ export async function buildApp(
       },
       time: new Date().toISOString(),
     }
-  })
+    },
+  )
 
-  app.get(`${API_BASE}/me`, async (request) => {
+  app.get(`${API_BASE}/me`, { schema: httpSchemas.me }, async (request) => {
     return authenticate(request)
   })
 
   app.get<{
     Params: { chatId: string }
-  }>(`${API_BASE}/chats/:chatId/artifacts`, async (request, reply) => {
+  }>(`${API_BASE}/chats/:chatId/artifacts`, {
+    schema: {
+      params: httpSchemas.chatIdParams,
+      response: httpSchemas.artifactListResponse,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const chatId = requireUuid(request, reply, request.params.chatId, 'chatId')
     if (!chatId) return
@@ -333,7 +383,12 @@ export async function buildApp(
 
   app.get<{
     Params: { artifactId: string }
-  }>(`${API_BASE}/artifacts/:artifactId`, async (request, reply) => {
+  }>(`${API_BASE}/artifacts/:artifactId`, {
+    schema: {
+      params: httpSchemas.artifactIdParams,
+      response: httpSchemas.artifactDetailResponse,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const artifactId = requireUuid(
       request,
@@ -352,24 +407,22 @@ export async function buildApp(
 
     let content: string | undefined
     if (artifactService && artifact.currentVersion > 0) {
-      const version = await artifactService.readVersion(
-        user.id,
-        artifactId,
-        artifact.currentVersion,
-      )
-      if (version) {
-        const chunks: Buffer[] = []
-        let total = 0
-        for await (const chunk of version.stored.body) {
-          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-          total += bytes.length
-          if (total > 1024 * 1024) {
-            version.stored.body.destroy()
-            throw new Error('Stored Artifact exceeds the v1 size limit')
-          }
-          chunks.push(bytes)
+      const abortScope = createStorageAbortScope(request, reply)
+      try {
+        const version = await artifactService.readVersion(
+          user.id,
+          artifactId,
+          artifact.currentVersion,
+          abortScope.signal,
+        )
+        if (version) {
+          content = await readBoundedText(
+            version.stored.body,
+            ARTIFACT_BODY_MAX_BYTES,
+          )
         }
-        content = Buffer.concat(chunks).toString('utf8')
+      } finally {
+        abortScope.cleanup()
       }
     }
 
@@ -383,7 +436,12 @@ export async function buildApp(
 
   app.get<{
     Params: { artifactId: string }
-  }>(`${API_BASE}/artifacts/:artifactId/versions`, async (request, reply) => {
+  }>(`${API_BASE}/artifacts/:artifactId/versions`, {
+    schema: {
+      params: httpSchemas.artifactIdParams,
+      response: httpSchemas.artifactVersionsResponse,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const artifactId = requireUuid(
       request,
@@ -440,10 +498,12 @@ export async function buildApp(
       )
     }
 
+    const abortScope = createStorageAbortScope(request, reply)
     const version = await artifactService.readVersion(
       user.id,
       artifactId,
       versionNumber,
+      abortScope.signal,
     )
     if (!version) {
       return reply.code(404).send(
@@ -473,39 +533,61 @@ export async function buildApp(
       return reply.send(version.stored.body)
     }
 
-    const chunks: Buffer[] = []
-    for await (const chunk of version.stored.body) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    if (version.record.byteLength > BigInt(ARTIFACT_BODY_MAX_BYTES)) {
+      version.stored.body.destroy()
+      return reply.code(413).send(
+        errorBody(
+          request,
+          'artifact_preview_too_large',
+          'Artifact is too large for JSON preview; use the download endpoint',
+        ),
+      )
     }
+    const content = await readBoundedText(
+      version.stored.body,
+      ARTIFACT_BODY_MAX_BYTES,
+    )
+    abortScope.cleanup()
     const { storageKey: _storageKey, ...publicRecord } = version.record
     return {
       ...publicRecord,
       byteLength: Number(version.record.byteLength),
       createdAt: version.record.createdAt.toISOString(),
-      content: Buffer.concat(chunks).toString('utf8'),
+      content,
     }
   }
 
   app.get<{
     Params: { artifactId: string; version: string }
-  }>(`${API_BASE}/artifacts/:artifactId/versions/:version`, (request, reply) =>
+  }>(`${API_BASE}/artifacts/:artifactId/versions/:version`, {
+    schema: {
+      params: httpSchemas.artifactVersionParams,
+      response: httpSchemas.artifactVersionResponse,
+    },
+  }, (request, reply) =>
     readArtifactVersion(request, reply, false),
   )
 
   app.get<{
     Params: { artifactId: string; version: string }
-  }>(`${API_BASE}/artifacts/:artifactId/versions/:version/download`, (request, reply) =>
+  }>(`${API_BASE}/artifacts/:artifactId/versions/:version/download`, {
+    schema: { params: httpSchemas.artifactVersionParams },
+  }, (request, reply) =>
     readArtifactVersion(request, reply, true),
   )
 
-  app.get(`${API_BASE}/chats`, async (request) => {
+  app.get(`${API_BASE}/chats`, {
+    schema: { response: httpSchemas.chatsResponse },
+  }, async (request) => {
     const user = await authenticate(request)
     return {
       chats: await listChats(database, user.id),
     }
   })
 
-  app.post(`${API_BASE}/chats`, async (request, reply) => {
+  app.post(`${API_BASE}/chats`, {
+    schema: httpSchemas.createChat,
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const body = readObjectBody(request)
     const title = requireText(
@@ -527,7 +609,12 @@ export async function buildApp(
 
   app.get<{
     Params: { chatId: string }
-  }>(`${API_BASE}/chats/:chatId`, async (request, reply) => {
+  }>(`${API_BASE}/chats/:chatId`, {
+    schema: {
+      params: httpSchemas.chatIdParams,
+      response: httpSchemas.chatDetailResponse,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const chatId = requireUuid(
       request,
@@ -554,7 +641,13 @@ export async function buildApp(
   app.get<{
     Params: { chatId: string }
     Querystring: { beforeSeq?: string; limit?: string }
-  }>(`${API_BASE}/chats/:chatId/messages`, async (request, reply) => {
+  }>(`${API_BASE}/chats/:chatId/messages`, {
+    schema: {
+      params: httpSchemas.chatIdParams,
+      querystring: httpSchemas.messagePageQuery,
+      response: httpSchemas.messagePageResponse,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const chatId = requireUuid(
       request,
@@ -599,7 +692,13 @@ export async function buildApp(
 
   app.patch<{
     Params: { chatId: string }
-  }>(`${API_BASE}/chats/:chatId`, async (request, reply) => {
+  }>(`${API_BASE}/chats/:chatId`, {
+    schema: {
+      params: httpSchemas.chatIdParams,
+      body: httpSchemas.renameChat.body,
+      response: httpSchemas.renameChat.response,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const chatId = requireUuid(
       request,
@@ -642,7 +741,9 @@ export async function buildApp(
 
   app.delete<{
     Params: { chatId: string }
-  }>(`${API_BASE}/chats/:chatId`, async (request, reply) => {
+  }>(`${API_BASE}/chats/:chatId`, {
+    schema: { params: httpSchemas.chatIdParams },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const chatId = requireUuid(
       request,
@@ -666,7 +767,13 @@ export async function buildApp(
 
   app.put<{
     Params: { messageId: string }
-  }>(`${API_BASE}/messages/:messageId/vote`, async (request, reply) => {
+  }>(`${API_BASE}/messages/:messageId/vote`, {
+    schema: {
+      params: httpSchemas.messageIdParams,
+      body: httpSchemas.vote.body,
+      response: httpSchemas.vote.response,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const messageId = requireUuid(
       request,
@@ -700,7 +807,9 @@ export async function buildApp(
 
   app.delete<{
     Params: { messageId: string }
-  }>(`${API_BASE}/messages/:messageId/vote`, async (request, reply) => {
+  }>(`${API_BASE}/messages/:messageId/vote`, {
+    schema: { params: httpSchemas.messageIdParams },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const messageId = requireUuid(
       request,
@@ -719,7 +828,13 @@ export async function buildApp(
 
   app.post<{
     Params: { messageId: string }
-  }>(`${API_BASE}/messages/:messageId/regenerate`, async (request, reply) => {
+  }>(`${API_BASE}/messages/:messageId/regenerate`, {
+    schema: {
+      params: httpSchemas.messageIdParams,
+      body: httpSchemas.regenerate.body,
+      response: httpSchemas.regenerate.response,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const body = readObjectBody(request)
     const messageId = requireUuid(
@@ -774,6 +889,13 @@ export async function buildApp(
     Params: { chatId: string }
   }>(
     `${API_BASE}/chats/:chatId/generations`,
+    {
+      schema: {
+        params: httpSchemas.chatIdParams,
+        body: httpSchemas.createGeneration.body,
+        response: httpSchemas.createGeneration.response,
+      },
+    },
     async (request, reply) => {
       const user = await authenticate(request)
       const chatId = requireUuid(
@@ -848,7 +970,12 @@ export async function buildApp(
   app.get<{
     Params: { generationId: string }
     Querystring: { resumeAt?: string }
-  }>(`${API_BASE}/generations/:generationId/stream`, async (request, reply) => {
+  }>(`${API_BASE}/generations/:generationId/stream`, {
+    schema: {
+      params: httpSchemas.generationIdParams,
+      querystring: httpSchemas.streamQuery,
+    },
+  }, async (request, reply) => {
     const user = await authenticate(request)
     const generationId = requireUuid(
       request,
@@ -924,6 +1051,9 @@ export async function buildApp(
       )
     }
 
+    const releaseSubscriber = generations.trackSubscriber(generationId)
+    reply.raw.once('close', releaseSubscriber)
+
     return sendStringStream(
       reply,
       stream,
@@ -936,6 +1066,12 @@ export async function buildApp(
     Params: { generationId: string }
   }>(
     `${API_BASE}/generations/:generationId`,
+    {
+      schema: {
+        params: httpSchemas.generationIdParams,
+        response: httpSchemas.generationResponse,
+      },
+    },
     async (request, reply) => {
       const user = await authenticate(request)
       const generationId = requireUuid(
@@ -973,6 +1109,12 @@ export async function buildApp(
     Params: { generationId: string }
   }>(
     `${API_BASE}/generations/:generationId/cancel`,
+    {
+      schema: {
+        params: httpSchemas.generationIdParams,
+        response: httpSchemas.generationResponse,
+      },
+    },
     async (request, reply) => {
       const user = await authenticate(request)
       const generationId = requireUuid(

@@ -7,6 +7,9 @@ Artifact Protocol v1 规范、迁移、事件和安全边界参见
 
 基于 SolidJS、Fastify、PostgreSQL、Redis 和阿里云百炼 Qwen 的 GPAS2 Chatbot。
 
+生产环境变量、可信代理、SSE、数据库迁移、Artifact/S3 发布门禁和上线验收参见
+[生产部署清单](docs/production-deployment.md)。
+
 ## 本地开发
 
 需要 Node.js 22、PostgreSQL 15+ 和 Redis。复制 `.env.example` 为 `.env`，填写数据库、Redis 和 `QWEN_API_KEY`。本地默认使用内置的 GPAS2 `/user/info` Mock，不建立独立登录态。

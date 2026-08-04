@@ -17,6 +17,7 @@ function config(
     host: '127.0.0.1',
     port: 8090,
     serveClient: false,
+    trustedProxyCidrs: false,
     databaseUrl: 'postgres://test',
     redisUrl: 'redis://test',
     redisPrefix: 'gpas2cb:test:v2:',
@@ -29,6 +30,7 @@ function config(
     maxConcurrentGenerations: 1,
     monthlyTokenLimit: 0,
     generationLeaseSeconds: 120,
+    generationDisconnectGraceSeconds: 45,
     artifactProtocolEnabled: false,
     objectStorage: {
       enabled: false,

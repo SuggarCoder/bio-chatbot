@@ -30,6 +30,7 @@ const [artifactState, setArtifactState] = createStore<ArtifactStoreState>({
 })
 
 const pendingDeltas = new Map<string, string>()
+const pendingArtifactLoads = new Map<string, Promise<ArtifactClientEntity>>()
 let deltaFrame: number | undefined
 let clearSelectionAfterClose = false
 
@@ -156,7 +157,18 @@ export const artifactStore = {
       activeTab: 'preview',
     })
     if (!artifactState.artifactsById[artifactId]) {
-      setArtifactState('artifactsById', artifactId, await fetchArtifact(artifactId))
+      let pending = pendingArtifactLoads.get(artifactId)
+      if (!pending) {
+        pending = fetchArtifact(artifactId)
+        pendingArtifactLoads.set(artifactId, pending)
+      }
+      try {
+        setArtifactState('artifactsById', artifactId, await pending)
+      } finally {
+        if (pendingArtifactLoads.get(artifactId) === pending) {
+          pendingArtifactLoads.delete(artifactId)
+        }
+      }
     }
     const desiredVersion = version ?? artifactState.artifactsById[artifactId]?.currentVersion
     if (
@@ -210,13 +222,17 @@ export const artifactStore = {
     clearSelectionAfterClose = false
     clearPanelSelection()
   },
-  hydrateMessageParts(parts: Array<{ type: string; artifactId?: string }>) {
-    for (const part of parts) {
-      if (part.type === 'artifact_ref' && part.artifactId && !artifactState.artifactsById[part.artifactId]) {
-        void fetchArtifact(part.artifactId).then((artifact) => {
-          setArtifactState('artifactsById', artifact.id, artifact)
-        })
+  releaseGeneration(generationId: string) {
+    setArtifactState(produce((state) => {
+      for (const [streamId, draft] of Object.entries(state.draftsByStreamId)) {
+        if (draft.generationId !== generationId) continue
+        pendingDeltas.delete(streamId)
+        delete state.draftsByStreamId[streamId]
       }
+    }))
+    if (pendingDeltas.size === 0 && deltaFrame !== undefined) {
+      cancelAnimationFrame(deltaFrame)
+      deltaFrame = undefined
     }
   },
   clearDraftsForMessage(messageId: string) {

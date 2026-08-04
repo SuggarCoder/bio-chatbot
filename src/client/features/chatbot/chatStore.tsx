@@ -200,7 +200,6 @@ function buildOptimisticMessage(
 }
 
 function mapMessage(message: ChatMessageDto): ChatMessage {
-  artifactStore.hydrateMessageParts(message.parts)
   return {
     id: message.id,
     persisted: true,
@@ -787,6 +786,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
       }),
     )
     moveConversationToTop(id)
+    artifactStore.releaseGeneration(generationId)
   }
 
   const failAssistantMessage = (
@@ -851,6 +851,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         conversation.updatedAt = Date.now()
       }),
     )
+    artifactStore.releaseGeneration(generationId)
   }
 
   const failGenerationStart = (

@@ -147,6 +147,7 @@ export class ArtifactService {
     userId: string,
     artifactId: string,
     version: number,
+    signal?: AbortSignal,
   ) {
     const record = await getArtifactVersionForUser(
       this.database,
@@ -156,7 +157,11 @@ export class ArtifactService {
     )
     if (!record) return null
 
-    const stored = await this.objectStore.getStream(record.storageKey)
+    const stored = await this.objectStore.getStream(
+      record.storageKey,
+      undefined,
+      signal,
+    )
     if (!stored) {
       throw new ArtifactServiceError(
         'ARTIFACT_STORAGE_FAILED',
@@ -171,6 +176,7 @@ export class ArtifactService {
     artifactId: string,
     version: number,
     maxBytes = 256 * 1024,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     const record = await getArtifactVersionForUser(
       this.database,
@@ -179,7 +185,11 @@ export class ArtifactService {
       version,
     )
     if (!record || record.byteLength > BigInt(maxBytes)) return null
-    const stored = await this.objectStore.getStream(record.storageKey)
+    const stored = await this.objectStore.getStream(
+      record.storageKey,
+      undefined,
+      signal,
+    )
     if (!stored) {
       throw new ArtifactServiceError(
         'ARTIFACT_STORAGE_FAILED',

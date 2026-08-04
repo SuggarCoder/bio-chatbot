@@ -128,17 +128,28 @@ const MermaidRenderer: Component<ArtifactRendererProps> = (props) => {
   const [svg, setSvg] = createSignal('')
   const [error, setError] = createSignal('')
   let revision = 0
+  let timer: number | undefined
   createEffect(() => {
     const content = props.content
     const current = ++revision
     setError('')
-    void renderStrictMermaid(content, `artifact-mermaid-${current}`).then((result) => {
-      if (current === revision) setSvg(result)
-    }).catch((reason) => {
-      if (current === revision) {
-        setError(reason instanceof Error ? reason.message : 'Mermaid render failed')
-      }
-    })
+    if (timer !== undefined) window.clearTimeout(timer)
+    const render = () => {
+      timer = undefined
+      void renderStrictMermaid(content).then((result) => {
+        if (current === revision) setSvg(result)
+      }).catch((reason) => {
+        if (current === revision) {
+          setError(reason instanceof Error ? reason.message : 'Mermaid render failed')
+        }
+      })
+    }
+    if (props.isStreaming) timer = window.setTimeout(render, 240)
+    else render()
+  })
+  onCleanup(() => {
+    revision += 1
+    if (timer !== undefined) window.clearTimeout(timer)
   })
   return (
     <Show when={!error()} fallback={<p class="p-5 text-sm text-rose-600">{error()}</p>}>
@@ -147,16 +158,25 @@ const MermaidRenderer: Component<ArtifactRendererProps> = (props) => {
   )
 }
 
+let mermaidPromise: Promise<(typeof import('mermaid'))['default']> | undefined
+
+function getMermaid() {
+  mermaidPromise ??= import('mermaid').then(({ default: mermaid }) => {
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      suppressErrorRendering: true,
+    })
+    return mermaid
+  })
+  return mermaidPromise
+}
+
 export async function renderStrictMermaid(
   content: string,
   id = `artifact-mermaid-${crypto.randomUUID()}`,
 ): Promise<string> {
-  const { default: mermaid } = await import('mermaid')
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    suppressErrorRendering: true,
-  })
+  const mermaid = await getMermaid()
   const result = await mermaid.render(id, content)
   return sanitizeArtifactSvg(result.svg)
 }

@@ -61,6 +61,11 @@ has been configured and verified on SeaweedFS.
 
 ## Verification
 
+When Artifact Protocol is enabled, this verification is a production rollout
+gate rather than an optional diagnostic. Do not deploy with
+`ARTIFACT_PROTOCOL_ENABLED=true` unless the command succeeds and
+`/ai-chatbot/api/health` reports `dependencies.objectStorage` as `ok`.
+
 The non-mutating preflight verifies that signed bucket access works and that
 an unsigned bucket listing is rejected:
 

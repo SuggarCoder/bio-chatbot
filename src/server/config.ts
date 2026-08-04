@@ -5,6 +5,7 @@ export type AppConfig = {
   host: string
   port: number
   serveClient: boolean
+  trustedProxyCidrs: string | false
   databaseUrl: string
   redisUrl: string
   redisPrefix: string
@@ -18,6 +19,7 @@ export type AppConfig = {
   maxConcurrentGenerations: number
   monthlyTokenLimit: number
   generationLeaseSeconds: number
+  generationDisconnectGraceSeconds: number
   artifactProtocolEnabled: boolean
   objectStorage: ObjectStorageConfig
 }
@@ -190,6 +192,7 @@ export function readConfig(): AppConfig {
     host: process.env.HOST?.trim() || '0.0.0.0',
     port: positiveInteger('PORT', 8090),
     serveClient: process.env.SERVE_CLIENT !== 'false',
+    trustedProxyCidrs: process.env.TRUSTED_PROXY_CIDRS?.trim() || false,
     databaseUrl: required('DATABASE_URL'),
     redisUrl: required('REDIS_URL'),
     redisPrefix:
@@ -209,6 +212,10 @@ export function readConfig(): AppConfig {
     maxConcurrentGenerations: positiveInteger('MAX_CONCURRENT_GENERATIONS', 1),
     monthlyTokenLimit: positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true),
     generationLeaseSeconds: positiveInteger('GENERATION_LEASE_SECONDS', 120),
+    generationDisconnectGraceSeconds: positiveInteger(
+      'GENERATION_DISCONNECT_GRACE_SECONDS',
+      45,
+    ),
     artifactProtocolEnabled: booleanValue(
       process.env,
       'ARTIFACT_PROTOCOL_ENABLED',
