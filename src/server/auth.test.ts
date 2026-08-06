@@ -24,7 +24,7 @@ function config(
     redisPrefix: 'gpas2cb:test:v3:',
     qwenApiKey: 'test',
     qwenBaseUrl: 'https://example.test/v1',
-    qwenModel: 'qwen3.8-max-preview',
+    qwenModel: 'qwen3.6-flash',
     qwenMaxOutputTokens: 4096,
     gpas2AuthMode: 'mock',
     chatRateLimitPerMinute: 10,

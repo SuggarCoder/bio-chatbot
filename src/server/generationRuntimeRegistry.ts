@@ -5,6 +5,7 @@ import {
 import type { AppConfig } from './config.js'
 import type { GenerationUsage } from './db.js'
 import type { GenerationExecutionContext } from './generationExecution.js'
+import type { MessageExecutionStep } from './domain.js'
 
 export type GenerationRuntime = {
   generationId: string
@@ -13,6 +14,7 @@ export type GenerationRuntime = {
   chatId: string
   controller: AbortController
   partialOutput: string
+  executionSteps: MessageExecutionStep[]
   providerRequestId?: string
   usage: GenerationUsage
   completion?: Promise<void>

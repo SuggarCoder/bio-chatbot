@@ -118,16 +118,38 @@ test(
         latencyMs: 20,
         timeToFirstTokenMs: 5,
         finishReason: 'completed',
+        executionSteps: [
+          {
+            id: 'context',
+            kind: 'context',
+            label: '加载会话上下文',
+            status: 'completed',
+          },
+          {
+            id: 'response',
+            kind: 'response',
+            label: '生成回答',
+            status: 'active',
+          },
+        ],
       })
 
       assert.equal(finalized.generation.status, 'cancelled')
       assert.equal(finalized.assistantMessage?.status, 'cancelled')
       assert.equal(finalized.assistantMessage?.content, 'partial answer')
+      assert.equal(
+        finalized.assistantMessage?.executionSteps.at(-1)?.status,
+        'interrupted',
+      )
 
       const detail = await getChatDetail(database, userId, chat.id)
       assert.equal(
         detail?.messages.at(-1)?.status,
         'cancelled',
+      )
+      assert.equal(
+        detail?.messages.at(-1)?.executionSteps.at(-1)?.status,
+        'interrupted',
       )
       assert.equal(
         detail?.activeGeneration?.id,

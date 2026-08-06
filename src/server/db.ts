@@ -34,7 +34,14 @@ import type {
   CurrentUser,
   GenerationDto,
   Gpas2UserInfo,
+  MessageExecutionStep,
 } from './domain.js'
+import {
+  executionStepsFromMetadata,
+  metadataWithExecutionSteps,
+  normalizeExecutionSteps,
+  settleExecutionSteps,
+} from './executionTrace.js'
 import {
   chats,
   artifacts,
@@ -85,6 +92,7 @@ type GenerationRow = {
   cancelSource: string | null
   createdAt: Date
   finishedAt: Date | null
+  metadata: Record<string, unknown>
 }
 
 const chatSelection = {
@@ -112,6 +120,7 @@ const generationColumns = {
   cancelSource: generations.cancelSource,
   createdAt: generations.createdAt,
   finishedAt: generations.finishedAt,
+  metadata: generations.metadata,
 }
 
 function asIso(value: Date): string {
@@ -259,6 +268,7 @@ export async function deleteChat(
 export function mapMessage(
   row: MessageRow,
   visibleArtifactIds?: ReadonlySet<string>,
+  executionSteps?: unknown,
 ): ChatMessageDto {
   const parts: ChatMessageDto['parts'] = []
   if (Array.isArray(row.parts)) {
@@ -293,6 +303,7 @@ export function mapMessage(
     .filter((part) => part.type === 'text')
     .map((part) => part.text)
     .join('')
+  const normalizedExecutionSteps = normalizeExecutionSteps(executionSteps)
 
   return {
     id: row.id,
@@ -308,18 +319,19 @@ export function mapMessage(
         : row.isUpvoted === false
           ? 'down'
           : null,
-    executionSteps:
-      row.role === 'assistant'
-        ? [
-            { id: 'received', label: '接收问题', status: 'completed' },
-            { id: 'analysis', label: '分析并组织回答', status: 'completed' },
-            {
-              id: 'response',
-              label: row.status === 'completed' ? '生成回答' : '生成回答已中断',
-              status: row.status === 'completed' ? 'completed' : 'interrupted',
-            },
-          ]
-        : [],
+    executionSteps: row.role === 'assistant'
+      ? normalizedExecutionSteps.length > 0
+        ? normalizedExecutionSteps
+        : [
+          { id: 'received', label: '接收问题', status: 'completed' },
+          { id: 'analysis', label: '分析并组织回答', status: 'completed' },
+          {
+            id: 'response',
+            label: row.status === 'completed' ? '生成回答' : '生成回答已中断',
+            status: row.status === 'completed' ? 'completed' : 'interrupted',
+          },
+        ]
+      : [],
   }
 }
 
@@ -458,8 +470,10 @@ async function queryChatMessagesPage(
       parts: messages.parts,
       createdAt: messages.createdAt,
       isUpvoted: votes.isUpvoted,
+      generationMetadata: generations.metadata,
     })
     .from(messages)
+    .leftJoin(generations, eq(generations.assistantMessageId, messages.id))
     .leftJoin(
       votes,
       and(eq(votes.messageId, messages.id), eq(votes.userId, userId)),
@@ -490,7 +504,11 @@ async function queryChatMessagesPage(
       ))
     visibleArtifacts.forEach((artifact) => visibleArtifactIds.add(artifact.id))
   }
-  const mapped = pageRows.map((row) => mapMessage(row, visibleArtifactIds))
+  const mapped = pageRows.map((row) => mapMessage(
+    row,
+    visibleArtifactIds,
+    executionStepsFromMetadata(row.generationMetadata),
+  ))
 
   return {
     messages: mapped,
@@ -1484,6 +1502,7 @@ export type FinalizeGenerationInput = {
   finishReason: string
   errorCode?: string
   errorMessage?: string
+  executionSteps?: MessageExecutionStep[]
 }
 
 export type FinalizedGeneration = {
@@ -1552,7 +1571,13 @@ export async function finalizeGeneration(
 
       return {
         generation: mapGeneration(row),
-        assistantMessage: existingMessage ? mapMessage(existingMessage) : null,
+        assistantMessage: existingMessage
+          ? mapMessage(
+              existingMessage,
+              undefined,
+              executionStepsFromMetadata(row.metadata),
+            )
+          : null,
         newlyFinalized: false,
         committedArtifacts: [],
       }
@@ -1562,6 +1587,10 @@ export async function finalizeGeneration(
       row.status as GenerationDto['status'],
       row.cancelRequestedAt,
       input.desiredStatus,
+    )
+    const finalExecutionSteps = settleExecutionSteps(
+      input.executionSteps ?? executionStepsFromMetadata(row.metadata),
+      finalStatus === 'completed',
     )
     let assistantMessage: ChatMessageDto | null = null
     let committedArtifacts: CommittedArtifactVersion[] = []
@@ -1613,7 +1642,11 @@ export async function finalizeGeneration(
             parts: messages.parts,
             createdAt: messages.createdAt,
           })
-        assistantMessage = mapMessage(messageRow)
+        assistantMessage = mapMessage(
+          messageRow,
+          undefined,
+          finalExecutionSteps,
+        )
 
         for (const prepared of preparedArtifacts) {
           committedArtifacts.push(await commitPreparedArtifact(transaction, {
@@ -1649,6 +1682,7 @@ export async function finalizeGeneration(
           finalStatus === 'cancelled'
             ? 'Generation stopped'
             : input.errorMessage || null,
+        metadata: metadataWithExecutionSteps(row.metadata, finalExecutionSteps),
         updatedAt: sql`now()`,
         finishedAt: sql`now()`,
       })

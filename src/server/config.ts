@@ -256,7 +256,7 @@ export function readConfig(): AppConfig {
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     qwenModel:
       process.env.QWEN_MODEL?.trim() ||
-      'qwen3.8-max-preview',
+      'qwen3.6-flash',
     qwenMaxOutputTokens: positiveInteger('QWEN_MAX_OUTPUT_TOKENS', 4096),
     gpas2AuthMode: authMode,
     gpas2UserInfoUrl,

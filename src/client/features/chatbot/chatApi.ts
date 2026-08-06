@@ -38,8 +38,21 @@ export type ChatMessageDto = {
   vote: 'up' | 'down' | null
   executionSteps: Array<{
     id: string
+    kind?:
+      | 'request'
+      | 'queue'
+      | 'context'
+      | 'artifact_context'
+      | 'model'
+      | 'reasoning'
+      | 'tool'
+      | 'artifact'
+      | 'response'
     label: string
     status: 'active' | 'completed' | 'interrupted'
+    detail?: string
+    startedAt?: string
+    completedAt?: string
   }>
 }
 

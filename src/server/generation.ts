@@ -46,8 +46,13 @@ import type {
   CurrentUser,
   GenerationDto,
   GenerationStartDto,
+  MessageExecutionStep,
   StreamEvent,
 } from './domain.js'
+import {
+  settleExecutionSteps,
+  upsertExecutionStep,
+} from './executionTrace.js'
 import type { GenerationFinalizer } from './generationFinalizer.js'
 import {
   GenerationCancellationError,
@@ -457,6 +462,7 @@ export class GenerationService {
       userId: input.user.id,
       controller: new AbortController(),
       partialOutput: '',
+      executionSteps: [],
       usage: {
         inputTokens: 0,
         outputTokens: 0,
@@ -526,6 +532,7 @@ export class GenerationService {
           content: runtime.partialOutput,
           providerRequestId: runtime.providerRequestId,
           usage: runtime.usage,
+          executionSteps: runtime.executionSteps,
           updatedAt: new Date().toISOString(),
         },
       ).catch(() => undefined)
@@ -550,6 +557,71 @@ export class GenerationService {
       )).then(() => undefined).catch(() => undefined)
     }
 
+    const updateStep = (step: MessageExecutionStep) => {
+      const existing = runtime.executionSteps.find((item) => item.id === step.id)
+      const now = new Date().toISOString()
+      const nextStep: MessageExecutionStep = {
+        ...existing,
+        ...step,
+        startedAt: step.startedAt ?? existing?.startedAt ?? now,
+        ...(
+          step.status === 'active'
+            ? { completedAt: undefined }
+            : { completedAt: step.completedAt ?? now }
+        ),
+      }
+      runtime.executionSteps = upsertExecutionStep(
+        runtime.executionSteps,
+        nextStep,
+      )
+      const normalized = runtime.executionSteps.find(
+        (item) => item.id === nextStep.id,
+      )
+      if (normalized) emit({ type: 'progress.step', step: normalized })
+    }
+
+    const completeStep = (id: string, detail?: string) => {
+      const step = runtime.executionSteps.find((item) => item.id === id)
+      if (!step || step.status !== 'active') return
+      updateStep({
+        ...step,
+        status: 'completed',
+        ...(detail ? { detail } : {}),
+      })
+    }
+
+    const settleTrace = (completed: boolean) => {
+      const previous = new Map(runtime.executionSteps.map((step) => [
+        step.id,
+        step.status,
+      ]))
+      runtime.executionSteps = settleExecutionSteps(
+        runtime.executionSteps,
+        completed,
+      )
+      for (const step of runtime.executionSteps) {
+        if (previous.get(step.id) !== step.status) {
+          emit({ type: 'progress.step', step })
+        }
+      }
+    }
+
+    let artifactStepSequence = 0
+    const artifactStepIds = new Map<string, string>()
+    let reasoningStepSequence = 0
+    const reasoningStepIds = new Map<string, string>()
+    let toolStepSequence = 0
+    const toolStepIds = new Map<string, string>()
+    const ensureResponseStep = () => {
+      if (runtime.executionSteps.some((step) => step.id === 'response')) return
+      updateStep({
+        id: 'response',
+        kind: 'response',
+        label: '生成回答',
+        status: 'active',
+      })
+    }
+
     const appendTextPart = (delta: string) => {
       if (!delta) return
       const previous = messageParts.at(-1)
@@ -563,6 +635,7 @@ export class GenerationService {
     const parser = artifactEnabled
       ? new ArtifactStreamParser({
           onTextDelta: (delta) => {
+            ensureResponseStep()
             const startIndex = runtime.partialOutput.length
             runtime.partialOutput += delta
             appendTextPart(delta)
@@ -586,6 +659,17 @@ export class GenerationService {
               return
             }
             acceptedArtifactIds.add(streamArtifactId)
+            ensureResponseStep()
+            artifactStepSequence += 1
+            const artifactStepId = `artifact:${artifactStepSequence}`
+            artifactStepIds.set(streamArtifactId, artifactStepId)
+            updateStep({
+              id: artifactStepId,
+              kind: 'artifact',
+              label: `生成 ${metadata.type} Artifact`,
+              detail: metadata.title,
+              status: 'active',
+            })
             const partOrder = messageParts.length
             messageParts.push({ type: 'artifact_draft_ref', streamArtifactId })
             emit({
@@ -616,6 +700,19 @@ export class GenerationService {
             }
           },
           onArtifactError: ({ streamArtifactId, code, message, recoverable }) => {
+            if (streamArtifactId) {
+              const stepId = artifactStepIds.get(streamArtifactId)
+              const step = stepId
+                ? runtime.executionSteps.find((item) => item.id === stepId)
+                : undefined
+              if (step?.status === 'active') {
+                updateStep({
+                  ...step,
+                  label: 'Artifact 生成已中断',
+                  status: 'interrupted',
+                })
+              }
+            }
             emit({
               type: 'artifact.error',
               artifactStreamId: streamArtifactId,
@@ -632,6 +729,29 @@ export class GenerationService {
       emit({
         type: 'message.start',
         userMessage: start.userMessage,
+      })
+      const producerStartedAt = new Date(startedAt).toISOString()
+      updateStep({
+        id: 'request',
+        kind: 'request',
+        label: '请求已接收',
+        status: 'completed',
+        startedAt: start.userMessage.createdAt,
+        completedAt: start.userMessage.createdAt,
+      })
+      updateStep({
+        id: 'queue',
+        kind: 'queue',
+        label: '任务排队',
+        status: 'completed',
+        startedAt: start.userMessage.createdAt,
+        completedAt: producerStartedAt,
+      })
+      updateStep({
+        id: 'context',
+        kind: 'context',
+        label: '加载会话上下文',
+        status: 'active',
       })
 
       const revision = await getChatContextRevision(
@@ -692,7 +812,17 @@ export class GenerationService {
         }
       }
 
+      completeStep('context', `已加载 ${context.messages.length} 条上下文消息`)
+
       await this.checkpoint(runtime, true)
+      if (artifactEnabled) {
+        updateStep({
+          id: 'artifact-context',
+          kind: 'artifact_context',
+          label: '检查 Artifact 上下文',
+          status: 'active',
+        })
+      }
       const artifactCatalog = artifactEnabled
         ? await listArtifactPromptCatalogForChat(
             this.database,
@@ -753,6 +883,20 @@ export class GenerationService {
                 : artifact.content,
             })))
       }
+      if (artifactEnabled) {
+        completeStep(
+          'artifact-context',
+          selectedArtifact
+            ? `已载入 ${selectedArtifact.type} Artifact`
+            : `发现 ${artifactPromptCatalog.length} 个可用 Artifact`,
+        )
+      }
+      updateStep({
+        id: 'model',
+        kind: 'model',
+        label: '连接模型服务',
+        status: 'active',
+      })
       const markedRunning = await markGenerationStreaming(
         this.database,
         start.generationId,
@@ -777,8 +921,13 @@ export class GenerationService {
 
       for await (const event of responseStream) {
         await this.checkpoint(runtime)
+        const providerEvent = event as unknown as {
+          type: string
+          item?: { id?: string; type?: string; name?: string }
+        }
 
         if (event.type === 'response.created') {
+          completeStep('model', '模型服务已连接')
           runtime.providerRequestId = event.response.id
           const marked = await markGenerationStreaming(
             this.database,
@@ -789,7 +938,85 @@ export class GenerationService {
           if (!marked) {
             await this.checkpoint(runtime, true)
           }
+        } else if (providerEvent.type === 'response.output_item.added') {
+          const item = providerEvent.item
+          const itemType = item?.type ?? ''
+          const itemKey = item?.id ?? `${itemType}:${eventId}`
+
+          if (itemType === 'reasoning') {
+            completeStep('model', '模型服务已连接')
+            reasoningStepSequence += 1
+            const stepId = `reasoning:${reasoningStepSequence}`
+            reasoningStepIds.set(itemKey, stepId)
+            updateStep({
+              id: stepId,
+              kind: 'reasoning',
+              label: '分析并组织回答',
+              status: 'active',
+            })
+          } else if (
+            itemType === 'function_call' ||
+            itemType.endsWith('_call')
+          ) {
+            toolStepSequence += 1
+            const stepId = `tool:${toolStepSequence}`
+            toolStepIds.set(itemKey, stepId)
+            const toolName = itemType === 'web_search_call'
+              ? 'web_search'
+              : itemType === 'file_search_call'
+                ? 'file_analysis'
+                : item?.name === 'database_query'
+                  ? 'database_query'
+                  : 'tool'
+            updateStep({
+              id: stepId,
+              kind: 'tool',
+              label: toolName === 'web_search'
+                ? '搜索相关信息'
+                : toolName === 'file_analysis'
+                  ? '分析文件'
+                  : toolName === 'database_query'
+                    ? '查询数据'
+                    : '调用工具',
+              status: 'active',
+            })
+            emit({
+              type: 'tool.start',
+              toolRunId: stepId,
+              toolName,
+            })
+          }
+        } else if (providerEvent.type === 'response.output_item.done') {
+          const item = providerEvent.item
+          const itemType = item?.type ?? ''
+          const itemKey = item?.id ?? ''
+          const reasoningStepId = reasoningStepIds.get(itemKey) ??
+            [...runtime.executionSteps].reverse().find(
+              (step) => step.kind === 'reasoning' && step.status === 'active',
+            )?.id
+          const toolStepId = toolStepIds.get(itemKey) ??
+            [...runtime.executionSteps].reverse().find(
+              (step) => step.kind === 'tool' && step.status === 'active',
+            )?.id
+
+          if (itemType === 'reasoning' && reasoningStepId) {
+            completeStep(reasoningStepId)
+          } else if (toolStepId) {
+            completeStep(toolStepId)
+            emit({
+              type: 'tool.result',
+              toolRunId: toolStepId,
+              toolName: 'tool',
+            })
+          }
         } else if (event.type === 'response.output_text.delta') {
+          completeStep('model', '模型服务已连接')
+          for (const step of runtime.executionSteps) {
+            if (step.kind === 'reasoning' && step.status === 'active') {
+              completeStep(step.id)
+            }
+          }
+          ensureResponseStep()
           if (firstTokenAt === null) {
             firstTokenAt = Date.now()
           }
@@ -851,6 +1078,17 @@ export class GenerationService {
               message: failure.message,
               recoverable: true,
             })
+            const stepId = artifactStepIds.get(draft.streamArtifactId)
+            const step = stepId
+              ? runtime.executionSteps.find((item) => item.id === stepId)
+              : undefined
+            if (step?.status === 'active') {
+              updateStep({
+                ...step,
+                label: 'Artifact 保存已中断',
+                status: 'interrupted',
+              })
+            }
           }
         }
       }
@@ -860,6 +1098,13 @@ export class GenerationService {
         completedDrafts.length,
         preparedArtifacts.length,
       )
+      completeStep('model', '模型服务已连接')
+      for (const step of [...runtime.executionSteps]) {
+        if (step.kind === 'reasoning' && step.status === 'active') {
+          completeStep(step.id)
+        }
+      }
+      completeStep('response')
 
       await this.checkpoint(runtime, true)
       const result = await this.finalizer.finalize({
@@ -876,7 +1121,23 @@ export class GenerationService {
         timeToFirstTokenMs:
           firstTokenAt === null ? null : firstTokenAt - startedAt,
         finishReason: 'completed',
+        executionSteps: runtime.executionSteps,
       })
+
+      const previousStepStatuses = new Map(runtime.executionSteps.map((step) => [
+        step.id,
+        step.status,
+      ]))
+      runtime.executionSteps = result.assistantMessage?.executionSteps ??
+        settleExecutionSteps(
+          runtime.executionSteps,
+          result.generation.status === 'completed',
+        )
+      for (const step of runtime.executionSteps) {
+        if (previousStepStatuses.get(step.id) !== step.status) {
+          emit({ type: 'progress.step', step })
+        }
+      }
 
       if (
         start.contextMaxSeq === undefined &&
@@ -950,6 +1211,7 @@ export class GenerationService {
         error instanceof Error ? error.message : 'Generation failed'
       if (lengthLimited) parser?.finish()
       else parser?.abort(cancelled ? 'Artifact generation was stopped.' : message)
+      settleTrace(false)
       if (preparedArtifacts.length > 0) {
         await this.artifactService?.cleanup(preparedArtifacts)
       }
@@ -1001,6 +1263,7 @@ export class GenerationService {
                   ? error.code.toLocaleLowerCase()
                   : 'generation_failed',
         errorMessage: message,
+        executionSteps: runtime.executionSteps,
       })
 
       emit({

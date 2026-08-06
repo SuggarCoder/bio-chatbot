@@ -120,6 +120,11 @@ type ChatStoreContextValue = {
     toolName: string,
   ) => void
   markToolFinished: (id: string, generationId: string) => void
+  markExecutionStep: (
+    id: string,
+    generationId: string,
+    step: ChatMessageDto['executionSteps'][number],
+  ) => void
   setStreamConnectionState: (
     id: string,
     generationId: string,
@@ -666,6 +671,18 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     })
   }
 
+  const markExecutionStep = (
+    id: string,
+    generationId: string,
+    step: ChatMessageDto['executionSteps'][number],
+  ) => {
+    applyGenerationActivity(id, {
+      type: 'progress-step',
+      generationId,
+      step,
+    })
+  }
+
   const setStreamConnectionState = (
     id: string,
     generationId: string,
@@ -1004,6 +1021,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         markGenerationStarted,
         markToolStarted,
         markToolFinished,
+        markExecutionStep,
         setStreamConnectionState,
         setActiveGeneration,
         setMessageVoteState,

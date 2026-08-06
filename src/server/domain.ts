@@ -57,6 +57,27 @@ export type CancelSource =
   | 'server_shutdown'
   | 'system'
 
+export type ExecutionStepKind =
+  | 'request'
+  | 'queue'
+  | 'context'
+  | 'artifact_context'
+  | 'model'
+  | 'reasoning'
+  | 'tool'
+  | 'artifact'
+  | 'response'
+
+export type MessageExecutionStep = {
+  id: string
+  kind?: ExecutionStepKind
+  label: string
+  status: 'active' | 'completed' | 'interrupted'
+  detail?: string
+  startedAt?: string
+  completedAt?: string
+}
+
 export type ChatMessageDto = {
   id: string
   seq: number
@@ -75,11 +96,7 @@ export type ChatMessageDto = {
   >
   createdAt: string
   vote: 'up' | 'down' | null
-  executionSteps: Array<{
-    id: string
-    label: string
-    status: 'active' | 'completed' | 'interrupted'
-  }>
+  executionSteps: MessageExecutionStep[]
 }
 
 export type ChatSummaryDto = {
@@ -201,6 +218,10 @@ export type StreamEvent =
       type: 'tool.result'
       toolRunId: string
       toolName: string
+    }
+  | StreamIdentity & {
+      type: 'progress.step'
+      step: MessageExecutionStep
     }
   | StreamIdentity & {
       type: 'message.finish'

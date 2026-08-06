@@ -69,8 +69,22 @@ const chatMessage = z.object({
   vote: z.enum(['up', 'down']).nullable(),
   executionSteps: z.array(z.object({
     id: z.string(),
+    kind: z.enum([
+      'request',
+      'queue',
+      'context',
+      'artifact_context',
+      'model',
+      'reasoning',
+      'tool',
+      'artifact',
+      'response',
+    ]).optional(),
     label: z.string(),
     status: z.enum(['active', 'completed', 'interrupted']),
+    detail: z.string().optional(),
+    startedAt: isoDate.optional(),
+    completedAt: isoDate.optional(),
   })),
 })
 

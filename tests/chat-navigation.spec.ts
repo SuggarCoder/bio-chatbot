@@ -346,12 +346,50 @@ test('a rejected generation start retries the original request instead of regene
         parts: [{ type: 'text', order: 0, text: 'Recovered answer' }],
         createdAt: timestamp,
         vote: null,
-        executionSteps: [],
+        executionSteps: [
+          {
+            id: 'request',
+            kind: 'request',
+            label: '请求已接收',
+            status: 'completed',
+            startedAt: timestamp,
+            completedAt: timestamp,
+          },
+          {
+            id: 'context',
+            kind: 'context',
+            label: '加载会话上下文',
+            status: 'completed',
+            detail: '已加载 1 条上下文消息',
+            startedAt: timestamp,
+            completedAt: '2026-08-02T00:00:01.000Z',
+          },
+          {
+            id: 'response',
+            kind: 'response',
+            label: '生成回答',
+            status: 'completed',
+            startedAt: '2026-08-02T00:00:01.000Z',
+            completedAt: '2026-08-02T00:00:02.000Z',
+          },
+        ],
       }
       const events = [
         { ...identity, eventId: 1, type: 'message.start', userMessage },
-        { ...identity, eventId: 2, type: 'message.delta', sequence: 1, startIndex: 0, delta: 'Recovered answer' },
-        { ...identity, eventId: 3, type: 'message.finish', finishReason: 'stop', assistantMessage },
+        {
+          ...identity,
+          eventId: 2,
+          type: 'progress.step',
+          step: {
+            id: 'context',
+            kind: 'context',
+            label: '加载会话上下文',
+            status: 'active',
+            startedAt: timestamp,
+          },
+        },
+        { ...identity, eventId: 3, type: 'message.delta', sequence: 1, startIndex: 0, delta: 'Recovered answer' },
+        { ...identity, eventId: 4, type: 'message.finish', finishReason: 'stop', assistantMessage },
       ]
       await route.fulfill({
         status: 200,
@@ -374,6 +412,8 @@ test('a rejected generation start retries the original request instead of regene
   await page.locator('button:has(.i-lucide-refresh-cw)').click()
 
   await expect(page.getByText('Recovered answer')).toBeVisible()
+  const traceButton = page.getByRole('button', { name: /已完成 · 3 个步骤/ })
+  await expect(traceButton).toHaveAttribute('aria-expanded', 'false')
   expect(generationBodies).toHaveLength(2)
   expect(generationBodies[0].clientMessageId).toBeUndefined()
   expect(idempotencyKeys[1]).toBe(idempotencyKeys[0])

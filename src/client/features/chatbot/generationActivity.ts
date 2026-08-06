@@ -1,3 +1,5 @@
+import type { ChatMessageDto } from './chatApi'
+
 export type GenerationActivityPhase =
   | 'queued'
   | 'thinking'
@@ -9,6 +11,7 @@ export type GenerationActivity = {
   generationId: string
   phase: GenerationActivityPhase
   toolLabel?: string
+  steps: ChatMessageDto['executionSteps']
 }
 
 export type GenerationActivityAction =
@@ -39,6 +42,11 @@ export type GenerationActivityAction =
       hasContent: boolean
     }
   | {
+      type: 'progress-step'
+      generationId: string
+      step: ChatMessageDto['executionSteps'][number]
+    }
+  | {
       type: 'terminal'
       generationId: string
     }
@@ -66,10 +74,49 @@ export function getToolActivityLabel(toolName: string): string {
 export function createGenerationActivity(
   generationId: string,
 ): GenerationActivity {
+  const now = new Date().toISOString()
   return {
     generationId,
     phase: 'queued',
+    steps: [
+      {
+        id: 'request',
+        kind: 'request',
+        label: '提交请求',
+        status: 'completed',
+        startedAt: now,
+        completedAt: now,
+      },
+      {
+        id: 'queue',
+        kind: 'queue',
+        label: '任务排队',
+        status: 'active',
+        startedAt: now,
+      },
+    ],
   }
+}
+
+function upsertStep(
+  steps: ChatMessageDto['executionSteps'],
+  nextStep: ChatMessageDto['executionSteps'][number],
+): ChatMessageDto['executionSteps'] {
+  const index = steps.findIndex((step) => step.id === nextStep.id)
+  if (index < 0) return [...steps, nextStep]
+  return steps.map((step, stepIndex) => stepIndex === index
+    ? { ...step, ...nextStep }
+    : step)
+}
+
+function phaseForStep(
+  current: GenerationActivityPhase,
+  step: ChatMessageDto['executionSteps'][number],
+): GenerationActivityPhase {
+  if (step.status !== 'active') return current
+  if (step.kind === 'tool') return 'tool'
+  if (step.kind === 'response' || step.kind === 'artifact') return 'responding'
+  return 'thinking'
 }
 
 export function reduceGenerationActivity(
@@ -85,38 +132,85 @@ export function reduceGenerationActivity(
   }
 
   if (action.type === 'generation-start') {
+    const queueStep = current.steps.find((step) => step.id === 'queue')
     return {
-      generationId: current.generationId,
+      ...current,
       phase: 'thinking',
+      steps: queueStep?.status === 'active'
+        ? upsertStep(current.steps, {
+            ...queueStep,
+            status: 'completed',
+            completedAt: new Date().toISOString(),
+          })
+        : current.steps,
     }
   }
 
   if (action.type === 'text-delta') {
     return {
-      generationId: current.generationId,
+      ...current,
       phase: 'responding',
+      steps: current.steps.some((step) => step.kind === 'response')
+        ? current.steps
+        : upsertStep(current.steps, {
+            id: 'response',
+            kind: 'response',
+            label: '生成回答',
+            status: 'active',
+            startedAt: new Date().toISOString(),
+          }),
     }
   }
 
   if (action.type === 'tool-start') {
+    const existingTool = current.steps.find(
+      (step) => step.kind === 'tool' && step.status === 'active',
+    )
     return {
-      generationId: current.generationId,
+      ...current,
       phase: 'tool',
       toolLabel: getToolActivityLabel(action.toolName),
+      steps: existingTool
+        ? current.steps
+        : upsertStep(current.steps, {
+            id: 'tool:legacy',
+            kind: 'tool',
+            label: getToolActivityLabel(action.toolName).replace(/^正在/, ''),
+            status: 'active',
+            startedAt: new Date().toISOString(),
+          }),
     }
   }
 
   if (action.type === 'tool-result') {
+    const activeTool = current.steps.find(
+      (step) => step.kind === 'tool' && step.status === 'active',
+    )
     return {
-      generationId: current.generationId,
+      ...current,
       phase: 'thinking',
+      toolLabel: undefined,
+      steps: activeTool
+        ? upsertStep(current.steps, {
+            ...activeTool,
+            status: 'completed',
+            completedAt: new Date().toISOString(),
+          })
+        : current.steps,
     }
   }
 
   if (action.type === 'reconnecting') {
+    const now = new Date().toISOString()
     return {
-      generationId: current.generationId,
+      ...current,
       phase: 'reconnecting',
+      steps: upsertStep(current.steps, {
+        id: 'transport',
+        label: '恢复流式连接',
+        status: 'active',
+        startedAt: now,
+      }),
     }
   }
 
@@ -125,8 +219,23 @@ export function reduceGenerationActivity(
     current.phase === 'reconnecting'
   ) {
     return {
-      generationId: current.generationId,
+      ...current,
       phase: action.hasContent ? 'responding' : 'thinking',
+      steps: current.steps.some((step) => step.id === 'transport')
+        ? upsertStep(current.steps, {
+            ...current.steps.find((step) => step.id === 'transport')!,
+            status: 'completed',
+            completedAt: new Date().toISOString(),
+          })
+        : current.steps,
+    }
+  }
+
+  if (action.type === 'progress-step') {
+    return {
+      ...current,
+      phase: phaseForStep(current.phase, action.step),
+      steps: upsertStep(current.steps, action.step),
     }
   }
 

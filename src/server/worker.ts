@@ -22,6 +22,7 @@ import {
   type QueueLease,
 } from './generationQueue.js'
 import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
+import { normalizeExecutionSteps } from './executionTrace.js'
 import { SeaweedS3ObjectStore } from './storage/seaweedS3ObjectStore.js'
 
 const config = readConfig()
@@ -188,6 +189,7 @@ async function reconcile(): Promise<void> {
       errorMessage: stale.status === 'cancelling'
         ? 'Generation stopped'
         : 'Worker lease expired after the Provider request started',
+      executionSteps: normalizeExecutionSteps(snapshot?.executionSteps),
     })
   }
 }

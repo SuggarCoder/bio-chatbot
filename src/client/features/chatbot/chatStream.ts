@@ -68,6 +68,10 @@ export type ChatStreamEvent =
       toolName: string
     }
   | StreamIdentity & {
+      type: 'progress.step'
+      step: ChatMessageDto['executionSteps'][number]
+    }
+  | StreamIdentity & {
       type: 'message.finish'
       finishReason: 'stop' | 'cancelled' | 'error' | 'length'
       assistantMessage: ChatMessageDto | null

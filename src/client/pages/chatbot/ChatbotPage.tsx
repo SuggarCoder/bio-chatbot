@@ -480,6 +480,12 @@ async function runAssistantReply(
             type: 'store',
             detail: 'generation-start:user-confirmation',
           })
+        } else if (event.type === 'progress.step') {
+          chatStore.markExecutionStep(
+            conversationId,
+            generationId,
+            event.step,
+          )
         } else if (event.type === 'message.delta') {
           if (!responseMarked) {
             responseMarked = true
@@ -1272,73 +1278,63 @@ function GenerationStatusIndicator(props: {
 type MessageExecutionStep = ChatMessage['executionSteps'][number]
 
 function ReasoningAccordion(props: { message: ChatMessage }) {
-  const [open, setOpen] = createSignal(false)
+  const [open, setOpen] = createSignal(Boolean(props.message.activity))
+  const [clock, setClock] = createSignal(Date.now())
   let panelRef: HTMLDivElement | undefined
+  let listRef: HTMLOListElement | undefined
+  let activeGenerationId = props.message.activity?.generationId
+  let manuallyToggled = false
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
   const steps = (): MessageExecutionStep[] => {
     const activity = props.message.activity
 
-    if (!activity) {
-      return props.message.executionSteps.length > 0
-        ? props.message.executionSteps
-        : [
-            { id: 'received', label: '已接收问题', status: 'completed' },
-            {
-              id: 'response',
-              label: props.message.status === 'done' ? '生成回答' : '生成回答已中断',
-              status: props.message.status === 'done' ? 'completed' : 'interrupted',
-            },
-          ]
-    }
-
-    const completed = (id: string, label: string): MessageExecutionStep => ({
-      id,
-      label,
-      status: 'completed',
-    })
-    const active = (id: string, label: string): MessageExecutionStep => ({
-      id,
-      label,
-      status: 'active',
-    })
-
-    if (activity.phase === 'queued') {
-      return [active('received', '正在接收问题')]
-    }
-
-    if (activity.phase === 'thinking') {
-      return [
-        completed('received', '已接收问题'),
-        active('analysis', '正在分析并组织回答'),
-      ]
-    }
-
-    if (activity.phase === 'tool') {
-      return [
-        completed('received', '已接收问题'),
-        completed('analysis', '已完成初步分析'),
-        active('tool', activity.toolLabel ?? '正在调用工具'),
-      ]
-    }
-
-    if (activity.phase === 'reconnecting') {
-      return [
-        completed('received', '已接收问题'),
-        active('reconnecting', '正在恢复连接'),
-      ]
-    }
-
-    return [
-      completed('received', '已接收问题'),
-      completed('analysis', '已完成分析'),
-      active('response', '正在生成回答'),
-    ]
+    if (activity?.steps.length) return activity.steps
+    return props.message.executionSteps.length > 0
+      ? props.message.executionSteps
+      : [
+          { id: 'received', label: '接收问题', status: 'completed' },
+          {
+            id: 'response',
+            label: '生成回答',
+            status: props.message.status === 'done' ? 'completed' : 'interrupted',
+          },
+        ]
   }
+  const durationMs = (step: MessageExecutionStep) => {
+    if (!step.startedAt) return null
+    const start = Date.parse(step.startedAt)
+    const end = step.completedAt ? Date.parse(step.completedAt) : clock()
+    return Number.isFinite(start) && Number.isFinite(end)
+      ? Math.max(0, end - start)
+      : null
+  }
+  const formatDuration = (duration: number | null) => {
+    if (duration === null) return ''
+    if (duration < 1000) return '<1 秒'
+    if (duration < 10_000) return `${(duration / 1000).toFixed(1)} 秒`
+    return `${Math.round(duration / 1000)} 秒`
+  }
+  const totalDuration = () => {
+    const starts = steps()
+      .map((step) => step.startedAt ? Date.parse(step.startedAt) : Number.NaN)
+      .filter(Number.isFinite)
+    if (starts.length === 0) return null
+    const active = steps().some((step) => step.status === 'active')
+    const ends = steps()
+      .map((step) => step.completedAt ? Date.parse(step.completedAt) : Number.NaN)
+      .filter(Number.isFinite)
+    const end = active ? clock() : Math.max(...ends, ...starts)
+    return Math.max(0, end - Math.min(...starts))
+  }
+  const visibleLabel = (step: MessageExecutionStep) =>
+    step.status === 'active' && !step.label.startsWith('正在')
+      ? `正在${step.label}`
+      : step.label
   const summary = () => {
     const activeStep = steps().find((step) => step.status === 'active')
 
     if (activeStep) {
-      return activeStep.label
+      return visibleLabel(activeStep)
     }
 
     if (props.message.status === 'failed') {
@@ -1349,10 +1345,10 @@ function ReasoningAccordion(props: { message: ChatMessage }) {
       return '已停止生成'
     }
 
-    return `已完成 · ${steps().length} 个步骤`
+    const elapsed = formatDuration(totalDuration())
+    return `已完成 · ${steps().length} 个步骤${elapsed ? ` · ${elapsed}` : ''}`
   }
-  const toggle = () => {
-    const next = !open()
+  const setPanelOpen = (next: boolean) => {
     setOpen(next)
 
     if (!panelRef) {
@@ -1371,8 +1367,41 @@ function ReasoningAccordion(props: { message: ChatMessage }) {
       ease: 'power2.inOut',
     })
   }
+  const toggle = () => {
+    manuallyToggled = true
+    setPanelOpen(!open())
+  }
 
-  onMount(() => panelRef && gsap.set(panelRef, { height: 0 }))
+  createEffect(() => {
+    const activity = props.message.activity
+    const generationId = activity?.generationId
+
+    if (generationId && generationId !== activeGenerationId) {
+      activeGenerationId = generationId
+      manuallyToggled = false
+      setPanelOpen(true)
+    } else if (!generationId && activeGenerationId) {
+      activeGenerationId = undefined
+      manuallyToggled = false
+      setPanelOpen(false)
+    } else if (generationId && !manuallyToggled && !open()) {
+      setPanelOpen(true)
+    }
+  })
+  createEffect(() => {
+    if (!props.message.activity) return
+    const timer = window.setInterval(() => setClock(Date.now()), 1000)
+    onCleanup(() => window.clearInterval(timer))
+  })
+  createEffect(() => {
+    steps().map((step) => `${step.id}:${step.status}:${step.detail ?? ''}`).join('|')
+    if (!open() || !listRef) return
+    queueMicrotask(() => {
+      if (listRef) listRef.scrollTop = listRef.scrollHeight
+    })
+  })
+
+  onMount(() => panelRef && gsap.set(panelRef, { height: open() ? 'auto' : 0 }))
   onCleanup(() => panelRef && gsap.killTweensOf(panelRef))
 
   return (
@@ -1389,7 +1418,11 @@ function ReasoningAccordion(props: { message: ChatMessage }) {
         <span class={`i-lucide-chevron-right h-3.5 w-3.5 shrink-0 transition-transform duration-250 ${open() ? 'rotate-90' : ''}`} aria-hidden="true" />
       </button>
       <div ref={panelRef} class="overflow-hidden">
-        <ol class="space-y-1.5 px-1 pb-2 pt-1">
+        <ol
+          ref={listRef}
+          class="max-h-64 space-y-2 overflow-y-auto px-1 pb-2 pt-1 pr-2"
+          aria-live="polite"
+        >
           <For each={steps()}>
             {(step) => (
               <li class="flex items-start gap-2 text-sm leading-5 text-slate-400">
@@ -1403,7 +1436,25 @@ function ReasoningAccordion(props: { message: ChatMessage }) {
                         : 'i-lucide-loader-circle generation-status-spin mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-500'
                   }
                 />
-                <span>{step.label}</span>
+                <span class="min-w-0 flex-1">
+                  <span class="flex items-baseline justify-between gap-3">
+                    <span>{visibleLabel(step)}</span>
+                    <Show when={formatDuration(durationMs(step))}>
+                      {(duration) => (
+                        <span class="shrink-0 text-xs tabular-nums text-slate-300">
+                          {duration()}
+                        </span>
+                      )}
+                    </Show>
+                  </span>
+                  <Show when={step.detail}>
+                    {(detail) => (
+                      <span class="block break-words text-xs leading-4 text-slate-300">
+                        {detail()}
+                      </span>
+                    )}
+                  </Show>
+                </span>
               </li>
             )}
           </For>

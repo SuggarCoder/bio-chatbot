@@ -22,6 +22,7 @@ test('runtime cancellation is generation-scoped and idempotent', () => {
     chatId: crypto.randomUUID(),
     controller,
     partialOutput: '',
+    executionSteps: [],
     usage: {
       inputTokens: 0,
       outputTokens: 0,
