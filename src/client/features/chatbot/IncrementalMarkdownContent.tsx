@@ -7,6 +7,7 @@ import {
 
 import { CodeBlock } from './CodeBlock'
 import { MarkdownContent } from './MarkdownContent'
+import { MermaidBlock } from './MermaidBlock'
 import {
   parseStreamingMarkdownTail,
   stableMarkdownPrefixLength,
@@ -116,13 +117,23 @@ export function IncrementalMarkdownContent(props: {
       >
         {(tail) => (
           <>
-            <CodeBlock
-              code={tail().code}
-              generationId={props.generationId}
-              language={tail().language}
-              isStreaming={props.isStreaming}
-              showLineNumbers
-            />
+            {tail().language === 'mermaid'
+              ? (
+                  <MermaidBlock
+                    source={tail().code}
+                    isStreaming={!tail().closed}
+                  />
+                )
+              : (
+                  <CodeBlock
+                    code={tail().code}
+                    filename={tail().filename}
+                    generationId={props.generationId}
+                    language={tail().language}
+                    isStreaming={props.isStreaming}
+                    showLineNumbers
+                  />
+                )}
             <Show when={tail().remainder}>
               <span class="whitespace-pre-wrap">{tail().remainder}</span>
             </Show>

@@ -4,6 +4,37 @@ export function normalizeMarkdownLanguage(language?: string) {
   return language?.trim().toLowerCase().split(/\s+/)[0]
 }
 
+const standaloneFileExtensions: Record<string, string> = {
+  css: '.css',
+  javascript: '.js',
+  js: '.js',
+  python: '.py',
+  py: '.py',
+}
+
+export type MarkdownFenceInfo = {
+  language?: string
+  filename?: string
+}
+
+export function parseMarkdownFenceInfo(info?: string): MarkdownFenceInfo {
+  const language = normalizeMarkdownLanguage(info)
+  if (!language) return {}
+
+  const match = info?.trim().match(
+    /^[a-z0-9_+-]+\s+filename=([a-z0-9][a-z0-9._-]{0,127})$/i,
+  )
+  if (!match) return { language }
+
+  const expectedExtension = standaloneFileExtensions[language]
+  const filename = match[1]
+  if (!expectedExtension || !filename.toLowerCase().endsWith(expectedExtension)) {
+    return { language }
+  }
+
+  return { language, filename }
+}
+
 export type StreamingMarkdownTail =
   | {
       kind: 'text'
@@ -13,6 +44,7 @@ export type StreamingMarkdownTail =
       kind: 'code'
       code: string
       language?: string
+      filename?: string
       remainder: string
       closed: boolean
     }
@@ -37,13 +69,14 @@ export function parseStreamingMarkdownTail(
     `(?:^|\\n) {0,3}${fenceCharacter}{${fence.length},}[ \\t]*(?=\\n|$)`,
   )
   const closing = closingPattern.exec(body)
-  const language = normalizeMarkdownLanguage(info)
+  const { language, filename } = parseMarkdownFenceInfo(info)
 
   if (!closing) {
     return {
       kind: 'code',
       code: body,
       language,
+      ...(filename ? { filename } : {}),
       remainder: '',
       closed: false,
     }
@@ -57,6 +90,7 @@ export function parseStreamingMarkdownTail(
     kind: 'code',
     code: body.slice(0, closing.index),
     language,
+    ...(filename ? { filename } : {}),
     remainder: body.slice(remainderStart),
     closed: true,
   }

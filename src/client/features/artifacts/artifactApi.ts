@@ -10,7 +10,7 @@ async function requestJson<T>(path: string): Promise<T> {
 
 function requireMimeType(value: string): ArtifactMimeType {
   if (!artifactMimeTypes.includes(value as ArtifactMimeType)) {
-    throw new Error(`Unsupported Artifact type: ${value}`)
+    throw new Error('该系统仅为生信分析使用,不支持您请求的类型')
   }
   return value as ArtifactMimeType
 }

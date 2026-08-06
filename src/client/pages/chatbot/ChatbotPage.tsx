@@ -1420,7 +1420,8 @@ function MessageActionToolbar(props: {
   onRegenerate: () => Promise<void>
 }) {
   const [notice, setNotice] = createSignal('')
-  const [busy, setBusy] = createSignal(false)
+  const [voting, setVoting] = createSignal<'up' | 'down' | null>(null)
+  const [regenerating, setRegenerating] = createSignal(false)
   let noticeTimer: number | undefined
   const showNotice = (value: string) => {
     setNotice(value)
@@ -1448,24 +1449,32 @@ function MessageActionToolbar(props: {
     }
   }
   const vote = async (value: 'up' | 'down') => {
-    if (busy() || props.message.status !== 'done') return
-    setBusy(true)
+    if (voting() || regenerating() || props.message.status !== 'done') return
+    const nextVote = props.message.vote === value ? null : value
+    setVoting(value)
     try {
-      await props.onVote(props.message.vote === value ? null : value)
+      await props.onVote(nextVote)
+      showNotice(
+        nextVote === 'up'
+          ? '已点赞'
+          : nextVote === 'down'
+            ? '已点踩'
+            : '已取消评价',
+      )
     } catch {
-      showNotice('评价未保存')
+      showNotice('评价保存失败，请重试')
     } finally {
-      setBusy(false)
+      setVoting(null)
     }
   }
   const regenerate = async () => {
-    if (busy() || !props.canRegenerate) return
-    setBusy(true)
+    if (voting() || regenerating() || !props.canRegenerate) return
+    setRegenerating(true)
     try {
       await props.onRegenerate()
     } catch {
       showNotice('重新生成失败')
-      setBusy(false)
+      setRegenerating(false)
     }
   }
   const buttonClass = 'grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition duration-150 hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-35'
@@ -1474,9 +1483,29 @@ function MessageActionToolbar(props: {
   return (
     <div class="mt-2 flex min-h-8 items-center gap-1" role="toolbar" aria-label="消息操作">
       <button type="button" class={buttonClass} aria-label="复制回答" onClick={() => void copy()}><span class="i-lucide-copy h-4 w-4" /></button>
-      <button type="button" class={`${buttonClass} ${props.message.vote === 'up' ? 'bg-teal-50 text-teal-700' : ''}`} aria-label="点赞" aria-pressed={props.message.vote === 'up'} disabled={busy() || props.message.status !== 'done'} onClick={() => void vote('up')}><span class="i-lucide-thumbs-up h-4 w-4" /></button>
-      <button type="button" class={`${buttonClass} ${props.message.vote === 'down' ? 'bg-teal-50 text-teal-700' : ''}`} aria-label="点踩" aria-pressed={props.message.vote === 'down'} disabled={busy() || props.message.status !== 'done'} onClick={() => void vote('down')}><span class="i-lucide-thumbs-down h-4 w-4" /></button>
-      <button type="button" class={buttonClass} aria-label="重新生成" disabled={busy() || !props.canRegenerate} onClick={() => void regenerate()}><span class={`i-lucide-refresh-cw h-4 w-4 ${busy() ? 'generation-status-spin' : ''}`} /></button>
+      <button
+        type="button"
+        class={`${buttonClass} ${props.message.vote === 'up' ? 'bg-teal-50 text-teal-700 ring-1 ring-teal-200' : ''}`}
+        aria-label="点赞"
+        aria-pressed={props.message.vote === 'up'}
+        aria-busy={voting() === 'up'}
+        disabled={Boolean(voting()) || regenerating() || props.message.status !== 'done'}
+        onClick={() => void vote('up')}
+      >
+        <span class={voting() === 'up' ? 'i-lucide-loader-circle h-4 w-4 generation-status-spin' : 'i-lucide-thumbs-up h-4 w-4'} />
+      </button>
+      <button
+        type="button"
+        class={`${buttonClass} ${props.message.vote === 'down' ? 'bg-rose-50 text-rose-600 ring-1 ring-rose-200' : ''}`}
+        aria-label="点踩"
+        aria-pressed={props.message.vote === 'down'}
+        aria-busy={voting() === 'down'}
+        disabled={Boolean(voting()) || regenerating() || props.message.status !== 'done'}
+        onClick={() => void vote('down')}
+      >
+        <span class={voting() === 'down' ? 'i-lucide-loader-circle h-4 w-4 generation-status-spin' : 'i-lucide-thumbs-down h-4 w-4'} />
+      </button>
+      <button type="button" class={buttonClass} aria-label="重新生成" disabled={Boolean(voting()) || regenerating() || !props.canRegenerate} onClick={() => void regenerate()}><span class={`i-lucide-refresh-cw h-4 w-4 ${regenerating() ? 'generation-status-spin' : ''}`} /></button>
       <span class="ml-1 text-xs text-slate-500" role="status" aria-live="polite">{notice()}</span>
     </div>
   )
@@ -2155,11 +2184,14 @@ function SessionConversationView(props: { conversationId: string }) {
     chatStore.setMessageVoteState(props.conversationId, message.id, vote)
 
     try {
-      if (vote === null) {
-        await deleteMessageVote(message.id)
-      } else {
-        await setMessageVote(message.id, vote === 'up')
-      }
+      const persistedVote = vote === null
+        ? await deleteMessageVote(message.id)
+        : await setMessageVote(message.id, vote)
+      chatStore.setMessageVoteState(
+        props.conversationId,
+        message.id,
+        persistedVote,
+      )
     } catch (error) {
       chatStore.setMessageVoteState(props.conversationId, message.id, previous)
       throw error

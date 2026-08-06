@@ -2,10 +2,15 @@ import { expect, test } from '@playwright/test'
 
 type Harness = {
   buildHtmlSandboxDocument(content: string): string
+  htmlArtifactSandbox: string
   sanitizeArtifactSvg(content: string): string
+  sanitizeMermaidSvg(content: string): string
   renderStrictMermaid(content: string): Promise<string>
   mountMarkdownFixture(content: string): Promise<void>
   mountCommittedArtifactPanel(): Promise<void>
+  mountSandboxCapabilityPanel(): Promise<void>
+  mountSvgArtifactPanel(): Promise<void>
+  mountMarkdownArtifactPanel(): Promise<void>
   switchArtifactPanelConversation(): Promise<{
     isPanelOpen: boolean
     activeArtifactId: string | null
@@ -38,9 +43,10 @@ test('HTML runs in an opaque sandbox and cannot read host DOM or cookie', async 
   <\/script>`)
 
   const result = await page.evaluate((srcdoc) => new Promise<{ cookie: string; parent: string }>((resolve) => {
+    const harness = (window as unknown as { artifactSecurity: Harness }).artifactSecurity
     window.addEventListener('message', (event) => resolve(event.data), { once: true })
     const iframe = document.createElement('iframe')
-    iframe.sandbox.add('allow-scripts')
+    iframe.sandbox.value = harness.htmlArtifactSandbox
     iframe.referrerPolicy = 'no-referrer'
     iframe.srcdoc = srcdoc
     document.body.append(iframe)
@@ -75,6 +81,27 @@ test('committed Artifact panel enters the viewport with its renderer content', a
     activeArtifactId: null,
     activeVersion: null,
   })
+})
+
+test('HTML Artifact sandbox declares modal and form permissions and allows downloads', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .mountSandboxCapabilityPanel()
+  ))
+  const panel = page.getByRole('complementary', { name: 'Artifact panel' })
+  const frame = panel.locator('iframe')
+  await expect(frame).toHaveAttribute(
+    'sandbox',
+    'allow-scripts allow-modals allow-downloads allow-forms',
+  )
+
+  const downloadPromise = page.waitForEvent('download', { timeout: 5_000 })
+  const downloadClick = frame.contentFrame()
+    .locator('#artifact-download-fixture')
+    .click({ noWaitAfter: true })
+  const download = await downloadPromise
+  await downloadClick
+  expect(download.suggestedFilename()).toBe('artifact-download.txt')
 })
 
 test('Artifact panel divider resizes the panel with pointer and keyboard input', async ({ page }) => {
@@ -159,6 +186,27 @@ test('Artifact panel uses the glass toolbar and keeps download unavailable', asy
   await expect(toolbar).toHaveCSS('backdrop-filter', /blur/)
 })
 
+test('SVG and Markdown Artifacts expose preview only', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .mountSvgArtifactPanel()
+  ))
+  let panel = page.getByRole('complementary', { name: 'Artifact panel' })
+  await expect(panel.locator('img')).toBeVisible()
+  await expect(panel.getByRole('button', { name: 'Preview' })).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Code', exact: true })).toHaveCount(0)
+
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+      .mountMarkdownArtifactPanel()
+  ))
+  panel = page.getByRole('complementary', { name: 'Artifact panel' })
+  await expect(panel.getByRole('heading', { name: 'Markdown preview' })).toBeVisible()
+  await expect(panel.getByText('Rich content')).toBeVisible()
+  await expect(panel.getByRole('button', { name: 'Preview' })).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Code', exact: true })).toHaveCount(0)
+})
+
 test('opening Artifact B after closing A code view mounts B preview only', async ({ page }) => {
   await page.evaluate(() => (
     (window as unknown as { artifactSecurity: Harness }).artifactSecurity
@@ -196,11 +244,14 @@ test('HTML CSP blocks network and sandbox blocks top navigation', async ({ page 
       .buildHtmlSandboxDocument(content)
   ), `<img src="https://example.invalid/leak"><form action="https://example.invalid/form"><button>go</button></form><script>try { top.location='https://example.invalid/nav' } catch {}</script>`)
   await page.evaluate((value) => {
+    const harness = (window as unknown as { artifactSecurity: Harness }).artifactSecurity
     const iframe = document.createElement('iframe')
-    iframe.sandbox.add('allow-scripts')
+    iframe.id = 'sandbox-security-frame'
+    iframe.sandbox.value = harness.htmlArtifactSandbox
     iframe.srcdoc = value
     document.body.append(iframe)
   }, srcdoc)
+  await page.locator('#sandbox-security-frame').contentFrame().getByRole('button').click()
   await page.waitForTimeout(300)
   expect(page.url()).toBe(before)
   expect(responses.some((url) => url.includes('example.invalid'))).toBe(false)
@@ -238,11 +289,73 @@ test('Markdown code uses Shiki, preserves lines, and blocks active content', asy
   expect(await page.evaluate(() => 'markdownExecuted' in window)).toBe(false)
 })
 
-test('Mermaid strict mode output is sanitized', async ({ page }) => {
-  const clean = await page.evaluate(async () => (
-    (window as unknown as { artifactSecurity: Harness }).artifactSecurity
-      .renderStrictMermaid('flowchart LR\nA[Safe] --> B[Done]', 'security-mermaid')
+test('standalone source files provide a safe Blob download without affecting snippets', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity.mountMarkdownFixture(
+      '```python filename=analysis.py\nprint("file")\n```\n\n```python\nprint("snippet")\n```',
+    )
   ))
-  expect(clean).toContain('<svg')
-  expect(clean).not.toMatch(/<script|foreignObject|javascript:/i)
+
+  const markdown = page.locator('#markdown-test-root')
+  await expect(markdown.getByRole('note')).toHaveCount(1)
+  await expect(markdown.getByRole('note')).toHaveText(/可下载或复制保存为 analysis\.py/)
+  await expect(markdown.locator('.code-block-toolbar').first()).toContainText('analysis.py')
+  await expect(markdown.getByRole('button', { name: '下载 analysis.py' })).toHaveCount(1)
+
+  const downloadPromise = page.waitForEvent('download')
+  await markdown.getByRole('button', { name: '下载 analysis.py' }).click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe('analysis.py')
+  const stream = await download.createReadStream()
+  const chunks: Buffer[] = []
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk))
+  expect(Buffer.concat(chunks).toString('utf8')).toBe('print("file")')
+})
+
+test('Mermaid renders inline with a source toggle and never opens the Artifact panel', async ({ page }) => {
+  await page.evaluate(() => (
+    (window as unknown as { artifactSecurity: Harness }).artifactSecurity.mountMarkdownFixture(
+      '```mermaid\nflowchart LR\nA[Safe] --> B[Done]\n```',
+    )
+  ))
+
+  const markdown = page.locator('#markdown-test-root')
+  const mermaid = markdown.locator('.inline-mermaid')
+  const diagram = mermaid.locator('svg')
+  await expect(diagram).toBeVisible()
+  await expect(diagram.locator('style')).toHaveCount(1)
+  await expect(diagram.locator('foreignObject')).toHaveCount(0)
+  const palette = await diagram.evaluate((svg) => {
+    const node = svg.querySelector('.node rect, .node path, .node polygon')
+    const label = svg.querySelector('.nodeLabel, .label text, text')
+    return {
+      nodeFill: node ? getComputedStyle(node).fill : null,
+      labelFill: label ? getComputedStyle(label).fill : null,
+    }
+  })
+  expect(palette.nodeFill).toBe('rgb(236, 253, 245)')
+  expect(palette.labelFill).toBe('rgb(15, 23, 42)')
+  await expect(page.getByRole('complementary', { name: 'Artifact panel' })).toHaveCount(0)
+  await mermaid.getByRole('button', { name: 'Mermaid 源码' }).click()
+  await expect(mermaid.locator('.code-block')).toContainText('flowchart LR')
+  await expect(mermaid.getByRole('button', { name: 'Copy code' })).toBeVisible()
+})
+
+test('Mermaid strict mode keeps local theme styles and removes unsafe styles', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const harness = (window as unknown as { artifactSecurity: Harness }).artifactSecurity
+    return {
+      clean: await harness.renderStrictMermaid(
+        'flowchart LR\nA[Safe] --> B[Done]',
+        'security-mermaid',
+      ),
+      attacked: harness.sanitizeMermaidSvg(
+        '<svg xmlns="http://www.w3.org/2000/svg"><style>.node{fill:url(https://evil.test/a.svg)}</style><script>alert(1)</script><rect style="fill:url(https://evil.test/a.svg)"/></svg>',
+      ),
+    }
+  })
+  expect(result.clean).toContain('<svg')
+  expect(result.clean).toContain('<style')
+  expect(result.clean).not.toMatch(/<script|foreignObject|javascript:/i)
+  expect(result.attacked).not.toMatch(/<style|style=|<script|https:\/\/evil\.test/i)
 })

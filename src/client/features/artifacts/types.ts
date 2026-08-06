@@ -1,10 +1,7 @@
 export const artifactMimeTypes = [
   'text/markdown',
-  'text/plain',
   'text/html',
   'image/svg+xml',
-  'application/vnd.artifact.code',
-  'application/vnd.artifact.mermaid',
 ] as const
 
 export type ArtifactMimeType = (typeof artifactMimeTypes)[number]

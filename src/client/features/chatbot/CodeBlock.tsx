@@ -68,6 +68,14 @@ async function copyText(value: string) {
   textarea.remove()
 }
 
+function sourceFileMimeType(filename: string): string | undefined {
+  const normalized = filename.toLowerCase()
+  if (normalized.endsWith('.py')) return 'text/x-python;charset=utf-8'
+  if (normalized.endsWith('.js')) return 'text/javascript;charset=utf-8'
+  if (normalized.endsWith('.css')) return 'text/css;charset=utf-8'
+  return undefined
+}
+
 export function CodeBlock(props: CodeBlockProps) {
   let highlightTimer: number | undefined
   let copiedTimer: number | undefined
@@ -163,12 +171,52 @@ export function CodeBlock(props: CodeBlockProps) {
     copiedTimer = window.setTimeout(() => setCopied(false), 1500)
   }
 
+  const downloadSourceFile = () => {
+    const filename = props.filename
+    const mimeType = filename ? sourceFileMimeType(filename) : undefined
+    if (!filename || !mimeType || props.isStreaming) return
+
+    const url = URL.createObjectURL(new Blob([props.code], { type: mimeType }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.rel = 'noopener'
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+
   return (
     <section
       class={`code-block overflow-hidden rounded-xl border border-teal-700 bg-teal-600 text-slate-100 ${props.class ?? ''}`}
       data-highlighted={highlighted().highlighted ? 'true' : 'false'}
       data-wrap={shouldWrap() ? 'true' : 'false'}
     >
+      <Show when={props.filename}>
+        {(filename) => (
+          <div
+            role="note"
+            class="flex items-center gap-3 border-b border-teal-700 bg-teal-50 px-3 py-2 text-xs font-medium text-teal-900"
+          >
+            <span aria-hidden="true" class="i-lucide-file-down h-4 w-4 shrink-0" />
+            <span class="min-w-0 flex-1">
+              可下载或复制保存为 <strong class="font-mono">{filename()}</strong>
+            </span>
+            <button
+              type="button"
+              class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-teal-600 px-3 font-semibold text-white shadow-sm transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none"
+              aria-label={`下载 ${filename()}`}
+              title={props.isStreaming ? '生成完成后可下载' : `下载 ${filename()}`}
+              disabled={props.isStreaming}
+              onClick={downloadSourceFile}
+            >
+              <span aria-hidden="true" class="i-lucide-download h-3.5 w-3.5" />
+              下载
+            </button>
+          </div>
+        )}
+      </Show>
       <div class="code-block-toolbar flex min-h-9 items-center gap-2 border-b border-teal-700 bg-teal-600 px-3 text-xs text-teal-50">
         <span class="min-w-0 flex-1 truncate font-mono">
           {props.filename ?? languageLabel()}

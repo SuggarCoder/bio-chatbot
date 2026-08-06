@@ -12,18 +12,15 @@ export type StreamingArtifactMessagePart =
       draft: ArtifactDraftClientState
     }
 
-export type InlineArtifactRenderMode = 'markdown' | 'text' | 'source' | 'unsupported'
+export type InlineArtifactRenderMode = 'markdown' | 'source' | 'unsupported'
 
 export function getInlineArtifactRenderMode(
   type: string,
 ): InlineArtifactRenderMode {
   if (type === 'text/markdown') return 'markdown'
-  if (type === 'text/plain') return 'text'
   if (
     type === 'text/html' ||
-    type === 'image/svg+xml' ||
-    type === 'application/vnd.artifact.code' ||
-    type === 'application/vnd.artifact.mermaid'
+    type === 'image/svg+xml'
   ) return 'source'
   return 'unsupported'
 }

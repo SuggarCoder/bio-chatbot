@@ -3,7 +3,6 @@ import {
   asc,
   desc,
   eq,
-  exists,
   inArray,
   isNotNull,
   isNull,
@@ -16,6 +15,9 @@ import {
 } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 
+import {
+  artifactMimeTypes,
+} from './artifacts/protocol.js'
 import {
   commitPreparedArtifact,
   materializeMessageParts,
@@ -35,6 +37,7 @@ import type {
 } from './domain.js'
 import {
   chats,
+  artifacts,
   auditLogs,
   generations,
   messages,
@@ -253,7 +256,10 @@ export async function deleteChat(
   return rows.length > 0
 }
 
-export function mapMessage(row: MessageRow): ChatMessageDto {
+export function mapMessage(
+  row: MessageRow,
+  visibleArtifactIds?: ReadonlySet<string>,
+): ChatMessageDto {
   const parts: ChatMessageDto['parts'] = []
   if (Array.isArray(row.parts)) {
     row.parts.forEach((part, index) => {
@@ -269,7 +275,8 @@ export function mapMessage(row: MessageRow): ChatMessageDto {
           part?.type === 'artifact_ref' &&
           typeof part.artifactId === 'string' &&
           typeof part.logicalId === 'string' &&
-          typeof part.version === 'number'
+          typeof part.version === 'number' &&
+          (visibleArtifactIds === undefined || visibleArtifactIds.has(part.artifactId))
         ) {
           parts.push({
             type: 'artifact_ref' as const,
@@ -462,7 +469,28 @@ async function queryChatMessagesPage(
     .limit(limit + 1)
   const hasMore = rows.length > limit
   const pageRows = rows.slice(0, limit).reverse()
-  const mapped = pageRows.map((row) => mapMessage(row))
+  const referencedArtifactIds = [...new Set(pageRows.flatMap((row) =>
+    Array.isArray(row.parts)
+      ? row.parts.flatMap((part) =>
+          part?.type === 'artifact_ref' && typeof part.artifactId === 'string'
+            ? [part.artifactId]
+            : [])
+      : []))]
+  const visibleArtifactIds = new Set<string>()
+  if (referencedArtifactIds.length > 0) {
+    const visibleArtifacts = await database
+      .select({ id: artifacts.id })
+      .from(artifacts)
+      .where(and(
+        eq(artifacts.userId, userId),
+        eq(artifacts.chatId, chatId),
+        inArray(artifacts.id, referencedArtifactIds),
+        inArray(artifacts.mimeType, artifactMimeTypes),
+        isNull(artifacts.deletedAt),
+      ))
+    visibleArtifacts.forEach((artifact) => visibleArtifactIds.add(artifact.id))
+  }
+  const mapped = pageRows.map((row) => mapMessage(row, visibleArtifactIds))
 
   return {
     messages: mapped,
@@ -502,32 +530,41 @@ export async function setMessageVote(
   messageId: string,
   isUpvoted: boolean,
 ): Promise<'up' | 'down' | null> {
-  const authorizedMessage = database
-    .select({
-      messageId: messages.id,
-      userId: sql<string>`${userId}`.as('userId'),
-      isUpvoted: sql<boolean>`${isUpvoted}`.as('isUpvoted'),
-    })
-    .from(messages)
-    .innerJoin(chats, eq(chats.id, messages.chatId))
-    .where(
-      and(
-        eq(messages.id, messageId),
-        eq(messages.role, 'assistant'),
-        eq(chats.userId, userId),
-        isNull(chats.deletedAt),
-      ),
-    )
-  const [row] = await database
-    .insert(votes)
-    .select(authorizedMessage)
-    .onConflictDoUpdate({
-      target: [votes.messageId, votes.userId],
-      set: { isUpvoted, updatedAt: sql`now()` },
-    })
-    .returning({ isUpvoted: votes.isUpvoted })
+  return database.transaction(async (transaction) => {
+    const [authorizedMessage] = await transaction
+      .select({ id: messages.id })
+      .from(messages)
+      .innerJoin(chats, eq(chats.id, messages.chatId))
+      .where(
+        and(
+          eq(messages.id, messageId),
+          eq(messages.userId, userId),
+          eq(messages.role, 'assistant'),
+          eq(chats.userId, userId),
+          isNull(chats.deletedAt),
+        ),
+      )
+      .limit(1)
 
-  return row ? row.isUpvoted ? 'up' : 'down' : null
+    if (!authorizedMessage) {
+      return null
+    }
+
+    const [row] = await transaction
+      .insert(votes)
+      .values({
+        messageId: authorizedMessage.id,
+        userId,
+        isUpvoted,
+      })
+      .onConflictDoUpdate({
+        target: [votes.messageId, votes.userId],
+        set: { isUpvoted, updatedAt: sql`now()` },
+      })
+      .returning({ isUpvoted: votes.isUpvoted })
+
+    return row.isUpvoted ? 'up' : 'down'
+  })
 }
 
 export async function deleteMessageVote(
@@ -535,29 +572,38 @@ export async function deleteMessageVote(
   userId: string,
   messageId: string,
 ): Promise<boolean> {
-  const ownedMessage = database
-    .select({ value: sql`1` })
-    .from(messages)
-    .innerJoin(chats, eq(chats.id, messages.chatId))
-    .where(
-      and(
-        eq(messages.id, votes.messageId),
-        eq(chats.userId, userId),
-        isNull(chats.deletedAt),
-      ),
-    )
-  const rows = await database
-    .delete(votes)
-    .where(
-      and(
-        eq(votes.messageId, messageId),
-        eq(votes.userId, userId),
-        exists(ownedMessage),
-      ),
-    )
-    .returning({ messageId: votes.messageId })
+  return database.transaction(async (transaction) => {
+    const [authorizedMessage] = await transaction
+      .select({ id: messages.id })
+      .from(messages)
+      .innerJoin(chats, eq(chats.id, messages.chatId))
+      .where(
+        and(
+          eq(messages.id, messageId),
+          eq(messages.userId, userId),
+          eq(messages.role, 'assistant'),
+          eq(chats.userId, userId),
+          isNull(chats.deletedAt),
+        ),
+      )
+      .limit(1)
 
-  return rows.length > 0
+    if (!authorizedMessage) {
+      return false
+    }
+
+    const rows = await transaction
+      .delete(votes)
+      .where(
+        and(
+          eq(votes.messageId, authorizedMessage.id),
+          eq(votes.userId, userId),
+        ),
+      )
+      .returning({ messageId: votes.messageId })
+
+    return rows.length > 0
+  })
 }
 
 export async function getRegenerationTarget(

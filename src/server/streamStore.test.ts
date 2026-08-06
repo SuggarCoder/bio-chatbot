@@ -157,3 +157,28 @@ test('stream hub resumes strictly after the Redis Stream cursor', async () => {
   assert.equal((await reader.read()).done, true)
   await hub.close()
 })
+
+test('SSE JSON round trip preserves real newlines in deltas', async () => {
+  const redis = new FakeRedis()
+  const client = redis as unknown as RedisClient
+  const store = new GenerationStreamStore(config, client)
+  const hub = new GenerationStreamHub(config, client)
+  const userId = '33333333-3333-4333-8333-333333333333'
+  const generationId = '11111111-1111-4111-8111-111111111111'
+  const delta = 'first line\n  indented line'
+
+  await store.append(userId, generationId, deltaEvent(1, delta))
+  const reader = hub.subscribe(userId, generationId).getReader()
+  const chunk = await reader.read()
+  const data = chunk.value
+    ?.split('\n')
+    .find((line) => line.startsWith('data: '))
+    ?.slice('data: '.length)
+
+  assert.ok(data)
+  const event = JSON.parse(data) as StreamEvent
+  assert.equal(event.type, 'message.delta')
+  if (event.type === 'message.delta') assert.equal(event.delta, delta)
+  await reader.cancel()
+  await hub.close()
+})

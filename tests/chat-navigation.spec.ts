@@ -104,18 +104,117 @@ test('switching directly between sessions loads the destination messages', async
   await expect.poll(async () => (
     (await conversationLink.boundingBox())?.height ?? 0
   )).toBeGreaterThanOrEqual(60)
-  const linkBox = await conversationLink.boundingBox()
-  await conversationLink.click({
-    position: {
-      x: 8,
-      y: (linkBox?.height ?? 60) - 4,
-    },
-  })
+  await conversationLink.getByText('Conversation B').click()
 
   await expect(page).toHaveURL(/\/ai-chatbot\/conversation-b$/)
   await expect(page.getByText('Message from B')).toBeVisible()
   await expect(page.getByText('Message from A')).toHaveCount(0)
   expect(detailRequests).toEqual(['conversation-a', 'conversation-b'])
+})
+
+test('assistant votes can be selected, switched, cleared, and rolled back', async ({ page }) => {
+  const voteRequests: Array<{ method: string; isUpvoted?: boolean }> = []
+  let rejectNextVote = false
+
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const request = route.request()
+    const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/api/health')) {
+      await route.fulfill({ json: {
+        status: 'ok',
+        service: 'ai-chatbot',
+        commit: 'test',
+        time: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/me')) {
+      await route.fulfill({ json: {
+        id: 'test-user',
+        externalUserId: 'test-user',
+        externalTeamId: null,
+        realName: 'Test User',
+        userName: 'tester',
+        jobTitle: null,
+        researchField: null,
+        email: 'test@example.com',
+        name: 'Test User',
+        image: null,
+        gpas2Role: null,
+        serviceTier: 'free',
+        schedulingWeight: 1,
+        generationConcurrencyLimit: 1,
+        maxQueuedGenerations: 5,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations')) {
+      await route.fulfill({ json: { conversations: summaries } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations/conversation-a')) {
+      await route.fulfill({ json: detail('conversation-a') })
+      return
+    }
+    if (pathname.endsWith('/api/messages/message-a/vote')) {
+      if (request.method() === 'DELETE') {
+        voteRequests.push({ method: 'DELETE' })
+        await route.fulfill({ status: 204 })
+        return
+      }
+      const body = request.postDataJSON() as { isUpvoted: boolean }
+      voteRequests.push({ method: 'PUT', isUpvoted: body.isUpvoted })
+      if (rejectNextVote) {
+        rejectNextVote = false
+        await route.fulfill({
+          status: 500,
+          json: { error: { code: 'vote_failed', message: 'Vote failed' } },
+        })
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      await route.fulfill({ json: { vote: body.isUpvoted ? 'up' : 'down' } })
+      return
+    }
+    await route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/conversation-a')
+  await expect(page.getByText('Message from A')).toBeVisible()
+  const upvote = page.getByRole('button', { name: '点赞' })
+  const downvote = page.getByRole('button', { name: '点踩' })
+  const regenerate = page.getByRole('button', { name: '重新生成' })
+
+  const upvoteResponse = page.waitForResponse((response) => (
+    response.request().method() === 'PUT' &&
+    response.url().endsWith('/api/messages/message-a/vote')
+  ))
+  await upvote.click()
+  await expect(upvote).toHaveAttribute('aria-busy', 'true')
+  await expect(regenerate.locator('span')).not.toHaveClass(/generation-status-spin/)
+  await upvoteResponse
+  await expect(upvote).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('status')).toHaveText('已点赞')
+
+  await downvote.click()
+  await expect(downvote).toHaveAttribute('aria-pressed', 'true')
+  await expect(upvote).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('status')).toHaveText('已点踩')
+
+  await downvote.click()
+  await expect(downvote).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('status')).toHaveText('已取消评价')
+
+  rejectNextVote = true
+  await upvote.click()
+  await expect(upvote).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('status')).toHaveText('评价保存失败，请重试')
+  expect(voteRequests).toEqual([
+    { method: 'PUT', isUpvoted: true },
+    { method: 'PUT', isUpvoted: false },
+    { method: 'DELETE' },
+    { method: 'PUT', isUpvoted: true },
+  ])
 })
 
 test('a rejected generation start retries the original request instead of regenerating a local placeholder', async ({ page }) => {

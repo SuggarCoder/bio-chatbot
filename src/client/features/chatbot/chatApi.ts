@@ -304,17 +304,18 @@ export function regenerateMessage(
   })
 }
 
-export function setMessageVote(messageId: string, isUpvoted: boolean) {
-  return requestJson<{ vote: 'up' | 'down' }>(
+export async function setMessageVote(messageId: string, vote: 'up' | 'down') {
+  const result = await requestJson<{ vote: 'up' | 'down' }>(
     `/messages/${encodeURIComponent(messageId)}/vote`,
     {
       method: 'PUT',
-      body: JSON.stringify({ isUpvoted }),
+      body: JSON.stringify({ isUpvoted: vote === 'up' }),
     },
   )
+  return result.vote
 }
 
-export async function deleteMessageVote(messageId: string): Promise<void> {
+export async function deleteMessageVote(messageId: string): Promise<null> {
   const response = await fetch(
     `${API_BASE}/messages/${encodeURIComponent(messageId)}/vote`,
     { method: 'DELETE', credentials: 'include' },
@@ -323,6 +324,8 @@ export async function deleteMessageVote(messageId: string): Promise<void> {
   if (!response.ok) {
     throw await parseApiError(response)
   }
+
+  return null
 }
 
 export function cancelGeneration(generationId: string) {

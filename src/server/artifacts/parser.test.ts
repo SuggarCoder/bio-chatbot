@@ -83,15 +83,15 @@ test('parses an Artifact with surrounding text', () => {
 })
 
 test('supports replace metadata and XML attribute entities', () => {
-  const input = '<artifact v="1" id="doc" op="replace" base_version="3" type="text/plain" title="A &amp; &quot;B&quot;">next</artifact>'
+  const input = '<artifact v="1" id="doc" op="replace" base_version="3" type="text/markdown" title="A &amp; &quot;B&quot;">next</artifact>'
   const result = parse([input])
   assert.equal(result.artifacts[0]?.metadata.base_version, 3)
   assert.equal(result.artifacts[0]?.metadata.title, 'A & "B"')
 })
 
 test('supports multiple Artifacts in one response', () => {
-  const first = '<artifact v="1" id="one" op="create" type="text/plain" title="One">1</artifact>'
-  const second = '<artifact v="1" id="two" op="create" type="text/plain" title="Two">2</artifact>'
+  const first = '<artifact v="1" id="one" op="create" type="text/markdown" title="One">1</artifact>'
+  const second = '<artifact v="1" id="two" op="create" type="text/markdown" title="Two">2</artifact>'
   const result = parse([`${first}\n${second}`])
   assert.deepEqual(result.artifacts.map((item) => item.content), ['1', '2'])
 })
@@ -116,7 +116,7 @@ test('unescapes only the exact escaped closing tag in a body', () => {
 })
 
 test('reports malformed metadata and resumes outer text after close', () => {
-  const input = '<artifact v="1" id="INVALID" op="create" type="text/plain" title="Bad">hidden</artifact>\nvisible'
+  const input = '<artifact v="1" id="INVALID" op="create" type="text/markdown" title="Bad">hidden</artifact>\nvisible'
   const result = parse([input])
   assert.deepEqual(result.errors, ['INVALID_METADATA'])
   assert.equal(result.text, '\nvisible')
@@ -124,15 +124,25 @@ test('reports malformed metadata and resumes outer text after close', () => {
 })
 
 test('reports unsupported version and MIME type distinctly', () => {
-  const version = parse(['<artifact v="2" id="x" op="create" type="text/plain" title="X">x</artifact>'])
+  const version = parse(['<artifact v="2" id="x" op="create" type="text/markdown" title="X">x</artifact>'])
   const type = parse(['<artifact v="1" id="x" op="create" type="application/javascript" title="X">x</artifact>'])
   assert.deepEqual(version.errors, ['UNSUPPORTED_VERSION'])
   assert.deepEqual(type.errors, ['UNSUPPORTED_TYPE'])
+  for (const legacyType of [
+    'text/plain',
+    'application/vnd.artifact.code',
+    'application/vnd.artifact.mermaid',
+  ]) {
+    assert.deepEqual(
+      parse([`<artifact v="1" id="x" op="create" type="${legacyType}" title="X">x</artifact>`]).errors,
+      ['UNSUPPORTED_TYPE'],
+    )
+  }
 })
 
 test('requires base_version only for replace', () => {
-  const missing = parse(['<artifact v="1" id="x" op="replace" type="text/plain" title="X">x</artifact>'])
-  const extra = parse(['<artifact v="1" id="x" op="create" base_version="1" type="text/plain" title="X">x</artifact>'])
+  const missing = parse(['<artifact v="1" id="x" op="replace" type="text/markdown" title="X">x</artifact>'])
+  const extra = parse(['<artifact v="1" id="x" op="create" base_version="1" type="text/markdown" title="X">x</artifact>'])
   assert.deepEqual(missing.errors, ['INVALID_METADATA'])
   assert.deepEqual(extra.errors, ['INVALID_METADATA'])
 })
@@ -161,13 +171,13 @@ test('reports abort and does not commit a draft', () => {
 
 test('rejects an oversized opening tag and body', () => {
   const longTitle = 'x'.repeat(4100)
-  const tag = `<artifact v="1" id="x" op="create" type="text/plain" title="${longTitle}">x</artifact>`
+  const tag = `<artifact v="1" id="x" op="create" type="text/markdown" title="${longTitle}">x</artifact>`
   assert.deepEqual(parse([tag]).errors, ['OPEN_TAG_TOO_LARGE'])
   assert.deepEqual(parse([`${opening}12345</artifact>`], { maxBodyBytes: 4 }).errors, ['ARTIFACT_TOO_LARGE'])
 })
 
 test('rejects nested Artifacts and handles many angle brackets', () => {
-  const nested = `${opening}<artifact v="1" id="inner" op="create" type="text/plain" title="Inner">x</artifact></artifact>`
+  const nested = `${opening}<artifact v="1" id="inner" op="create" type="text/markdown" title="Inner">x</artifact></artifact>`
   assert.deepEqual(parse([nested]).errors, ['NESTED_ARTIFACT'])
 
   const angles = '<div><span data-x=">">ok</span></div>'.repeat(100)

@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 
 import type { Database } from '../db.js'
 import {
@@ -11,6 +11,7 @@ import type {
   ArtifactMimeType,
   ArtifactProtocolMetadata,
 } from './protocol.js'
+import { artifactMimeTypes } from './protocol.js'
 
 export type DatabaseTransaction = Parameters<
   Parameters<Database['transaction']>[0]
@@ -55,11 +56,8 @@ export type CommittedArtifactVersion = {
 function formatForMime(type: ArtifactMimeType): string {
   return {
     'text/markdown': 'markdown',
-    'text/plain': 'text',
     'text/html': 'html',
     'image/svg+xml': 'svg',
-    'application/vnd.artifact.code': 'code',
-    'application/vnd.artifact.mermaid': 'mermaid',
   }[type]
 }
 
@@ -306,6 +304,7 @@ export async function listArtifactsForChat(
       and(
         eq(artifacts.chatId, chatId),
         eq(artifacts.userId, userId),
+        inArray(artifacts.mimeType, artifactMimeTypes),
         isNull(artifacts.deletedAt),
       ),
     )
@@ -339,6 +338,7 @@ export async function listArtifactPromptCatalogForChat(
       and(
         eq(artifacts.chatId, chatId),
         eq(artifacts.userId, userId),
+        inArray(artifacts.mimeType, artifactMimeTypes),
         isNull(artifacts.deletedAt),
       ),
     )
@@ -368,6 +368,7 @@ export async function getArtifactForUser(
       and(
         eq(artifacts.id, artifactId),
         eq(artifacts.userId, userId),
+        inArray(artifacts.mimeType, artifactMimeTypes),
         isNull(artifacts.deletedAt),
       ),
     )
@@ -400,10 +401,16 @@ export async function listArtifactVersionsForUser(
       and(
         eq(artifacts.id, artifactVersions.artifactId),
         eq(artifacts.userId, userId),
+        inArray(artifacts.mimeType, artifactMimeTypes),
         isNull(artifacts.deletedAt),
       ),
     )
-    .where(eq(artifactVersions.artifactId, artifactId))
+    .where(
+      and(
+        eq(artifactVersions.artifactId, artifactId),
+        inArray(artifactVersions.mimeType, artifactMimeTypes),
+      ),
+    )
     .orderBy(desc(artifactVersions.version))
 }
 
@@ -434,6 +441,7 @@ export async function getArtifactVersionForUser(
       and(
         eq(artifacts.id, artifactVersions.artifactId),
         eq(artifacts.userId, userId),
+        inArray(artifacts.mimeType, artifactMimeTypes),
         isNull(artifacts.deletedAt),
       ),
     )
@@ -441,6 +449,7 @@ export async function getArtifactVersionForUser(
       and(
         eq(artifactVersions.artifactId, artifactId),
         eq(artifactVersions.version, version),
+        inArray(artifactVersions.mimeType, artifactMimeTypes),
       ),
     )
     .limit(1)

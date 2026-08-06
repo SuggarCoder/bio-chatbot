@@ -64,10 +64,11 @@ test('orders multiple Artifacts sharing a text boundary by part order', () => {
 
 test('only safe text render modes are used before commit', () => {
   assert.equal(getInlineArtifactRenderMode('text/markdown'), 'markdown')
-  assert.equal(getInlineArtifactRenderMode('application/vnd.artifact.code'), 'source')
   assert.equal(getInlineArtifactRenderMode('text/html'), 'source')
   assert.equal(getInlineArtifactRenderMode('image/svg+xml'), 'source')
-  assert.equal(getInlineArtifactRenderMode('application/vnd.artifact.mermaid'), 'source')
+  assert.equal(getInlineArtifactRenderMode('text/plain'), 'unsupported')
+  assert.equal(getInlineArtifactRenderMode('application/vnd.artifact.code'), 'unsupported')
+  assert.equal(getInlineArtifactRenderMode('application/vnd.artifact.mermaid'), 'unsupported')
   assert.equal(getInlineArtifactRenderMode('application/javascript'), 'unsupported')
 })
 

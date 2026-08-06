@@ -501,11 +501,8 @@ export async function buildApp(
     if (download) {
       const extension = {
         'text/markdown': '.md',
-        'text/plain': '.txt',
         'text/html': '.html',
         'image/svg+xml': '.svg',
-        'application/vnd.artifact.code': '.txt',
-        'application/vnd.artifact.mermaid': '.mmd',
       }[version.record.type] ?? '.txt'
       const encodedTitle = encodeURIComponent(
         `${version.record.title}${extension}`,

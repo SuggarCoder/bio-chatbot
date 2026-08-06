@@ -2,11 +2,8 @@ import { z } from 'zod'
 
 export const artifactMimeTypes = [
   'text/markdown',
-  'text/plain',
   'text/html',
   'image/svg+xml',
-  'application/vnd.artifact.code',
-  'application/vnd.artifact.mermaid',
 ] as const
 
 export type ArtifactMimeType = (typeof artifactMimeTypes)[number]
@@ -100,4 +97,3 @@ export interface ArtifactStreamParserEvents {
 
 export const ARTIFACT_OPEN_TAG_MAX_BYTES = 4096
 export const ARTIFACT_BODY_MAX_BYTES = 1024 * 1024
-

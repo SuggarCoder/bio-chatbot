@@ -2,9 +2,49 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  parseMarkdownFenceInfo,
   parseStreamingMarkdownTail,
   stableMarkdownPrefixLength,
 } from './markdown'
+
+test('accepts safe standalone filenames only for CSS, JavaScript, and Python', () => {
+  assert.deepEqual(parseMarkdownFenceInfo('css filename=theme.css'), {
+    language: 'css',
+    filename: 'theme.css',
+  })
+  assert.deepEqual(parseMarkdownFenceInfo('javascript filename=app.js'), {
+    language: 'javascript',
+    filename: 'app.js',
+  })
+  assert.deepEqual(parseMarkdownFenceInfo('py filename=analysis.py'), {
+    language: 'py',
+    filename: 'analysis.py',
+  })
+  assert.deepEqual(parseMarkdownFenceInfo('python filename=analysis.js'), {
+    language: 'python',
+  })
+  assert.deepEqual(parseMarkdownFenceInfo('python filename=../analysis.py'), {
+    language: 'python',
+  })
+  assert.deepEqual(parseMarkdownFenceInfo('sql filename=query.sql'), {
+    language: 'sql',
+  })
+})
+
+test('streams standalone filename metadata without treating snippets as files', () => {
+  assert.deepEqual(
+    parseStreamingMarkdownTail('```python filename=analysis.py\nprint("ok")'),
+    {
+      kind: 'code',
+      code: 'print("ok")',
+      language: 'python',
+      filename: 'analysis.py',
+      remainder: '',
+      closed: false,
+    },
+  )
+  assert.equal(parseMarkdownFenceInfo('python').filename, undefined)
+})
 
 test('commits a paragraph only after a following block boundary', () => {
   const source = '第一段。\n\n第二段仍在生成'

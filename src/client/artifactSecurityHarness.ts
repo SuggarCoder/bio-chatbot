@@ -4,14 +4,16 @@ import './main.css'
 
 import {
   buildHtmlSandboxDocument,
-  renderStrictMermaid,
+  HTML_ARTIFACT_SANDBOX,
   sanitizeArtifactSvg,
 } from './features/artifacts/renderers'
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ArtifactSidePanel } from './features/artifacts/ArtifactSidePanel'
 import { artifactStore } from './features/artifacts/artifactStore'
+import { sanitizeMermaidSvg } from './features/artifacts/sanitizeSvg'
 import { MarkdownContent } from './features/chatbot/MarkdownContent'
+import { renderStrictMermaid } from './features/chatbot/mermaid'
 
 let disposePanel: (() => void) | undefined
 let disposeMarkdown: (() => void) | undefined
@@ -29,7 +31,12 @@ async function mountMarkdownFixture(content: string) {
   await new Promise((resolve) => window.setTimeout(resolve, 350))
 }
 
-async function mountCommittedArtifactPanel() {
+async function mountArtifactPanelFixture(input: {
+  suffix: string
+  type: 'text/html' | 'image/svg+xml' | 'text/markdown'
+  title: string
+  content: string
+}) {
   disposePanel?.()
   document.querySelector('#artifact-panel-test-root')?.remove()
   const root = document.createElement('div')
@@ -37,32 +44,71 @@ async function mountCommittedArtifactPanel() {
   root.style.cssText = 'position:relative;display:flex;justify-content:flex-end;width:100vw;height:600px;overflow:hidden'
   document.body.append(root)
   disposePanel = render(() => createComponent(ArtifactSidePanel, {}), root)
-  artifactStore.setVisibleConversation('panel-test-conversation')
+  const conversationId = `panel-test-${input.suffix}-conversation`
+  const streamId = `panel-test-${input.suffix}-stream`
+  artifactStore.setVisibleConversation(conversationId)
   artifactStore.start({
-    artifactStreamId: 'panel-test-stream',
-    generationId: 'panel-test-generation',
-    messageId: 'panel-test-message',
-    logicalId: 'panel-test',
+    artifactStreamId: streamId,
+    generationId: `panel-test-${input.suffix}-generation`,
+    messageId: `panel-test-${input.suffix}-message`,
+    logicalId: `panel-test-${input.suffix}`,
     operation: 'create',
-    artifactType: 'text/html',
-    title: 'Panel test',
+    artifactType: input.type,
+    title: input.title,
     baseVersion: null,
-    language: 'html',
+    language: input.type === 'text/html' ? 'html' : null,
     textStartIndex: 0,
     partOrder: 0,
-  }, 'panel-test-conversation')
-  artifactStore.delta(
-    'panel-test-stream',
-    '<h1 id="panel-test-content">Visible content</h1>\n<p>Second line</p>',
-  )
+  }, conversationId)
+  artifactStore.delta(streamId, input.content)
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
   artifactStore.commit({
-    artifactStreamId: 'panel-test-stream',
-    artifactId: 'panel-test-artifact',
-    logicalId: 'panel-test',
+    artifactStreamId: streamId,
+    artifactId: `panel-test-${input.suffix}-artifact`,
+    logicalId: `panel-test-${input.suffix}`,
     version: 1,
   })
   await new Promise((resolve) => window.setTimeout(resolve, 350))
+}
+
+async function mountCommittedArtifactPanel() {
+  await mountArtifactPanelFixture({
+    suffix: 'html',
+    type: 'text/html',
+    title: 'Panel test',
+    content: '<h1 id="panel-test-content">Visible content</h1>\n<p>Second line</p>',
+  })
+}
+
+async function mountSandboxCapabilityPanel() {
+  await mountArtifactPanelFixture({
+    suffix: 'sandbox-capabilities',
+    type: 'text/html',
+    title: 'Sandbox capability test',
+    content: [
+      '<button id="artifact-modal-fixture" onclick="alert(\'Artifact modal\')">Open modal</button>',
+      '<a id="artifact-download-fixture" download="artifact-download.txt">Download fixture</a>',
+      '<script>document.querySelector(\'#artifact-download-fixture\').href = URL.createObjectURL(new Blob([\'Artifact download\'], { type: \'text/plain\' }))</script>',
+    ].join(''),
+  })
+}
+
+async function mountSvgArtifactPanel() {
+  await mountArtifactPanelFixture({
+    suffix: 'svg',
+    type: 'image/svg+xml',
+    title: 'SVG panel test',
+    content: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8"/></svg>',
+  })
+}
+
+async function mountMarkdownArtifactPanel() {
+  await mountArtifactPanelFixture({
+    suffix: 'markdown',
+    type: 'text/markdown',
+    title: 'Markdown panel test',
+    content: '# Markdown preview\n\nRich **content**',
+  })
 }
 
 async function switchArtifactPanelConversation() {
@@ -142,10 +188,15 @@ async function openSecondArtifactPanel() {
 Object.assign(window, {
   artifactSecurity: {
     buildHtmlSandboxDocument,
+    htmlArtifactSandbox: HTML_ARTIFACT_SANDBOX,
     sanitizeArtifactSvg,
+    sanitizeMermaidSvg,
     renderStrictMermaid,
     mountMarkdownFixture,
     mountCommittedArtifactPanel,
+    mountSandboxCapabilityPanel,
+    mountSvgArtifactPanel,
+    mountMarkdownArtifactPanel,
     switchArtifactPanelConversation,
     mountArtifactPair,
     openSecondArtifactPanel,

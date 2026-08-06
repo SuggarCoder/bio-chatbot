@@ -125,7 +125,10 @@ function parseOpeningTag(tag: string): ParsedOpeningTag {
     attributes.type !== undefined &&
     !artifactMimeTypes.includes(attributes.type as (typeof artifactMimeTypes)[number])
   ) {
-    return { code: 'UNSUPPORTED_TYPE', message: `Unsupported Artifact type: ${attributes.type}.` }
+    return {
+      code: 'UNSUPPORTED_TYPE',
+      message: '该系统仅为生信分析使用,不支持您请求的类型',
+    }
   }
 
   const result = artifactProtocolMetadataSchema.safeParse(attributes)

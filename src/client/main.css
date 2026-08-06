@@ -354,7 +354,7 @@
 
   .markdown-message :not(pre) > code {
     border-radius: .35rem;
-    background: rgb(241 245 249);
+    background: var(--colors-teal-600);
     padding: .12rem .35rem;
     color: rgb(51 65 85);
     font-size: .9em;

@@ -37,7 +37,6 @@ function useDebouncedValue(
 const sourceLanguage = (draft: ArtifactDraftClientState) => {
   if (draft.type === 'text/html') return 'html'
   if (draft.type === 'image/svg+xml') return 'xml'
-  if (draft.type === 'application/vnd.artifact.mermaid') return 'mermaid'
   return undefined
 }
 
@@ -76,27 +75,18 @@ const InlineDraftBody: Component<{ draft: ArtifactDraftClientState }> = (props) 
       <Show when={renderMode() === 'markdown'}>
         <MarkdownContent source={markdownSource()} class="bg-white p-4 text-slate-700" />
       </Show>
-      <Show when={renderMode() === 'text'}>
-        <pre class="m-0 whitespace-pre-wrap break-words bg-white p-4 font-sans text-sm leading-6 text-slate-700">
-          {props.draft.content}
-        </pre>
-      </Show>
       <Show when={renderMode() === 'source'}>
         <CodeBlock
           class="min-h-24 rounded-none border-0"
           code={props.draft.content}
-          language={
-            props.draft.type === 'application/vnd.artifact.code'
-              ? props.draft.language
-              : sourceLanguage(props.draft)
-          }
+          language={sourceLanguage(props.draft)}
           isStreaming={props.draft.status === 'streaming'}
           showLineNumbers
         />
       </Show>
       <Show when={renderMode() === 'unsupported'}>
         <p class="m-0 bg-white p-4 text-sm text-slate-500">
-          Unsupported Artifact type: {props.draft.type}
+          该系统仅为生信分析使用,不支持您请求的类型
         </p>
       </Show>
     </div>

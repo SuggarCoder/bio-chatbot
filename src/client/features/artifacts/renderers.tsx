@@ -1,8 +1,16 @@
-import DOMPurify from 'dompurify'
-import { createEffect, createSignal, onCleanup, Show, type Component } from 'solid-js'
-import { CodeBlock } from '../chatbot/CodeBlock'
+import { createEffect, createSignal, onCleanup, type Component } from 'solid-js'
 import { MarkdownContent } from '../chatbot/MarkdownContent'
+import { sanitizeArtifactSvg } from './sanitizeSvg'
 import type { ArtifactMimeType } from './types'
+
+export { sanitizeArtifactSvg } from './sanitizeSvg'
+
+export const HTML_ARTIFACT_SANDBOX = [
+  'allow-scripts',
+  'allow-modals',
+  'allow-downloads',
+  'allow-forms',
+].join(' ')
 
 export type ArtifactRendererProps = {
   artifactId: string
@@ -24,24 +32,6 @@ export type ArtifactRendererDefinition = {
 
 const MarkdownRenderer: Component<ArtifactRendererProps> = (props) => {
   return <MarkdownContent source={props.content} class="p-5" />
-}
-
-const TextRenderer: Component<ArtifactRendererProps> = (props) => (
-  <pre class="m-0 whitespace-pre-wrap break-words p-5 font-sans text-sm leading-6 text-slate-700">
-    {props.content}
-  </pre>
-)
-
-const CodeRenderer: Component<ArtifactRendererProps> = (props) => {
-  return (
-    <CodeBlock
-      class="min-h-full rounded-none border-0"
-      code={props.content}
-      language={props.language}
-      isStreaming={props.isStreaming}
-      showLineNumbers
-    />
-  )
 }
 
 export function buildHtmlSandboxDocument(content: string): string {
@@ -79,119 +69,38 @@ const HtmlRenderer: Component<ArtifactRendererProps> = (props) => {
     <iframe
       title={props.title}
       class="h-full min-h-96 w-full border-0 bg-white"
-      sandbox="allow-scripts"
+      sandbox={HTML_ARTIFACT_SANDBOX}
       referrerPolicy="no-referrer"
       srcdoc={document()}
     />
   )
 }
 
-export function sanitizeArtifactSvg(source: string): string {
-  const clean = DOMPurify.sanitize(source, {
-    USE_PROFILES: { svg: true, svgFilters: true },
-    FORBID_TAGS: ['script', 'foreignObject', 'style', 'iframe', 'object', 'embed'],
-    FORBID_ATTR: ['style'],
-  })
-  const document = new DOMParser().parseFromString(String(clean), 'image/svg+xml')
-  for (const element of document.querySelectorAll('*')) {
-    for (const attribute of [...element.attributes]) {
-      const name = attribute.name.toLowerCase()
-      const value = attribute.value.trim()
-      if (name.startsWith('on')) element.removeAttribute(attribute.name)
-      if ((name === 'href' || name === 'xlink:href') && !value.startsWith('#')) {
-        element.removeAttribute(attribute.name)
-      }
-      if (/url\s*\(/i.test(value) || /^\s*javascript:/i.test(value)) {
-        element.removeAttribute(attribute.name)
-      }
-    }
-  }
-  return new XMLSerializer().serializeToString(document.documentElement)
-}
-
 const SvgRenderer: Component<ArtifactRendererProps> = (props) => {
   const [url, setUrl] = createSignal('')
+  let currentUrl = ''
   createEffect(() => {
     const next = URL.createObjectURL(new Blob(
       [sanitizeArtifactSvg(props.content)],
       { type: 'image/svg+xml' },
     ))
-    const previous = url()
+    const previous = currentUrl
+    currentUrl = next
     setUrl(next)
     if (previous) URL.revokeObjectURL(previous)
   })
-  onCleanup(() => url() && URL.revokeObjectURL(url()))
+  onCleanup(() => currentUrl && URL.revokeObjectURL(currentUrl))
   return <img class="h-full w-full object-contain p-5" src={url()} alt={props.title} />
-}
-
-const MermaidRenderer: Component<ArtifactRendererProps> = (props) => {
-  const [svg, setSvg] = createSignal('')
-  const [error, setError] = createSignal('')
-  let revision = 0
-  let timer: number | undefined
-  createEffect(() => {
-    const content = props.content
-    const current = ++revision
-    setError('')
-    if (timer !== undefined) window.clearTimeout(timer)
-    const render = () => {
-      timer = undefined
-      void renderStrictMermaid(content).then((result) => {
-        if (current === revision) setSvg(result)
-      }).catch((reason) => {
-        if (current === revision) {
-          setError(reason instanceof Error ? reason.message : 'Mermaid render failed')
-        }
-      })
-    }
-    if (props.isStreaming) timer = window.setTimeout(render, 240)
-    else render()
-  })
-  onCleanup(() => {
-    revision += 1
-    if (timer !== undefined) window.clearTimeout(timer)
-  })
-  return (
-    <Show when={!error()} fallback={<p class="p-5 text-sm text-rose-600">{error()}</p>}>
-      <div class="gpas-scrollbar scrollbar-fade grid min-h-96 place-items-center overflow-auto p-5" innerHTML={svg()} />
-    </Show>
-  )
-}
-
-let mermaidPromise: Promise<(typeof import('mermaid'))['default']> | undefined
-
-function getMermaid() {
-  mermaidPromise ??= import('mermaid').then(({ default: mermaid }) => {
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: 'strict',
-      suppressErrorRendering: true,
-    })
-    return mermaid
-  })
-  return mermaidPromise
-}
-
-export async function renderStrictMermaid(
-  content: string,
-  id = `artifact-mermaid-${crypto.randomUUID()}`,
-): Promise<string> {
-  const mermaid = await getMermaid()
-  const result = await mermaid.render(id, content)
-  return sanitizeArtifactSvg(result.svg)
 }
 
 export const artifactRenderers: Record<ArtifactMimeType, ArtifactRendererDefinition> = {
   'text/markdown': { type: 'text/markdown', canPreview: true, canEdit: false, canExecute: false, render: MarkdownRenderer },
-  'text/plain': { type: 'text/plain', canPreview: true, canEdit: false, canExecute: false, render: TextRenderer },
   'text/html': { type: 'text/html', canPreview: true, canEdit: false, canExecute: true, render: HtmlRenderer },
   'image/svg+xml': { type: 'image/svg+xml', canPreview: true, canEdit: false, canExecute: false, render: SvgRenderer },
-  'application/vnd.artifact.code': { type: 'application/vnd.artifact.code', canPreview: true, canEdit: false, canExecute: false, render: CodeRenderer },
-  'application/vnd.artifact.mermaid': { type: 'application/vnd.artifact.mermaid', canPreview: true, canEdit: false, canExecute: false, render: MermaidRenderer },
 }
 
-export const UnsupportedArtifactRenderer: Component<{ type: string }> = (props) => (
+export const UnsupportedArtifactRenderer: Component<{ type: string }> = () => (
   <div class="grid min-h-64 place-items-center p-6 text-sm text-slate-500">
-    Unsupported Artifact type: {props.type}
+    该系统仅为生信分析使用,不支持您请求的类型
   </div>
 )

@@ -3,6 +3,8 @@ import { Dynamic } from 'solid-js/web'
 import { lexer, type Token, type Tokens } from 'marked'
 
 import { CodeBlock } from './CodeBlock'
+import { MermaidBlock } from './MermaidBlock'
+import { parseMarkdownFenceInfo } from './markdown'
 
 function safeLinkUri(href: string): string | null {
   try {
@@ -66,14 +68,19 @@ function MarkdownToken(props: { token: Token }): JSX.Element {
       return <hr />
     case 'br':
       return <br />
-    case 'code':
-      return (
-        <CodeBlock
-          code={token.text}
-          language={token.lang}
-          showLineNumbers
-        />
-      )
+    case 'code': {
+      const info = parseMarkdownFenceInfo(token.lang)
+      return info.language === 'mermaid'
+        ? <MermaidBlock source={token.text} />
+        : (
+            <CodeBlock
+              code={token.text}
+              filename={info.filename}
+              language={info.language}
+              showLineNumbers
+            />
+          )
+    }
     case 'codespan':
       return <code>{token.text}</code>
     case 'blockquote':

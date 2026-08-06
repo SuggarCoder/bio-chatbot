@@ -303,39 +303,41 @@ export const ArtifactSidePanel: Component = () => {
           style={{ width: panelWidth() }}
           aria-label="Artifact panel"
         >
-          <nav class="relative z-20 flex h-16 shrink-0 items-center gap-3 bg-slate-50 px-3">
-            <div class="flex shrink-0 items-center gap-1 rounded-xl bg-white/55 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.95),0_1px_8px_rgba(15,23,42,0.06)] ring-1 ring-white/90">
-              <Tooltip content="Preview" placement="bottom">
-                <button
-                  type="button"
-                  aria-label="Preview"
-                  aria-pressed={state.activeTab === 'preview'}
-                  class={
-                    state.activeTab === 'preview'
-                      ? 'grid h-8 w-8 place-items-center rounded-lg bg-white text-teal-700 shadow-sm ring-1 ring-slate-200/70 transition'
-                      : 'grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-white/80 hover:text-slate-800'
-                  }
-                  onClick={() => artifactStore.setTab('preview')}
-                >
-                  <span aria-hidden="true" class="i-lucide-eye h-4 w-4" />
-                </button>
-              </Tooltip>
-              <Tooltip content="Code" placement="bottom">
-                <button
-                  type="button"
-                  aria-label="Code"
-                  aria-pressed={state.activeTab === 'code'}
-                  class={
-                    state.activeTab === 'code'
-                      ? 'grid h-8 w-8 place-items-center rounded-lg bg-white text-teal-700 shadow-sm ring-1 ring-slate-200/70 transition'
-                      : 'grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-white/80 hover:text-slate-800'
-                  }
-                  onClick={() => artifactStore.setTab('code')}
-                >
-                  <span aria-hidden="true" class="i-lucide-code-2 h-4 w-4" />
-                </button>
-              </Tooltip>
-            </div>
+          <nav class="relative z-20 flex h-16 shrink-0 items-center gap-3 bg-slate-50/85 px-3 backdrop-blur-xl">
+            <Show when={type() === 'text/html'}>
+              <div class="flex shrink-0 items-center gap-1 rounded-xl bg-white/55 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.95),0_1px_8px_rgba(15,23,42,0.06)] ring-1 ring-white/90">
+                <Tooltip content="Preview" placement="bottom">
+                  <button
+                    type="button"
+                    aria-label="Preview"
+                    aria-pressed={state.activeTab === 'preview'}
+                    class={
+                      state.activeTab === 'preview'
+                        ? 'grid h-8 w-8 place-items-center rounded-lg bg-white text-teal-700 shadow-sm ring-1 ring-slate-200/70 transition'
+                        : 'grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-white/80 hover:text-slate-800'
+                    }
+                    onClick={() => artifactStore.setTab('preview')}
+                  >
+                    <span aria-hidden="true" class="i-lucide-eye h-4 w-4" />
+                  </button>
+                </Tooltip>
+                <Tooltip content="Code" placement="bottom">
+                  <button
+                    type="button"
+                    aria-label="Code"
+                    aria-pressed={state.activeTab === 'code'}
+                    class={
+                      state.activeTab === 'code'
+                        ? 'grid h-8 w-8 place-items-center rounded-lg bg-white text-teal-700 shadow-sm ring-1 ring-slate-200/70 transition'
+                        : 'grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-white/80 hover:text-slate-800'
+                    }
+                    onClick={() => artifactStore.setTab('code')}
+                  >
+                    <span aria-hidden="true" class="i-lucide-code-2 h-4 w-4" />
+                  </button>
+                </Tooltip>
+              </div>
+            </Show>
 
             <div class="min-w-0 flex-1">
               <h2 class="truncate text-sm font-semibold text-slate-900">{title()}</h2>
