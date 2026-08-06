@@ -5,36 +5,8 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1785570109712,
-      "tag": "0000_initial_schema",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1785595654551,
-      "tag": "0001_greedy_red_ghost",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1785596444318,
-      "tag": "0002_tearful_marvel_apes",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1785597248545,
-      "tag": "0003_curious_silverclaw",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "7",
-      "when": 1785820904324,
-      "tag": "0004_completed_generation_supersedes",
+      "when": 1785933438806,
+      "tag": "0000_multitenant_queue_baseline",
       "breakpoints": true
     }
   ]

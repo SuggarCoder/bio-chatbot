@@ -216,6 +216,7 @@ export async function commitPreparedArtifact(
   }
 
   await transaction.insert(artifactVersions).values({
+    userId: input.userId,
     artifactId: prepared.artifactId,
     version: prepared.version,
     parentVersion: prepared.parentVersion,

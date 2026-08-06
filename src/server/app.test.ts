@@ -5,6 +5,7 @@ import { buildApp } from './app.js'
 import type { AppConfig } from './config.js'
 import type { Database } from './db.js'
 import type { GenerationService } from './generation.js'
+import type { GenerationStreamHub } from './streamStore.js'
 import type { RedisClient } from './cache.js'
 
 test('all Fastify route schemas compile at startup', async () => {
@@ -18,6 +19,7 @@ test('all Fastify route schemas compile at startup', async () => {
     database: {} as Database,
     redis: {} as RedisClient,
     generations: {} as GenerationService,
+    streamHub: {} as GenerationStreamHub,
     objectStore: null,
     artifactService: null,
   })
@@ -26,12 +28,12 @@ test('all Fastify route schemas compile at startup', async () => {
     await app.ready()
     const routes = app.printRoutes()
     assert.match(routes, /ai-chatbot\/api\//)
-    assert.match(routes, /chats/)
+    assert.match(routes, /conversations/)
     assert.match(routes, /generations/)
 
     const invalidBody = await app.inject({
       method: 'POST',
-      url: '/ai-chatbot/api/chats',
+      url: '/ai-chatbot/api/conversations',
       payload: { title: '' },
     })
     assert.equal(invalidBody.statusCode, 400)
@@ -39,7 +41,7 @@ test('all Fastify route schemas compile at startup', async () => {
 
     const invalidParams = await app.inject({
       method: 'GET',
-      url: '/ai-chatbot/api/chats/not-a-uuid',
+      url: '/ai-chatbot/api/conversations/not-a-uuid',
     })
     assert.equal(invalidParams.statusCode, 400)
 
@@ -49,6 +51,7 @@ test('all Fastify route schemas compile at startup', async () => {
     })
     assert.equal(health.statusCode, 503)
     assert.equal(health.json().dependencies.postgres, 'unavailable')
+    assert.equal(health.json().dependencies.worker, 'unavailable')
   } finally {
     await app.close()
   }
@@ -65,6 +68,7 @@ test('client IP headers are accepted only from a trusted proxy', async () => {
     database: {} as Database,
     redis: {} as RedisClient,
     generations: {} as GenerationService,
+    streamHub: {} as GenerationStreamHub,
     objectStore: null,
     artifactService: null,
   })

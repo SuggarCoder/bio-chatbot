@@ -4,9 +4,11 @@
   "description": "A chatbot for biotech, powered by solidjs and fastify",
   "main": "index.js",
   "scripts": {
-    "dev": "concurrently -k -n WEB,API \"npm:dev:web\" \"npm:dev:api\"",
+    "dev": "concurrently -k -n WEB,API,WORKER \"npm:dev:web\" \"npm:dev:api\" \"npm:dev:worker\"",
     "dev:web": "vite --host 0.0.0.0",
     "dev:api": "cross-env SERVE_CLIENT=false tsx watch src/server/index.ts",
+    "dev:worker": "tsx watch src/server/worker.ts",
+    "db:init": "tsx src/server/initDatabase.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/server/migrate.ts",
     "db:check": "drizzle-kit check",
@@ -18,7 +20,8 @@
     "storage:check": "tsx src/server/storageCheck.ts",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "build": "npm run check && vite build && tsc -p tsconfig.server.json",
-    "start": "node dist/server/index.js"
+    "start": "node dist/server/index.js",
+    "start:worker": "node dist/server/worker.js"
   },
   "repository": {
     "type": "git",
@@ -47,7 +50,6 @@
     "openai": "^7.1.0",
     "pg": "^8.22.0",
     "redis": "^6.1.0",
-    "resumable-stream": "^2.2.12",
     "shiki": "^4.0.2",
     "solid-js": "^1.9.14",
     "zod": "^4.4.3"

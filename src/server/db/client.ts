@@ -9,7 +9,7 @@ import {
   chats,
   generations,
   messages,
-  streams,
+  outboxEvents,
   usageEvents,
   users,
 } from './schema.js'
@@ -20,10 +20,10 @@ export type Database = NodePgDatabase<typeof schema> & {
   $client: InstanceType<typeof Pool>
 }
 
-export function createDatabase(databaseUrl: string): Database {
+export function createDatabase(databaseUrl: string, maxConnections = 4): Database {
   const pool = new Pool({
     connectionString: databaseUrl,
-    max: 10,
+    max: maxConnections,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
   })
@@ -57,7 +57,7 @@ export async function verifyCoreSchema(database: Database): Promise<void> {
       database.select({ id: chats.id }).from(chats).limit(1),
       database.select({ id: messages.id }).from(messages).limit(1),
       database.select({ id: generations.id }).from(generations).limit(1),
-      database.select({ id: streams.id }).from(streams).limit(1),
+      database.select({ id: outboxEvents.id }).from(outboxEvents).limit(1),
       database.select({ id: usageEvents.id }).from(usageEvents).limit(1),
     ])
   } catch (error) {
@@ -71,7 +71,7 @@ export async function verifyCoreSchema(database: Database): Promise<void> {
       ['42P01', '42703'].includes(String(error.cause.code))
     ) {
       throw new Error(
-        'Database schema is missing or outdated. Run `npm run db:migrate` before starting the development server.',
+        'Database schema is missing or outdated. Run `npm run db:init` for a fresh database or `npm run db:migrate` for later forward migrations.',
         { cause: error },
       )
     }

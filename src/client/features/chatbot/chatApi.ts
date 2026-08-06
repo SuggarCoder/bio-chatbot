@@ -12,13 +12,17 @@ export type CurrentUserDto = {
   name: string | null
   image: string | null
   gpas2Role: number | null
+  serviceTier: 'free' | 'pro' | 'enterprise'
+  schedulingWeight: number
+  generationConcurrencyLimit: number
+  maxQueuedGenerations: number
 }
 
 export type ChatMessageDto = {
   id: string
   seq: number
   role: 'user' | 'assistant'
-  status: 'completed' | 'cancelled' | 'failed'
+  status: 'pending' | 'streaming' | 'completed' | 'cancelled' | 'failed'
   content: string
   parts: Array<
     | { type: 'text'; order: number; text: string }
@@ -41,16 +45,30 @@ export type ChatMessageDto = {
 
 export type GenerationDto = {
   id: string
-  chatId: string | null
-  streamId: string | null
-  status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
-  effectiveStatus:
-    | 'pending'
-    | 'streaming'
+  chatId: string
+  streamId: string
+  status:
+    | 'created'
+    | 'queued'
+    | 'scheduled'
+    | 'running'
     | 'cancelling'
     | 'completed'
     | 'failed'
     | 'cancelled'
+    | 'interrupted'
+    | 'timed_out'
+  effectiveStatus:
+    | 'created'
+    | 'queued'
+    | 'scheduled'
+    | 'running'
+    | 'cancelling'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'interrupted'
+    | 'timed_out'
   cancelRequestedAt: string | null
   cancelSource:
     | 'user_stop'
@@ -76,7 +94,7 @@ export type ChatDetailDto = ChatSummaryDto & {
   activeGeneration: {
     id: string
     streamId: string
-    status: 'pending' | 'streaming' | 'cancelling'
+    status: 'created' | 'queued' | 'scheduled' | 'running' | 'cancelling'
     replacesMessageId: string | null
   } | null
 }
@@ -89,6 +107,13 @@ export type ChatMessagePageInfo = {
 export type ChatMessagePageDto = {
   messages: ChatMessageDto[]
   pageInfo: ChatMessagePageInfo
+}
+
+export type SharedConversationDto = {
+  id: string
+  title: string
+  shareMode: 'snapshot' | 'live'
+  messages: ChatMessageDto[]
 }
 
 type ApiErrorBody = {
@@ -167,12 +192,14 @@ export function fetchCurrentUser() {
 }
 
 export async function fetchChats() {
-  const result = await requestJson<{ chats: ChatSummaryDto[] }>('/chats')
-  return result.chats
+  const result = await requestJson<{ conversations: ChatSummaryDto[] }>(
+    '/conversations',
+  )
+  return result.conversations
 }
 
 export function createChat(title: string) {
-  return requestJson<ChatSummaryDto>('/chats', {
+  return requestJson<ChatSummaryDto>('/conversations', {
     method: 'POST',
     body: JSON.stringify({ title }),
   })
@@ -180,7 +207,13 @@ export function createChat(title: string) {
 
 export function fetchChat(chatId: string) {
   return requestJson<ChatDetailDto>(
-    `/chats/${encodeURIComponent(chatId)}`,
+    `/conversations/${encodeURIComponent(chatId)}`,
+  )
+}
+
+export function fetchSharedConversation(shareSlug: string) {
+  return requestJson<SharedConversationDto>(
+    `/shared/conversations/${encodeURIComponent(shareSlug)}`,
   )
 }
 
@@ -194,13 +227,13 @@ export function fetchChatMessages(
     limit: String(limit),
   })
   return requestJson<ChatMessagePageDto>(
-    `/chats/${encodeURIComponent(chatId)}/messages?${params}`,
+    `/conversations/${encodeURIComponent(chatId)}/messages?${params}`,
   )
 }
 
 export function renameChat(chatId: string, title: string) {
   return requestJson<ChatSummaryDto>(
-    `/chats/${encodeURIComponent(chatId)}`,
+    `/conversations/${encodeURIComponent(chatId)}`,
     {
       method: 'PATCH',
       body: JSON.stringify({ title }),
@@ -210,7 +243,7 @@ export function renameChat(chatId: string, title: string) {
 
 export async function deleteChat(chatId: string): Promise<void> {
   const response = await fetch(
-    `${API_BASE}/chats/${encodeURIComponent(chatId)}`,
+    `${API_BASE}/conversations/${encodeURIComponent(chatId)}`,
     {
       method: 'DELETE',
       credentials: 'include',
@@ -223,7 +256,7 @@ export async function deleteChat(chatId: string): Promise<void> {
 }
 
 export function generationUrl(chatId: string) {
-  return `${API_BASE}/chats/${encodeURIComponent(chatId)}/generations`
+  return `${API_BASE}/conversations/${encodeURIComponent(chatId)}/messages`
 }
 
 export function createGeneration(
@@ -238,12 +271,18 @@ export function createGeneration(
   return requestJson<{
     generation: GenerationDto
     userMessage: ChatMessageDto
+    assistantMessageId: string
     replacesMessageId: string | null
   }>(
-    `/chats/${encodeURIComponent(chatId)}/generations`,
+    `/conversations/${encodeURIComponent(chatId)}/messages`,
     {
       method: 'POST',
-      body: JSON.stringify(input),
+      headers: { 'Idempotency-Key': input.clientMessageId },
+      body: JSON.stringify({
+        content: input.content,
+        artifactId: input.artifactId,
+        supersedesGenerationId: input.supersedesGenerationId,
+      }),
     },
   )
 }
@@ -256,10 +295,12 @@ export function regenerateMessage(
   return requestJson<{
     generation: GenerationDto
     userMessage: ChatMessageDto
+    assistantMessageId: string
     replacesMessageId: string | null
-  }>(`/messages/${encodeURIComponent(messageId)}/regenerate`, {
+  }>(`/messages/${encodeURIComponent(messageId)}/regenerations`, {
     method: 'POST',
-    body: JSON.stringify({ requestId, artifactId }),
+    headers: { 'Idempotency-Key': requestId },
+    body: JSON.stringify({ artifactId }),
   })
 }
 
@@ -293,9 +334,6 @@ export function cancelGeneration(generationId: string) {
   )
 }
 
-export function streamUrl(generationId: string, resumeAt: number) {
-  const params = new URLSearchParams({
-    resumeAt: String(resumeAt),
-  })
-  return `${API_BASE}/generations/${encodeURIComponent(generationId)}/stream?${params}`
+export function streamUrl(generationId: string) {
+  return `${API_BASE}/generations/${encodeURIComponent(generationId)}/stream`
 }

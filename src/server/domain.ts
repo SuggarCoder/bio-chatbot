@@ -26,18 +26,30 @@ export type CurrentUser = {
   name: string | null
   image: string | null
   gpas2Role: number | null
+  serviceTier: 'free' | 'pro' | 'enterprise'
+  schedulingWeight: number
+  generationConcurrencyLimit: number
+  maxQueuedGenerations: number
 }
 
-export type MessageStatus = 'completed' | 'cancelled' | 'failed'
-export type GenerationStatus =
+export type MessageStatus =
   | 'pending'
   | 'streaming'
   | 'completed'
+  | 'cancelled'
+  | 'failed'
+export type GenerationStatus =
+  | 'created'
+  | 'queued'
+  | 'scheduled'
+  | 'running'
+  | 'cancelling'
+  | 'completed'
   | 'failed'
   | 'cancelled'
-export type EffectiveGenerationStatus =
-  | GenerationStatus
-  | 'cancelling'
+  | 'interrupted'
+  | 'timed_out'
+export type EffectiveGenerationStatus = GenerationStatus
 export type CancelSource =
   | 'user_stop'
   | 'superseded'
@@ -82,7 +94,7 @@ export type ChatSummaryDto = {
 export type ActiveGenerationDto = {
   id: string
   streamId: string
-  status: 'pending' | 'streaming' | 'cancelling'
+  status: 'created' | 'queued' | 'scheduled' | 'running' | 'cancelling'
   replacesMessageId: string | null
 }
 
@@ -108,6 +120,7 @@ export type GenerationDto = {
 export type GenerationStartDto = {
   generation: GenerationDto
   userMessage: ChatMessageDto
+  assistantMessageId: string
   replacesMessageId: string | null
 }
 

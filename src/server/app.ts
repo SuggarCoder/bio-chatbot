@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 
 import { AuthenticationError, resolveCurrentUser } from './auth.js'
 import {
-  consumeGenerationRateLimit,
+  redisKey,
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
@@ -22,10 +22,14 @@ import {
   getChatDetail,
   getChatMessagesPage,
   getGeneration,
+  getGenerationAssistantMessage,
   getRegenerationTarget,
+  getSharedChat,
   listChats,
   renameChat,
   setMessageVote,
+  shareChat,
+  unshareChat,
   type Database,
 } from './db.js'
 import type { CurrentUser } from './domain.js'
@@ -45,6 +49,10 @@ import {
   listArtifactVersionsForUser,
 } from './artifacts/repository.js'
 import { httpSchemas } from './httpSchemas.js'
+import {
+  generationStreamKey,
+  type GenerationStreamHub,
+} from './streamStore.js'
 
 const APP_BASE = '/ai-chatbot/'
 const API_BASE = '/ai-chatbot/api'
@@ -200,6 +208,7 @@ export type AppDependencies = {
   database: Database
   redis: RedisClient
   generations: GenerationService
+  streamHub: GenerationStreamHub
   objectStore: ObjectStore | null
   artifactService: ArtifactService | null
 }
@@ -212,6 +221,7 @@ export async function buildApp(
     database,
     redis,
     generations,
+    streamHub,
     objectStore,
     artifactService,
   } = dependencies
@@ -230,6 +240,12 @@ export async function buildApp(
     }
 
     if (error instanceof GenerationRejectedError) {
+      if (error.retryAfterMs) {
+        reply.header(
+          'Retry-After',
+          String(Math.max(1, Math.ceil(error.retryAfterMs / 1_000))),
+        )
+      }
       return reply.code(error.statusCode).send(
         errorBody(request, error.code, error.message),
       )
@@ -279,39 +295,6 @@ export async function buildApp(
     return user
   }
 
-  const enforceGenerationRateLimit = async (
-    request: FastifyRequest,
-    reply: FastifyReply,
-    user: CurrentUser,
-  ): Promise<void> => {
-    if (!redis.isReady) {
-      throw new GenerationRejectedError(
-        'Generation is temporarily unavailable',
-        503,
-        'redis_unavailable',
-      )
-    }
-
-    const result = await consumeGenerationRateLimit(
-      redis,
-      config,
-      user.id,
-      request.ip,
-    )
-
-    if (!result.allowed) {
-      reply.header(
-        'Retry-After',
-        String(Math.max(1, Math.ceil(result.retryAfterMs / 1_000))),
-      )
-      throw new GenerationRejectedError(
-        'Too many generation requests',
-        429,
-        'generation_rate_limited',
-      )
-    }
-  }
-
   app.get(
     `${API_BASE}/health`,
     { schema: httpSchemas.health },
@@ -329,9 +312,12 @@ export async function buildApp(
     ])
 
     const redisStatus = redis.isReady ? 'ok' : 'unavailable'
+    const worker = redis.isReady && await redis.exists(
+      redisKey(config, 'worker:heartbeat'),
+    ) > 0 ? 'ok' : 'unavailable'
     const status =
       postgres === 'ok' && redisStatus === 'ok'
-        && objectStorage !== 'unavailable'
+        && objectStorage !== 'unavailable' && worker === 'ok'
         ? 'ok'
         : postgres === 'ok'
           ? 'degraded'
@@ -350,6 +336,7 @@ export async function buildApp(
         postgres,
         redis: redisStatus,
         objectStorage,
+        worker,
       },
       time: new Date().toISOString(),
     }
@@ -362,7 +349,7 @@ export async function buildApp(
 
   app.get<{
     Params: { chatId: string }
-  }>(`${API_BASE}/chats/:chatId/artifacts`, {
+  }>(`${API_BASE}/conversations/:chatId/artifacts`, {
     schema: {
       params: httpSchemas.chatIdParams,
       response: httpSchemas.artifactListResponse,
@@ -576,16 +563,16 @@ export async function buildApp(
     readArtifactVersion(request, reply, true),
   )
 
-  app.get(`${API_BASE}/chats`, {
+  app.get(`${API_BASE}/conversations`, {
     schema: { response: httpSchemas.chatsResponse },
   }, async (request) => {
     const user = await authenticate(request)
     return {
-      chats: await listChats(database, user.id),
+      conversations: await listChats(database, user.id),
     }
   })
 
-  app.post(`${API_BASE}/chats`, {
+  app.post(`${API_BASE}/conversations`, {
     schema: httpSchemas.createChat,
   }, async (request, reply) => {
     const user = await authenticate(request)
@@ -609,7 +596,7 @@ export async function buildApp(
 
   app.get<{
     Params: { chatId: string }
-  }>(`${API_BASE}/chats/:chatId`, {
+  }>(`${API_BASE}/conversations/:chatId`, {
     schema: {
       params: httpSchemas.chatIdParams,
       response: httpSchemas.chatDetailResponse,
@@ -641,7 +628,7 @@ export async function buildApp(
   app.get<{
     Params: { chatId: string }
     Querystring: { beforeSeq?: string; limit?: string }
-  }>(`${API_BASE}/chats/:chatId/messages`, {
+  }>(`${API_BASE}/conversations/:chatId/messages`, {
     schema: {
       params: httpSchemas.chatIdParams,
       querystring: httpSchemas.messagePageQuery,
@@ -692,7 +679,7 @@ export async function buildApp(
 
   app.patch<{
     Params: { chatId: string }
-  }>(`${API_BASE}/chats/:chatId`, {
+  }>(`${API_BASE}/conversations/:chatId`, {
     schema: {
       params: httpSchemas.chatIdParams,
       body: httpSchemas.renameChat.body,
@@ -741,7 +728,7 @@ export async function buildApp(
 
   app.delete<{
     Params: { chatId: string }
-  }>(`${API_BASE}/chats/:chatId`, {
+  }>(`${API_BASE}/conversations/:chatId`, {
     schema: { params: httpSchemas.chatIdParams },
   }, async (request, reply) => {
     const user = await authenticate(request)
@@ -763,6 +750,76 @@ export async function buildApp(
     }
 
     return reply.code(204).send()
+  })
+
+  app.post<{
+    Params: { chatId: string }
+  }>(`${API_BASE}/conversations/:chatId/share`, {
+    schema: {
+      params: httpSchemas.chatIdParams,
+      body: httpSchemas.shareChat.body,
+      response: httpSchemas.shareChat.response,
+    },
+  }, async (request, reply) => {
+    const user = await authenticate(request)
+    const chatId = requireUuid(request, reply, request.params.chatId, 'chatId')
+    if (!chatId) return
+    const mode = readObjectBody(request).mode
+    if (mode !== 'snapshot' && mode !== 'live') {
+      return reply.code(400).send(
+        errorBody(request, 'invalid_share_mode', 'mode must be snapshot or live'),
+      )
+    }
+    const shared = await shareChat(database, user.id, chatId, mode)
+    if (!shared) {
+      return reply.code(404).send(
+        errorBody(request, 'conversation_not_found', 'Conversation not found'),
+      )
+    }
+    return {
+      ...shared,
+      sharePath: `${APP_BASE}shared/${shared.shareSlug}`,
+    }
+  })
+
+  app.delete<{
+    Params: { chatId: string }
+  }>(`${API_BASE}/conversations/:chatId/share`, {
+    schema: { params: httpSchemas.chatIdParams },
+  }, async (request, reply) => {
+    const user = await authenticate(request)
+    const chatId = requireUuid(request, reply, request.params.chatId, 'chatId')
+    if (!chatId) return
+    if (!await unshareChat(database, user.id, chatId)) {
+      return reply.code(404).send(
+        errorBody(request, 'conversation_not_found', 'Conversation not found'),
+      )
+    }
+    return reply.code(204).send()
+  })
+
+  app.get<{
+    Params: { shareSlug: string }
+  }>(`${API_BASE}/shared/conversations/:shareSlug`, {
+    schema: {
+      params: httpSchemas.shareSlugParams,
+      response: httpSchemas.sharedConversationResponse,
+    },
+  }, async (request, reply) => {
+    const user = await authenticate(request)
+    const shareSlug = request.params.shareSlug
+    if (!/^[A-Za-z0-9_-]{32}$/.test(shareSlug)) {
+      return reply.code(400).send(
+        errorBody(request, 'invalid_share_slug', 'Invalid share identifier'),
+      )
+    }
+    const shared = await getSharedChat(database, user.id, shareSlug)
+    if (!shared) {
+      return reply.code(404).send(
+        errorBody(request, 'shared_conversation_not_found', 'Shared conversation not found'),
+      )
+    }
+    return shared
   })
 
   app.put<{
@@ -828,7 +885,7 @@ export async function buildApp(
 
   app.post<{
     Params: { messageId: string }
-  }>(`${API_BASE}/messages/:messageId/regenerate`, {
+  }>(`${API_BASE}/messages/:messageId/regenerations`, {
     schema: {
       params: httpSchemas.messageIdParams,
       body: httpSchemas.regenerate.body,
@@ -846,8 +903,8 @@ export async function buildApp(
     const requestId = requireUuid(
       request,
       reply,
-      body.requestId,
-      'requestId',
+      request.headers['idempotency-key'],
+      'Idempotency-Key',
     )
     const artifactId = body.artifactId === undefined
       ? undefined
@@ -870,8 +927,6 @@ export async function buildApp(
     }
 
 
-    await enforceGenerationRateLimit(request, reply, user)
-
     const started = await generations.create({
       user,
       chatId: target.chatId,
@@ -888,7 +943,7 @@ export async function buildApp(
   app.post<{
     Params: { chatId: string }
   }>(
-    `${API_BASE}/chats/:chatId/generations`,
+    `${API_BASE}/conversations/:chatId/messages`,
     {
       schema: {
         params: httpSchemas.chatIdParams,
@@ -920,8 +975,8 @@ export async function buildApp(
       const clientMessageId = requireUuid(
         request,
         reply,
-        body.clientMessageId,
-        'clientMessageId',
+        request.headers['idempotency-key'],
+        'Idempotency-Key',
       )
       const artifactId = body.artifactId === undefined
         ? undefined
@@ -951,8 +1006,6 @@ export async function buildApp(
         return
       }
 
-      await enforceGenerationRateLimit(request, reply, user)
-
       const started = await generations.create({
         user,
         chatId,
@@ -969,11 +1022,9 @@ export async function buildApp(
 
   app.get<{
     Params: { generationId: string }
-    Querystring: { resumeAt?: string }
   }>(`${API_BASE}/generations/:generationId/stream`, {
     schema: {
       params: httpSchemas.generationIdParams,
-      querystring: httpSchemas.streamQuery,
     },
   }, async (request, reply) => {
     const user = await authenticate(request)
@@ -1004,18 +1055,57 @@ export async function buildApp(
       )
     }
 
-    const resumeAtRaw = request.query.resumeAt ?? '0'
-    const resumeAt = Number(resumeAtRaw)
+    if ([
+      'completed', 'cancelled', 'failed', 'interrupted', 'timed_out',
+    ].includes(generation.status)) {
+      const assistantMessage = await getGenerationAssistantMessage(
+        database,
+        user.id,
+        generationId,
+      )
+      const payload = {
+        type: 'message.finish',
+        generationId,
+        streamId: generation.streamId,
+        messageId: assistantMessage?.id ?? generationId,
+        eventId: 1,
+        finishReason: generation.status === 'completed'
+          ? 'stop'
+          : generation.status === 'cancelled'
+            ? 'cancelled'
+            : 'error',
+        assistantMessage,
+        ...(generation.status === 'completed' || generation.status === 'cancelled'
+          ? {}
+          : {
+              error: {
+                code: generation.errorCode ?? `generation_${generation.status}`,
+                message: generation.errorMessage ?? 'Generation did not complete',
+              },
+            }),
+      }
+      const body = `id: 0-1\nevent: message.finish\ndata: ${JSON.stringify(payload)}\n\n`
+      return sendStringStream(
+        reply,
+        new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(body)
+            controller.close()
+          },
+        }),
+        generationId,
+        generation.streamId,
+      )
+    }
 
-    if (
-      !Number.isSafeInteger(resumeAt) ||
-      resumeAt < 0
-    ) {
+    const cursor = request.headers['last-event-id'] ?? '0-0'
+
+    if (typeof cursor !== 'string' || !/^\d+-\d+$/.test(cursor)) {
       return reply.code(400).send(
         errorBody(
           request,
           'invalid_request',
-          'resumeAt must be a non-negative integer',
+          'Last-Event-ID must be a Redis Stream ID',
         ),
       )
     }
@@ -1030,29 +1120,7 @@ export async function buildApp(
       )
     }
 
-    const stream = await generations.resume(
-      generation.streamId,
-      resumeAt,
-    )
-
-    if (stream === undefined) {
-      return reply.code(404).send(
-        errorBody(request, 'stream_not_found', 'Stream not found'),
-      )
-    }
-
-    if (stream === null) {
-      return reply.code(410).send(
-        errorBody(
-          request,
-          'stream_completed',
-          'Generation is complete; refetch the chat',
-        ),
-      )
-    }
-
-    const releaseSubscriber = generations.trackSubscriber(generationId)
-    reply.raw.once('close', releaseSubscriber)
+    const stream = streamHub.subscribe(user.id, generationId, cursor)
 
     return sendStringStream(
       reply,
@@ -1069,7 +1137,7 @@ export async function buildApp(
     {
       schema: {
         params: httpSchemas.generationIdParams,
-        response: httpSchemas.generationResponse,
+        response: httpSchemas.generationStatusResponse,
       },
     },
     async (request, reply) => {
@@ -1101,7 +1169,16 @@ export async function buildApp(
         )
       }
 
-      return generation
+      const [assistantMessage, streamAvailable] = await Promise.all([
+        getGenerationAssistantMessage(database, user.id, generationId),
+        redis.isReady
+          ? redis.exists(generationStreamKey(config, user.id, generationId))
+              .then((count) => count > 0)
+              .catch(() => false)
+          : Promise.resolve(false),
+      ])
+
+      return { ...generation, streamAvailable, assistantMessage }
     },
   )
 

@@ -1,133 +1,97 @@
 # 生产部署清单
 
-本文档描述 `bio-chatbot` 的生产发布前置条件、配置、上线步骤和验收标准。
-身份认证细节参见 [deployment-auth.md](deployment-auth.md)，对象存储配置参见
-[object-storage.md](object-storage.md)。
+本版本采用 `Fastify API × 1 + Scheduler/Worker × 1`。PostgreSQL 和 Redis 均按总连接数约 10 的环境设计。
 
-## 基础设施前置条件
+## 破坏性数据库基线变更
 
-- 使用 Node.js 22 构建，或直接使用仓库 `Dockerfile` 构建镜像。
-- PostgreSQL 和 Redis 必须可从应用容器访问；生产环境不要使用开发环境数据库或
-  Redis key prefix。
-- 公网流量必须先经过 GPAS2 的 HTTPS 反向代理，不能直接暴露 Fastify 的 8090
-  端口。
-- `compose.yaml` 使用外部网络 `chatbot-backend`。部署前创建该网络，并按实际主机
-  修改端口绑定地址。
-- 若启用 Artifact Protocol，必须先提供可用的私有 S3/SeaweedFS bucket。不能在
-  对象存储不健康时启用 Artifact。
+本次只提供全新数据库基线，不支持从旧表结构迁移数据。上线前必须备份旧数据库，然后创建新的空数据库或空 `public` schema。初始化命令会检测现有 public 表并拒绝覆盖：
 
-## 必需配置
+```bash
+npm run db:init
+```
 
-生产密钥放在仓库外部、权限受限的 env 文件中，不要提交 `.env`。至少配置：
+初始化脚本为 `src/server/initDatabase.ts`，实际基线为 `drizzle/0000_multitenant_queue_baseline.sql`。首次初始化后，未来增量变更才使用 `npm run db:migrate`。
+
+## 连接预算
+
+| 进程 | PostgreSQL max | Redis 连接 |
+|---|---:|---:|
+| API | 4 | 2 |
+| Worker | 4 | 2 |
+| 迁移/运维预留 | 2 | 6 |
+
+不要在增加实例数量时继续为每个实例配置 `PG_POOL_MAX=4`，必须重新计算数据库总连接预算。
+
+## 关键环境变量
 
 ```env
 NODE_ENV=production
-DATABASE_URL=postgresql://<user>:<password>@<postgres-host>:5432/<database>
-REDIS_URL=redis://<redis-host>:6379/0
-REDIS_KEY_PREFIX=gpas2cb:prod:v2:
+DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<database>
+API_PG_POOL_MAX=4
+WORKER_PG_POOL_MAX=4
+
+REDIS_URL=redis://<host>:6379/0
+REDIS_KEY_PREFIX=gpas2cb:prod:v3:
+
+GLOBAL_GENERATION_CONCURRENCY=4
+PROVIDER_GENERATION_CONCURRENCY=4
+MODEL_GENERATION_CONCURRENCY=4
+GENERATION_TIMEOUT_MS=180000
+GENERATION_LOCK_LEASE_MS=30000
+GENERATION_LOCK_RENEW_INTERVAL_MS=10000
+GENERATION_CANCEL_POLL_INTERVAL_MS=300
+GENERATION_SNAPSHOT_INTERVAL_MS=1000
 
 QWEN_API_KEY=<secret>
-QWEN_BASE_URL=https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-QWEN_MODEL=qwen3.8-max-preview
+QWEN_BASE_URL=<openai-compatible-base-url>
+QWEN_MODEL=<model>
 
 GPAS2_AUTH_MODE=upstream
-GPAS2_USER_INFO_URL=https://<internal-gpas-host>/api/gpas2/v1/user/info
-
-# 必填。只填写实际连接 Fastify 的 Nginx/Gateway 地址或 CIDR。
-TRUSTED_PROXY_CIDRS=<proxy-ip-or-cidr>
-GENERATION_DISCONNECT_GRACE_SECONDS=45
+GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
+TRUSTED_PROXY_CIDRS=<direct-proxy-ip-or-cidr>
 ```
 
-生产环境缺少 `TRUSTED_PROXY_CIDRS` 时应用会拒绝启动，Compose 也会在变量展开阶段
-报错。这可以防止所有用户意外共享代理 IP 的生成限流额度。该值必须是 Fastify
-实际看到的直连代理 socket 地址或最小 CIDR；在 Docker 网络中，它不一定等于代理的
-公网地址。不要为了省事填写 `true`、`0.0.0.0/0`、`::/0`、整个容器网络或其他
-不受控网段，其中两个全地址 CIDR 会被应用明确拒绝。
+不要配置旧变量 `GENERATION_DISCONNECT_GRACE_SECONDS`。SSE 断开永远不会自动取消后台 Generation。
 
-单层 Nginx 应覆盖客户端传入的地址头，避免攻击者注入伪造链：
-
-```nginx
-proxy_set_header X-Real-IP $remote_addr;
-proxy_set_header X-Forwarded-For $remote_addr;
-proxy_set_header X-Forwarded-Proto $scheme;
-```
-
-只有存在多层、全部受控且全部列入信任边界的代理链时，才应采用追加
-`X-Forwarded-For` 的配置。修改网络拓扑后必须重新确认 Fastify 看到的直连地址，
-并同步更新 `TRUSTED_PROXY_CIDRS`。
-
-`GENERATION_DISCONNECT_GRACE_SECONDS` 是 SSE 客户端断开后的恢复窗口。窗口内允许
-页面刷新或网络重连；窗口结束仍无订阅者时，服务端取消上游模型请求。建议保持默认
-45 秒，再根据实际移动网络和代理超时指标调整。
-
-## Artifact 与对象存储
-
-不使用 Artifact 时保持：
-
-```env
-ARTIFACT_PROTOCOL_ENABLED=false
-OBJECT_STORAGE_ENABLED=false
-```
-
-启用时两个开关必须同时为 `true`，并完整配置 S3。生产 `S3_ENDPOINT` 必须使用
-HTTPS，且必须是容器可访问的地址，不能填写 `127.0.0.1`：
-
-```env
-ARTIFACT_PROTOCOL_ENABLED=true
-OBJECT_STORAGE_ENABLED=true
-S3_ENDPOINT=https://<s3-gateway>
-S3_REGION=us-east-1
-S3_BUCKET=<private-bucket>
-S3_ACCESS_KEY_ID=<access-key>
-S3_SECRET_ACCESS_KEY=<secret-key>
-S3_FORCE_PATH_STYLE=true
-S3_MAX_ATTEMPTS=3
-```
-
-发布前必须执行 `npm run storage:check`。它需要同时确认签名访问成功和匿名访问被
-拒绝。`/ai-chatbot/api/health` 中 `dependencies.objectStorage` 必须为 `ok`；若为
-`unavailable`，健康检查会返回 HTTP 503；停止发布并修复网络、TLS、bucket 或 IAM。Artifact-only 回复依赖对象
-存储持久化，当前服务会在保存失败时明确将生成标记为失败，绝不会再产生无消息的
-`completed` 状态。
-
-## 构建与上线顺序
+## 构建和启动
 
 ```bash
 npm ci
 npm test
 npm run check
+npm run db:check
 npm run build
+
 docker compose --env-file /secure/path/bio-chatbot.env build app
-docker compose --env-file /secure/path/bio-chatbot.env run --rm app node dist/server/migrate.js
-docker compose --env-file /secure/path/bio-chatbot.env up -d app
+docker compose --env-file /secure/path/bio-chatbot.env run --rm app node dist/server/initDatabase.js
+docker compose --env-file /secure/path/bio-chatbot.env up -d app worker
 ```
 
-先迁移数据库，再替换应用。不要在多个发布任务中并发执行迁移。发布工具可以运行
-`docker compose config` 做配置校验，但不要把包含密钥的展开结果写入日志或构建产物。
+`db:init` 只能执行一次。API 和 Worker 都只校验 schema，不会在启动时并发执行迁移。
 
-反向代理必须保留 `/ai-chatbot/*` URI 和 Cookie，并为 SSE 设置：
+## 反向代理
 
-- 关闭响应缓冲；
-- 足够长的 read timeout；
-- 禁止中间层压缩或聚合事件流；
-- 将客户端地址转发给应用，同时只允许 `TRUSTED_PROXY_CIDRS` 中的代理设置相关
-  Header。
+必须保留 `/ai-chatbot/*` 路径和认证 Cookie，并为 SSE：
 
-## 发布后验收
+- 关闭代理缓冲与压缩聚合；
+- 设置长 read timeout；
+- 透传 `Last-Event-ID`；
+- 不把浏览器断开转化为 Generation Cancel；
+- 只信任 `TRUSTED_PROXY_CIDRS` 中直接连接 Fastify 的代理。
 
-1. `GET /ai-chatbot/api/health` 返回 PostgreSQL、Redis 为 `ok`；启用 Artifact 时
-   object storage 也必须为 `ok`。
-2. 无 Cookie 请求 `/ai-chatbot/api/me` 返回 401；有效 GPAS2 Cookie 返回当前用户。
-3. 创建普通文本会话，确认 SSE 中出现 `message.delta` 和带非空
-   `assistantMessage` 的 `message.finish`，刷新页面后回复仍存在。
-4. 启用 Artifact 时分别创建 Markdown/代码 Artifact，确认卡片可预览、下载，并在
-   刷新后仍可重新加载。
-5. 测试刷新页面和短暂断网后的流恢复；超过恢复窗口后确认上游生成被取消。
-6. 检查限流使用真实客户端 IP，而不是代理 IP 或可伪造的 Header。
-   从非可信地址直接请求 Fastify 并携带伪造 `X-Forwarded-For`，确认应用忽略该头；
-   再通过可信代理请求，确认不同客户端进入不同 IP 限流桶。
-7. 检查应用和代理日志，确保 Cookie、数据库 URL、Qwen key 和 S3 credential 未被
-   输出。
+应用响应已设置 `X-Accel-Buffering: no`，并每 15 秒发送 SSE heartbeat。
 
-回滚应用镜像前应确认旧版本兼容已执行的 Drizzle migration。数据库迁移不能通过
-删除生产数据回滚；需要为不兼容变更准备显式的向前修复 migration。
+## 上线验收
+
+1. `/ai-chatbot/api/health` 返回 PostgreSQL、Redis、Worker 为 `ok`。
+2. 无 GPAS2 Cookie 的受保护请求返回 401；有效 Cookie 返回当前 User。
+3. 使用同一个 `Idempotency-Key` 重试发送消息，不产生重复消息或 Generation。
+4. 同一会话连续提交多条消息，Assistant 回答按 `seq` 串行完成。
+5. 两个不同 User 同时排队时，低权重 User 不会被高权重 User 永久阻塞。
+6. 生成中刷新页面，Worker 继续运行，浏览器用 `Last-Event-ID` 恢复。
+7. 点击 Stop 后 PostgreSQL 最终为 `cancelled`，部分回答刷新后仍可读取。
+8. 杀死未调用 Provider 的 Worker 后任务重新排队；杀死已调用 Provider 的 Worker 后任务变为 `interrupted`，不会自动重复调用。
+9. Redis Stream 过期后，completed/cancelled/failed 结果仍由 PostgreSQL 返回。
+10. 分享链接只有已认证用户可读取，撤销立即生效，读取产生审计记录。
+
+若启用 Artifact Protocol，还必须按 [object-storage.md](object-storage.md) 完成私有 S3/SeaweedFS 校验。

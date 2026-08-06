@@ -1,5 +1,5 @@
 {
-  "id": "1a7aefb0-a531-43f4-95d4-8ae9b439427d",
+  "id": "7dc5ec04-6dc9-4f9e-9985-dab01545b4d2",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -25,7 +25,7 @@
           "name": "userId",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "externalJobId": {
           "name": "externalJobId",
@@ -307,7 +307,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "AnalysisJob_originToolRunId_ToolRun_id_fk": {
@@ -322,10 +322,49 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "fk_analysis_job_user_chat": {
+          "name": "fk_analysis_job_user_chat",
+          "tableFrom": "AnalysisJob",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "userId",
+            "chatId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_analysis_job_user_tool_run": {
+          "name": "fk_analysis_job_user_tool_run",
+          "tableFrom": "AnalysisJob",
+          "tableTo": "ToolRun",
+          "columnsFrom": [
+            "userId",
+            "originToolRunId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "uq_analysis_job_user_id": {
+          "name": "uq_analysis_job_user_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "userId",
+            "id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "chk_job_status": {
@@ -339,6 +378,304 @@
         "chk_job_attempt": {
           "name": "chk_job_attempt",
           "value": "\"AnalysisJob\".\"attempt\" >= 0 and \"AnalysisJob\".\"maxAttempts\" >= 1\n        and \"AnalysisJob\".\"attempt\" <= \"AnalysisJob\".\"maxAttempts\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.ArtifactVersion": {
+      "name": "ArtifactVersion",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "artifactId": {
+          "name": "artifactId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "parentVersion": {
+          "name": "parentVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mimeType": {
+          "name": "mimeType",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "language": {
+          "name": "language",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "storageProvider": {
+          "name": "storageProvider",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storageKey": {
+          "name": "storageKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "contentHash": {
+          "name": "contentHash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "byteLength": {
+          "name": "byteLength",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sourceMessageId": {
+          "name": "sourceMessageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sourceGenerationId": {
+          "name": "sourceGenerationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "streamArtifactId": {
+          "name": "streamArtifactId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdBy": {
+          "name": "createdBy",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_artifact_version_history": {
+          "name": "idx_artifact_version_history",
+          "columns": [
+            {
+              "expression": "artifactId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "version",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_artifact_version_message": {
+          "name": "idx_artifact_version_message",
+          "columns": [
+            {
+              "expression": "sourceMessageId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "ArtifactVersion_userId_User_id_fk": {
+          "name": "ArtifactVersion_userId_User_id_fk",
+          "tableFrom": "ArtifactVersion",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ArtifactVersion_artifactId_Artifact_id_fk": {
+          "name": "ArtifactVersion_artifactId_Artifact_id_fk",
+          "tableFrom": "ArtifactVersion",
+          "tableTo": "Artifact",
+          "columnsFrom": [
+            "artifactId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ArtifactVersion_sourceMessageId_Message_id_fk": {
+          "name": "ArtifactVersion_sourceMessageId_Message_id_fk",
+          "tableFrom": "ArtifactVersion",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "sourceMessageId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "ArtifactVersion_sourceGenerationId_Generation_id_fk": {
+          "name": "ArtifactVersion_sourceGenerationId_Generation_id_fk",
+          "tableFrom": "ArtifactVersion",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "sourceGenerationId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "fk_artifact_version_user_artifact": {
+          "name": "fk_artifact_version_user_artifact",
+          "tableFrom": "ArtifactVersion",
+          "tableTo": "Artifact",
+          "columnsFrom": [
+            "userId",
+            "artifactId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_artifact_version_user_message": {
+          "name": "fk_artifact_version_user_message",
+          "tableFrom": "ArtifactVersion",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "userId",
+            "sourceMessageId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_artifact_version_user_generation": {
+          "name": "fk_artifact_version_user_generation",
+          "tableFrom": "ArtifactVersion",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "userId",
+            "sourceGenerationId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_artifact_version": {
+          "name": "uq_artifact_version",
+          "nullsNotDistinct": false,
+          "columns": [
+            "artifactId",
+            "version"
+          ]
+        },
+        "uq_artifact_version_storage": {
+          "name": "uq_artifact_version_storage",
+          "nullsNotDistinct": false,
+          "columns": [
+            "storageProvider",
+            "storageKey"
+          ]
+        },
+        "uq_artifact_generation_stream": {
+          "name": "uq_artifact_generation_stream",
+          "nullsNotDistinct": false,
+          "columns": [
+            "sourceGenerationId",
+            "streamArtifactId"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_artifact_version_number": {
+          "name": "chk_artifact_version_number",
+          "value": "\"ArtifactVersion\".\"version\" >= 1"
+        },
+        "chk_artifact_parent_version": {
+          "name": "chk_artifact_parent_version",
+          "value": "\"ArtifactVersion\".\"parentVersion\" is null or \"ArtifactVersion\".\"parentVersion\" >= 1"
+        },
+        "chk_artifact_version_bytes": {
+          "name": "chk_artifact_version_bytes",
+          "value": "\"ArtifactVersion\".\"byteLength\" >= 0"
+        },
+        "chk_artifact_version_hash": {
+          "name": "chk_artifact_version_hash",
+          "value": "\"ArtifactVersion\".\"contentHash\" ~ '^[a-f0-9]{64}$'"
+        },
+        "chk_artifact_version_creator": {
+          "name": "chk_artifact_version_creator",
+          "value": "\"ArtifactVersion\".\"createdBy\" in ('assistant', 'user')"
         }
       },
       "isRLSEnabled": false
@@ -358,7 +695,7 @@
           "name": "userId",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "chatId": {
           "name": "chatId",
@@ -383,6 +720,19 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "logicalId": {
+          "name": "logicalId",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "currentVersion": {
+          "name": "currentVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "title": {
           "name": "title",
@@ -518,6 +868,34 @@
           "method": "btree",
           "with": {}
         },
+        "uq_artifact_chat_logical_id": {
+          "name": "uq_artifact_chat_logical_id",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "chatId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "logicalId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"Artifact\".\"logicalId\" is not null and \"Artifact\".\"deletedAt\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "idx_artifact_user": {
           "name": "idx_artifact_user",
           "columns": [
@@ -638,7 +1016,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "Artifact_chatId_Chat_id_fk": {
@@ -707,10 +1085,79 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "fk_artifact_user_chat": {
+          "name": "fk_artifact_user_chat",
+          "tableFrom": "Artifact",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "userId",
+            "chatId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_artifact_user_message": {
+          "name": "fk_artifact_user_message",
+          "tableFrom": "Artifact",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "userId",
+            "messageId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_artifact_user_generation": {
+          "name": "fk_artifact_user_generation",
+          "tableFrom": "Artifact",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "userId",
+            "generationId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_artifact_user_analysis_job": {
+          "name": "fk_artifact_user_analysis_job",
+          "tableFrom": "Artifact",
+          "tableTo": "AnalysisJob",
+          "columnsFrom": [
+            "userId",
+            "analysisJobId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "uq_artifact_user_id": {
+          "name": "uq_artifact_user_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "userId",
+            "id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "chk_artifact_type": {
@@ -719,11 +1166,19 @@
         },
         "chk_artifact_format": {
           "name": "chk_artifact_format",
-          "value": "\"Artifact\".\"format\" in ('html', 'markdown', 'pdf', 'csv', 'xlsx', 'json', 'png', 'jpeg', 'svg')"
+          "value": "\"Artifact\".\"format\" in ('html', 'markdown', 'text', 'code', 'mermaid', 'pdf', 'csv', 'xlsx', 'json', 'png', 'jpeg', 'svg')"
         },
         "chk_artifact_status": {
           "name": "chk_artifact_status",
-          "value": "\"Artifact\".\"status\" in ('generating', 'ready', 'failed', 'expired')"
+          "value": "\"Artifact\".\"status\" in ('generating', 'ready', 'failed', 'expired', 'archived', 'deleted')"
+        },
+        "chk_artifact_current_version": {
+          "name": "chk_artifact_current_version",
+          "value": "\"Artifact\".\"currentVersion\" >= 0"
+        },
+        "chk_artifact_logical_id": {
+          "name": "chk_artifact_logical_id",
+          "value": "\"Artifact\".\"logicalId\" is null or \"Artifact\".\"logicalId\" ~ '^[a-z0-9][a-z0-9._-]{0,63}$'"
         },
         "chk_artifact_size": {
           "name": "chk_artifact_size",
@@ -905,6 +1360,14 @@
           "columns": [
             "storageProvider",
             "storageKey"
+          ]
+        },
+        "uq_attachment_user_id": {
+          "name": "uq_attachment_user_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "userId",
+            "id"
           ]
         }
       },
@@ -1317,10 +1780,34 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "fk_chat_user_fork": {
+          "name": "fk_chat_user_fork",
+          "tableFrom": "Chat",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "userId",
+            "forkedFromChatId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "uq_chat_user_id": {
+          "name": "uq_chat_user_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "userId",
+            "id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "chk_chat_status": {
@@ -1369,25 +1856,25 @@
           "name": "chatId",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "userId": {
           "name": "userId",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "userMessageId": {
           "name": "userMessageId",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "assistantMessageId": {
           "name": "assistantMessageId",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "supersedesGenerationId": {
           "name": "supersedesGenerationId",
@@ -1404,6 +1891,12 @@
         "model": {
           "name": "model",
           "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "streamId": {
+          "name": "streamId",
+          "type": "varchar(256)",
           "primaryKey": false,
           "notNull": true
         },
@@ -1424,7 +1917,45 @@
           "type": "varchar(20)",
           "primaryKey": false,
           "notNull": true,
-          "default": "'pending'"
+          "default": "'created'"
+        },
+        "priority": {
+          "name": "priority",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "attempt": {
+          "name": "attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "workerId": {
+          "name": "workerId",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "providerRequestStartedAt": {
+          "name": "providerRequestStartedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "queuedAt": {
+          "name": "queuedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scheduledAt": {
+          "name": "scheduledAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "startedAt": {
           "name": "startedAt",
@@ -1553,6 +2084,22 @@
           "method": "btree",
           "with": {}
         },
+        "idx_generation_completed_supersedes": {
+          "name": "idx_generation_completed_supersedes",
+          "columns": [
+            {
+              "expression": "supersedesGenerationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"Generation\".\"supersedesGenerationId\" is not null and \"Generation\".\"status\" = 'completed'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "idx_generation_user_created": {
           "name": "idx_generation_user_created",
           "columns": [
@@ -1635,7 +2182,6 @@
             }
           ],
           "isUnique": true,
-          "where": "\"Generation\".\"assistantMessageId\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1651,7 +2197,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"Generation\".\"chatId\" is not null and \"Generation\".\"status\" in ('pending', 'streaming')\n          and \"Generation\".\"cancelRequestedAt\" is null",
+          "where": "\"Generation\".\"status\" in ('scheduled', 'running', 'cancelling')",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1668,7 +2214,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "Generation_userId_User_id_fk": {
@@ -1681,7 +2227,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "Generation_userMessageId_Message_id_fk": {
@@ -1694,7 +2240,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         },
         "Generation_assistantMessageId_Message_id_fk": {
@@ -1707,7 +2253,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         },
         "Generation_supersedesGenerationId_Generation_id_fk": {
@@ -1722,15 +2268,114 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "fk_generation_user_chat": {
+          "name": "fk_generation_user_chat",
+          "tableFrom": "Generation",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "userId",
+            "chatId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_generation_user_message": {
+          "name": "fk_generation_user_message",
+          "tableFrom": "Generation",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "userId",
+            "userMessageId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_generation_assistant_message": {
+          "name": "fk_generation_assistant_message",
+          "tableFrom": "Generation",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "userId",
+            "assistantMessageId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_generation_user_supersedes": {
+          "name": "fk_generation_user_supersedes",
+          "tableFrom": "Generation",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "userId",
+            "supersedesGenerationId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_generation_chat_supersedes": {
+          "name": "fk_generation_chat_supersedes",
+          "tableFrom": "Generation",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "chatId",
+            "supersedesGenerationId"
+          ],
+          "columnsTo": [
+            "chatId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "uq_generation_request_id": {
-          "name": "uq_generation_request_id",
+        "uq_generation_user_request_id": {
+          "name": "uq_generation_user_request_id",
           "nullsNotDistinct": false,
           "columns": [
+            "userId",
             "requestId"
+          ]
+        },
+        "uq_generation_user_id": {
+          "name": "uq_generation_user_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "userId",
+            "id"
+          ]
+        },
+        "uq_generation_chat_id": {
+          "name": "uq_generation_chat_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "chatId",
+            "id"
+          ]
+        },
+        "uq_generation_stream_id": {
+          "name": "uq_generation_stream_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "streamId"
           ]
         }
       },
@@ -1738,7 +2383,11 @@
       "checkConstraints": {
         "chk_generation_status": {
           "name": "chk_generation_status",
-          "value": "\"Generation\".\"status\" in ('pending', 'streaming', 'completed', 'failed', 'cancelled')"
+          "value": "\"Generation\".\"status\" in (\n        'created', 'queued', 'scheduled', 'running', 'cancelling',\n        'completed', 'cancelled', 'failed', 'interrupted', 'timed_out'\n      )"
+        },
+        "chk_generation_attempt": {
+          "name": "chk_generation_attempt",
+          "value": "\"Generation\".\"attempt\" >= 0"
         },
         "chk_generation_tokens": {
           "name": "chk_generation_tokens",
@@ -1762,7 +2411,7 @@
         },
         "chk_generation_finished_at": {
           "name": "chk_generation_finished_at",
-          "value": "(\"Generation\".\"status\" in ('completed', 'failed', 'cancelled') and \"Generation\".\"finishedAt\" is not null)\n        or (\"Generation\".\"status\" in ('pending', 'streaming') and \"Generation\".\"finishedAt\" is null)"
+          "value": "(\"Generation\".\"status\" in ('completed', 'failed', 'cancelled', 'interrupted', 'timed_out') and \"Generation\".\"finishedAt\" is not null)\n        or (\"Generation\".\"status\" in ('created', 'queued', 'scheduled', 'running', 'cancelling') and \"Generation\".\"finishedAt\" is null)"
         }
       },
       "isRLSEnabled": false
@@ -1775,6 +2424,12 @@
           "name": "id",
           "type": "bigserial",
           "primaryKey": true,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
           "notNull": true
         },
         "jobId": {
@@ -1828,6 +2483,19 @@
         }
       },
       "foreignKeys": {
+        "JobEvent_userId_User_id_fk": {
+          "name": "JobEvent_userId_User_id_fk",
+          "tableFrom": "JobEvent",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
         "JobEvent_jobId_AnalysisJob_id_fk": {
           "name": "JobEvent_jobId_AnalysisJob_id_fk",
           "tableFrom": "JobEvent",
@@ -1839,6 +2507,21 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "fk_job_event_user_job": {
+          "name": "fk_job_event_user_job",
+          "tableFrom": "JobEvent",
+          "tableTo": "AnalysisJob",
+          "columnsFrom": [
+            "userId",
+            "jobId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -1852,6 +2535,12 @@
       "name": "MessageAttachment",
       "schema": "",
       "columns": {
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
         "messageId": {
           "name": "messageId",
           "type": "uuid",
@@ -1890,6 +2579,19 @@
         }
       },
       "foreignKeys": {
+        "MessageAttachment_userId_User_id_fk": {
+          "name": "MessageAttachment_userId_User_id_fk",
+          "tableFrom": "MessageAttachment",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
         "MessageAttachment_messageId_Message_id_fk": {
           "name": "MessageAttachment_messageId_Message_id_fk",
           "tableFrom": "MessageAttachment",
@@ -1914,6 +2616,36 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "fk_message_attachment_user_message": {
+          "name": "fk_message_attachment_user_message",
+          "tableFrom": "MessageAttachment",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "userId",
+            "messageId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_message_attachment_user_attachment": {
+          "name": "fk_message_attachment_user_attachment",
+          "tableFrom": "MessageAttachment",
+          "tableTo": "Attachment",
+          "columnsFrom": [
+            "userId",
+            "attachmentId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -1956,11 +2688,23 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
         "chatId": {
           "name": "chatId",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
+        },
+        "generationId": {
+          "name": "generationId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         },
         "seq": {
           "name": "seq",
@@ -1980,6 +2724,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'completed'"
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "parts": {
           "name": "parts",
@@ -2016,6 +2766,22 @@
         }
       },
       "indexes": {
+        "uq_message_generation": {
+          "name": "uq_message_generation",
+          "columns": [
+            {
+              "expression": "generationId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"Message\".\"generationId\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "uq_message_client_id": {
           "name": "uq_message_client_id",
           "columns": [
@@ -2040,6 +2806,19 @@
         }
       },
       "foreignKeys": {
+        "Message_userId_User_id_fk": {
+          "name": "Message_userId_User_id_fk",
+          "tableFrom": "Message",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
         "Message_chatId_Chat_id_fk": {
           "name": "Message_chatId_Chat_id_fk",
           "tableFrom": "Message",
@@ -2052,6 +2831,21 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        },
+        "fk_message_user_chat": {
+          "name": "fk_message_user_chat",
+          "tableFrom": "Message",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "userId",
+            "chatId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2062,6 +2856,14 @@
           "columns": [
             "chatId",
             "seq"
+          ]
+        },
+        "uq_message_user_id": {
+          "name": "uq_message_user_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "userId",
+            "id"
           ]
         },
         "uq_message_id_chat": {
@@ -2085,7 +2887,7 @@
         },
         "chk_message_status": {
           "name": "chk_message_status",
-          "value": "(\n        (\"Message\".\"role\" = 'assistant' and \"Message\".\"status\" in ('completed', 'cancelled', 'failed'))\n        or (\"Message\".\"role\" <> 'assistant' and \"Message\".\"status\" = 'completed')\n      )"
+          "value": "(\n        (\"Message\".\"role\" = 'assistant' and \"Message\".\"status\" in ('pending', 'streaming', 'completed', 'cancelled', 'failed'))\n        or (\"Message\".\"role\" <> 'assistant' and \"Message\".\"status\" = 'completed')\n      )"
         },
         "chk_message_shared_text": {
           "name": "chk_message_shared_text",
@@ -2094,8 +2896,8 @@
       },
       "isRLSEnabled": false
     },
-    "public.Stream": {
-      "name": "Stream",
+    "public.OutboxEvent": {
+      "name": "OutboxEvent",
       "schema": "",
       "columns": {
         "id": {
@@ -2105,11 +2907,62 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "generationId": {
-          "name": "generationId",
+        "userId": {
+          "name": "userId",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "aggregateId": {
+          "name": "aggregateId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "availableAt": {
+          "name": "availableAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "publishedAt": {
+          "name": "publishedAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lastError": {
+          "name": "lastError",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "createdAt": {
           "name": "createdAt",
@@ -2118,35 +2971,53 @@
           "notNull": true,
           "default": "now()"
         },
-        "expiresAt": {
-          "name": "expiresAt",
+        "updatedAt": {
+          "name": "updatedAt",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "default": "now() + interval '24 hours'"
+          "default": "now()"
         }
       },
       "indexes": {
-        "uq_stream_generation": {
-          "name": "uq_stream_generation",
+        "idx_outbox_pending": {
+          "name": "idx_outbox_pending",
           "columns": [
             {
-              "expression": "generationId",
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "availableAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             }
           ],
-          "isUnique": true,
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
         },
-        "idx_stream_expiry": {
-          "name": "idx_stream_expiry",
+        "idx_outbox_aggregate": {
+          "name": "idx_outbox_aggregate",
           "columns": [
             {
-              "expression": "expiresAt",
+              "expression": "aggregateId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2159,12 +3030,12 @@
         }
       },
       "foreignKeys": {
-        "Stream_generationId_Generation_id_fk": {
-          "name": "Stream_generationId_Generation_id_fk",
-          "tableFrom": "Stream",
-          "tableTo": "Generation",
+        "OutboxEvent_userId_User_id_fk": {
+          "name": "OutboxEvent_userId_User_id_fk",
+          "tableFrom": "OutboxEvent",
+          "tableTo": "User",
           "columnsFrom": [
-            "generationId"
+            "userId"
           ],
           "columnsTo": [
             "id"
@@ -2177,9 +3048,13 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "chk_stream_expiry": {
-          "name": "chk_stream_expiry",
-          "value": "\"Stream\".\"expiresAt\" > \"Stream\".\"createdAt\""
+        "chk_outbox_status": {
+          "name": "chk_outbox_status",
+          "value": "\"OutboxEvent\".\"status\" in ('pending', 'published', 'failed')"
+        },
+        "chk_outbox_attempts": {
+          "name": "chk_outbox_attempts",
+          "value": "\"OutboxEvent\".\"attempts\" >= 0"
         }
       },
       "isRLSEnabled": false
@@ -2194,6 +3069,12 @@
           "primaryKey": true,
           "notNull": true,
           "default": "gen_random_uuid()"
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
         },
         "generationId": {
           "name": "generationId",
@@ -2319,6 +3200,19 @@
         }
       },
       "foreignKeys": {
+        "ToolRun_userId_User_id_fk": {
+          "name": "ToolRun_userId_User_id_fk",
+          "tableFrom": "ToolRun",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
         "ToolRun_generationId_Generation_id_fk": {
           "name": "ToolRun_generationId_Generation_id_fk",
           "tableFrom": "ToolRun",
@@ -2331,10 +3225,34 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        },
+        "fk_tool_run_user_generation": {
+          "name": "fk_tool_run_user_generation",
+          "tableFrom": "ToolRun",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "userId",
+            "generationId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "uq_tool_run_user_id": {
+          "name": "uq_tool_run_user_id",
+          "nullsNotDistinct": false,
+          "columns": [
+            "userId",
+            "id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "chk_tool_run_status": {
@@ -2463,6 +3381,21 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "fk_usage_user_generation": {
+          "name": "fk_usage_user_generation",
+          "tableFrom": "UsageEvent",
+          "tableTo": "Generation",
+          "columnsFrom": [
+            "userId",
+            "generationId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2553,6 +3486,34 @@
           "primaryKey": false,
           "notNull": false
         },
+        "serviceTier": {
+          "name": "serviceTier",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'free'"
+        },
+        "schedulingWeight": {
+          "name": "schedulingWeight",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "generationConcurrencyLimit": {
+          "name": "generationConcurrencyLimit",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "maxQueuedGenerations": {
+          "name": "maxQueuedGenerations",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 5
+        },
         "createdAt": {
           "name": "createdAt",
           "type": "timestamp with time zone",
@@ -2604,7 +3565,24 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_user_service_tier": {
+          "name": "chk_user_service_tier",
+          "value": "\"User\".\"serviceTier\" in ('free', 'pro', 'enterprise')"
+        },
+        "chk_user_scheduling_weight": {
+          "name": "chk_user_scheduling_weight",
+          "value": "\"User\".\"schedulingWeight\" >= 1"
+        },
+        "chk_user_generation_concurrency": {
+          "name": "chk_user_generation_concurrency",
+          "value": "\"User\".\"generationConcurrencyLimit\" >= 1"
+        },
+        "chk_user_max_queued_generations": {
+          "name": "chk_user_max_queued_generations",
+          "value": "\"User\".\"maxQueuedGenerations\" >= 1"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.Vote": {
@@ -2670,6 +3648,21 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "fk_vote_user_message": {
+          "name": "fk_vote_user_message",
+          "tableFrom": "Vote",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "userId",
+            "messageId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },

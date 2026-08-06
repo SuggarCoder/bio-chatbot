@@ -35,9 +35,10 @@ import type {
 } from './domain.js'
 import {
   chats,
+  auditLogs,
   generations,
   messages,
-  streams,
+  outboxEvents,
   usageEvents,
   users,
   votes,
@@ -59,6 +60,7 @@ type MessageRow = {
   seq: bigint
   role: string
   status: string
+  content?: string | null
   parts: MessagePart[]
   createdAt: Date
   isUpvoted?: boolean | null
@@ -94,6 +96,7 @@ const chatSelection = {
 const generationColumns = {
   id: generations.id,
   chatId: generations.chatId,
+  streamId: generations.streamId,
   status: generations.status,
   provider: generations.provider,
   model: generations.model,
@@ -159,9 +162,16 @@ export async function syncUser(
       name: users.name,
       image: users.image,
       gpas2Role: users.gpas2Role,
+      serviceTier: users.serviceTier,
+      schedulingWeight: users.schedulingWeight,
+      generationConcurrencyLimit: users.generationConcurrencyLimit,
+      maxQueuedGenerations: users.maxQueuedGenerations,
     })
 
-  return row
+  return {
+    ...row,
+    serviceTier: row.serviceTier as CurrentUser['serviceTier'],
+  }
 }
 
 function mapChat(row: typeof chats.$inferSelect): ChatSummaryDto {
@@ -272,7 +282,7 @@ export function mapMessage(row: MessageRow): ChatMessageDto {
       })
   }
   parts.sort((left, right) => left.order - right.order)
-  const content = parts
+  const content = row.content ?? parts
     .filter((part) => part.type === 'text')
     .map((part) => part.text)
     .join('')
@@ -314,11 +324,7 @@ function mapGeneration(row: GenerationRow): GenerationDto {
     chatId: row.chatId,
     streamId: row.streamId,
     status,
-    effectiveStatus:
-      !['completed', 'failed', 'cancelled'].includes(status) &&
-      row.cancelRequestedAt
-        ? 'cancelling'
-        : status,
+    effectiveStatus: status,
     provider: row.provider,
     model: row.model,
     inputTokens: toSafeNumber(row.inputTokens, 'Generation.inputTokens'),
@@ -363,19 +369,23 @@ export async function getChatDetail(
     database
       .select({
         id: generations.id,
-        streamId: streams.id,
+        streamId: generations.streamId,
         status: generations.status,
         replacesMessageId: replaced.assistantMessageId,
       })
       .from(generations)
-      .innerJoin(streams, eq(streams.generationId, generations.id))
       .leftJoin(replaced, eq(replaced.id, generations.supersedesGenerationId))
       .where(
         and(
           eq(generations.chatId, chatId),
           eq(generations.userId, userId),
-          inArray(generations.status, ['pending', 'streaming']),
-          isNull(generations.cancelRequestedAt),
+          inArray(generations.status, [
+            'created',
+            'queued',
+            'scheduled',
+            'running',
+            'cancelling',
+          ]),
         ),
       )
       .orderBy(desc(generations.createdAt))
@@ -417,12 +427,14 @@ async function queryChatMessagesPage(
     .where(
       and(
         eq(original.chatId, chatId),
+        eq(original.userId, userId),
         isNotNull(original.assistantMessageId),
         eq(replacement.status, 'completed'),
       ),
     )
   const conditions = [
     eq(messages.chatId, chatId),
+    eq(messages.userId, userId),
     inArray(messages.role, ['user', 'assistant']),
     notInArray(messages.id, supersededMessageIds),
   ]
@@ -576,13 +588,12 @@ export async function ownsStream(
   streamId: string,
 ): Promise<boolean> {
   const rows = await database
-    .select({ id: streams.id })
-    .from(streams)
-    .innerJoin(generations, eq(generations.id, streams.generationId))
+    .select({ id: generations.id })
+    .from(generations)
     .innerJoin(chats, eq(chats.id, generations.chatId))
     .where(
       and(
-        eq(streams.id, streamId),
+        eq(generations.streamId, streamId),
         eq(generations.userId, userId),
         isNull(chats.deletedAt),
       ),
@@ -595,6 +606,7 @@ export async function ownsStream(
 export type GenerationStart = {
   generationId: string
   streamId: string
+  assistantMessageId: string
   userMessage: ChatMessageDto
   reused: boolean
   status: GenerationDto['status']
@@ -605,7 +617,6 @@ export type GenerationStart = {
 export async function findGenerationStart(
   database: Database,
   userId: string,
-  chatId: string,
   requestId: string,
 ): Promise<GenerationStart | null> {
   const [row] = await database
@@ -618,31 +629,201 @@ export async function findGenerationStart(
       createdAt: messages.createdAt,
       generationId: generations.id,
       generationStatus: generations.status,
-      streamId: streams.id,
+      streamId: generations.streamId,
+      assistantMessageId: generations.assistantMessageId,
+      metadata: generations.metadata,
     })
     .from(generations)
-    .innerJoin(chats, eq(chats.id, generations.chatId))
     .innerJoin(messages, eq(messages.id, generations.userMessageId))
-    .innerJoin(streams, eq(streams.generationId, generations.id))
     .where(
       and(
         eq(generations.requestId, requestId),
-        eq(generations.chatId, chatId),
         eq(generations.userId, userId),
-        isNull(chats.deletedAt),
       ),
     )
     .limit(1)
 
-  return row
-    ? {
-        generationId: row.generationId,
-        streamId: row.streamId,
-        userMessage: mapMessage(row),
-        reused: true,
-        status: row.generationStatus as GenerationDto['status'],
-      }
+  if (!row) return null
+  const metadata = row.metadata as Record<string, unknown>
+  return {
+    generationId: row.generationId,
+    streamId: row.streamId,
+    assistantMessageId: row.assistantMessageId,
+    userMessage: mapMessage(row),
+    reused: true,
+    status: row.generationStatus as GenerationDto['status'],
+    replacesMessageId: typeof metadata.replacesMessageId === 'string'
+      ? metadata.replacesMessageId
+      : undefined,
+  }
+}
+
+export async function shareChat(
+  database: Database,
+  userId: string,
+  chatId: string,
+  mode: 'snapshot' | 'live',
+): Promise<{ shareSlug: string; shareMode: 'snapshot' | 'live' } | null> {
+  const shareSlug = Buffer.from(
+    crypto.getRandomValues(new Uint8Array(24)),
+  ).toString('base64url')
+  const [row] = await database
+    .update(chats)
+    .set({
+      shareScope: 'authenticated',
+      shareMode: mode,
+      sharedThroughSeq: mode === 'snapshot'
+        ? sql`${chats.nextMessageSeq} - 1`
+        : null,
+      sharedAt: sql`now()`,
+      shareSlug,
+      updatedAt: sql`now()`,
+    })
+    .where(and(
+      eq(chats.id, chatId),
+      eq(chats.userId, userId),
+      isNull(chats.deletedAt),
+      sql`${chats.nextMessageSeq} > 1`,
+    ))
+    .returning({
+      shareSlug: chats.shareSlug,
+      shareMode: chats.shareMode,
+    })
+  return row?.shareSlug && (row.shareMode === 'snapshot' || row.shareMode === 'live')
+    ? { shareSlug: row.shareSlug, shareMode: row.shareMode }
     : null
+}
+
+export async function unshareChat(
+  database: Database,
+  userId: string,
+  chatId: string,
+): Promise<boolean> {
+  const rows = await database
+    .update(chats)
+    .set({
+      shareScope: 'private',
+      shareMode: null,
+      sharedThroughSeq: null,
+      sharedAt: null,
+      shareSlug: null,
+      updatedAt: sql`now()`,
+    })
+    .where(and(
+      eq(chats.id, chatId),
+      eq(chats.userId, userId),
+      isNull(chats.deletedAt),
+    ))
+    .returning({ id: chats.id })
+  return rows.length > 0
+}
+
+export async function getSharedChat(
+  database: Database,
+  viewerUserId: string,
+  shareSlug: string,
+): Promise<{
+  id: string
+  title: string
+  shareMode: 'snapshot' | 'live'
+  messages: ChatMessageDto[]
+} | null> {
+  const [chat] = await database
+    .select({
+      id: chats.id,
+      ownerUserId: chats.userId,
+      title: chats.title,
+      shareMode: chats.shareMode,
+      sharedThroughSeq: chats.sharedThroughSeq,
+    })
+    .from(chats)
+    .where(and(
+      eq(chats.shareSlug, shareSlug),
+      eq(chats.shareScope, 'authenticated'),
+      isNull(chats.deletedAt),
+    ))
+    .limit(1)
+  if (!chat || (chat.shareMode !== 'snapshot' && chat.shareMode !== 'live')) {
+    return null
+  }
+  const rows = await database
+    .select({
+      id: messages.id,
+      seq: messages.seq,
+      role: messages.role,
+      status: messages.status,
+      content: messages.sharedText,
+      parts: messages.parts,
+      createdAt: messages.createdAt,
+    })
+    .from(messages)
+    .where(and(
+      eq(messages.chatId, chat.id),
+      inArray(messages.role, ['user', 'assistant']),
+      eq(messages.status, 'completed'),
+      isNotNull(messages.sharedText),
+      chat.shareMode === 'snapshot' && chat.sharedThroughSeq
+        ? lte(messages.seq, chat.sharedThroughSeq)
+        : undefined,
+    ))
+    .orderBy(messages.seq)
+  await database.insert(auditLogs).values({
+    actorUserId: viewerUserId,
+    action: 'shared_conversation.read',
+    resourceType: 'conversation',
+    resourceId: chat.id,
+    metadata: { shareSlug, ownerUserId: chat.ownerUserId },
+  })
+  return {
+    id: chat.id,
+    title: chat.title,
+    shareMode: chat.shareMode,
+    messages: rows.map((row) => mapMessage(row)),
+  }
+}
+
+export async function getGenerationStartById(
+  database: Database,
+  userId: string,
+  generationId: string,
+): Promise<GenerationStart | null> {
+  const [row] = await database
+    .select({
+      id: messages.id,
+      seq: messages.seq,
+      role: messages.role,
+      status: messages.status,
+      content: messages.content,
+      parts: messages.parts,
+      createdAt: messages.createdAt,
+      streamId: generations.streamId,
+      assistantMessageId: generations.assistantMessageId,
+      generationStatus: generations.status,
+      metadata: generations.metadata,
+    })
+    .from(generations)
+    .innerJoin(messages, eq(messages.id, generations.userMessageId))
+    .where(and(
+      eq(generations.id, generationId),
+      eq(generations.userId, userId),
+    ))
+    .limit(1)
+  if (!row) return null
+  const metadata = row.metadata as Record<string, unknown>
+  return {
+    generationId,
+    streamId: row.streamId,
+    assistantMessageId: row.assistantMessageId,
+    userMessage: mapMessage(row),
+    reused: false,
+    status: row.generationStatus as GenerationDto['status'],
+    replacesMessageId: typeof metadata.replacesMessageId === 'string'
+      ? metadata.replacesMessageId
+      : undefined,
+    contextMaxSeq: typeof metadata.contextMaxSeq === 'number'
+      ? metadata.contextMaxSeq
+      : undefined,
+  }
 }
 
 export async function createGenerationStart(
@@ -658,30 +839,32 @@ export async function createGenerationStart(
     provider: string
     model: string
     supersedesGenerationId?: string
+    artifactId?: string
   },
 ): Promise<GenerationStart> {
   return database.transaction(async (transaction) => {
-    if (input.supersedesGenerationId) {
-      await transaction
-        .update(generations)
-        .set({
-          cancelRequestedAt: sql`coalesce(${generations.cancelRequestedAt}, now())`,
-          cancelSource: sql`coalesce(${generations.cancelSource}, 'superseded')`,
-        })
-        .where(
-          and(
-            eq(generations.id, input.supersedesGenerationId),
-            eq(generations.chatId, input.chatId),
-            eq(generations.userId, input.userId),
-            inArray(generations.status, ['pending', 'streaming']),
-          ),
-        )
+    const [owner] = await transaction
+      .select({ maxQueuedGenerations: users.maxQueuedGenerations })
+      .from(users)
+      .where(eq(users.id, input.userId))
+      .for('update')
+      .limit(1)
+    if (!owner) throw new Error('USER_NOT_FOUND')
+    const [queue] = await transaction
+      .select({ count: sql<number>`count(*)::int` })
+      .from(generations)
+      .where(and(
+        eq(generations.userId, input.userId),
+        inArray(generations.status, ['created', 'queued']),
+      ))
+    if ((queue?.count ?? 0) >= owner.maxQueuedGenerations) {
+      throw new Error('QUEUE_LIMIT_EXCEEDED')
     }
 
     const [sequence] = await transaction
       .update(chats)
       .set({
-        nextMessageSeq: sql`${chats.nextMessageSeq} + 1`,
+        nextMessageSeq: sql`${chats.nextMessageSeq} + 2`,
         contextRevision: sql`${chats.contextRevision} + 1`,
       })
       .where(
@@ -692,7 +875,8 @@ export async function createGenerationStart(
         ),
       )
       .returning({
-        seq: sql`${chats.nextMessageSeq} - 1`.mapWith(chats.nextMessageSeq),
+        userSeq: sql`${chats.nextMessageSeq} - 2`.mapWith(chats.nextMessageSeq),
+        assistantSeq: sql`${chats.nextMessageSeq} - 1`.mapWith(chats.nextMessageSeq),
       })
 
     if (!sequence) {
@@ -702,10 +886,12 @@ export async function createGenerationStart(
     const [messageRow] = await transaction
       .insert(messages)
       .values({
+        userId: input.userId,
         chatId: input.chatId,
-        seq: sequence.seq,
+        seq: sequence.userSeq,
         role: 'user',
         status: 'completed',
+        content: input.content,
         parts: [{ type: 'text', text: input.content }],
         sharedText: input.content,
         clientMessageId: input.clientMessageId,
@@ -719,28 +905,54 @@ export async function createGenerationStart(
         createdAt: messages.createdAt,
       })
     const userMessage = mapMessage(messageRow)
+    const assistantMessageId = crypto.randomUUID()
+    await transaction.insert(messages).values({
+      id: assistantMessageId,
+      userId: input.userId,
+      chatId: input.chatId,
+      generationId: input.generationId,
+      seq: sequence.assistantSeq,
+      role: 'assistant',
+      status: 'pending',
+      parts: [],
+    })
 
     await transaction.insert(generations).values({
       id: input.generationId,
       chatId: input.chatId,
       userId: input.userId,
       userMessageId: userMessage.id,
+      assistantMessageId,
       provider: input.provider,
       model: input.model,
+      streamId: input.streamId,
       requestId: input.requestId,
-      status: 'pending',
+      status: 'created',
+      metadata: {
+        contextMaxSeq: toSafeNumber(sequence.userSeq, 'Message.seq'),
+        ...(input.artifactId ? { artifactId: input.artifactId } : {}),
+      },
     })
-    await transaction.insert(streams).values({
-      id: input.streamId,
-      generationId: input.generationId,
+    await transaction.insert(outboxEvents).values({
+      userId: input.userId,
+      type: 'generation.created',
+      aggregateId: input.generationId,
+      payload: {
+        generationId: input.generationId,
+        userId: input.userId,
+        conversationId: input.chatId,
+        attempt: 0,
+      },
     })
 
     return {
       generationId: input.generationId,
       streamId: input.streamId,
+      assistantMessageId,
       userMessage,
       reused: false,
-      status: 'pending',
+      status: 'created',
+      contextMaxSeq: toSafeNumber(sequence.userSeq, 'Message.seq'),
     }
   })
 }
@@ -756,9 +968,28 @@ export async function createRegenerationStart(
     requestId: string
     provider: string
     model: string
+    artifactId?: string
   },
 ): Promise<GenerationStart> {
   return database.transaction(async (transaction) => {
+    const [owner] = await transaction
+      .select({ maxQueuedGenerations: users.maxQueuedGenerations })
+      .from(users)
+      .where(eq(users.id, input.userId))
+      .for('update')
+      .limit(1)
+    if (!owner) throw new Error('USER_NOT_FOUND')
+    const [queue] = await transaction
+      .select({ count: sql<number>`count(*)::int` })
+      .from(generations)
+      .where(and(
+        eq(generations.userId, input.userId),
+        inArray(generations.status, ['created', 'queued']),
+      ))
+    if ((queue?.count ?? 0) >= owner.maxQueuedGenerations) {
+      throw new Error('QUEUE_LIMIT_EXCEEDED')
+    }
+
     const original = alias(generations, 'original')
     const assistantMessage = alias(messages, 'assistant_message')
     const userMessage = alias(messages, 'user_message')
@@ -797,7 +1028,9 @@ export async function createRegenerationStart(
               .where(
                 and(
                   eq(active.chatId, original.chatId),
-                  inArray(active.status, ['pending', 'streaming']),
+                  inArray(active.status, [
+                    'created', 'queued', 'scheduled', 'running', 'cancelling',
+                  ]),
                 ),
               ),
           ),
@@ -840,28 +1073,70 @@ export async function createRegenerationStart(
       throw new Error('REGENERATION_TARGET_INVALID')
     }
 
+    const [sequence] = await transaction
+      .update(chats)
+      .set({
+        nextMessageSeq: sql`${chats.nextMessageSeq} + 1`,
+        contextRevision: sql`${chats.contextRevision} + 1`,
+      })
+      .where(and(
+        eq(chats.id, input.chatId),
+        eq(chats.userId, input.userId),
+        isNull(chats.deletedAt),
+      ))
+      .returning({
+        seq: sql`${chats.nextMessageSeq} - 1`.mapWith(chats.nextMessageSeq),
+      })
+    if (!sequence) throw new Error('CHAT_NOT_FOUND')
+    const assistantMessageId = crypto.randomUUID()
+    await transaction.insert(messages).values({
+      id: assistantMessageId,
+      userId: input.userId,
+      chatId: input.chatId,
+      generationId: input.generationId,
+      seq: sequence.seq,
+      role: 'assistant',
+      status: 'pending',
+      parts: [],
+    })
+
     await transaction.insert(generations).values({
       id: input.generationId,
       chatId: input.chatId,
       userId: input.userId,
       userMessageId: target.id,
+      assistantMessageId,
       supersedesGenerationId: target.originalGenerationId,
       provider: input.provider,
       model: input.model,
+      streamId: input.streamId,
       requestId: input.requestId,
-      status: 'pending',
+      status: 'created',
+      metadata: {
+        replacesMessageId: input.replacesMessageId,
+        contextMaxSeq: toSafeNumber(target.seq, 'Message.seq'),
+        ...(input.artifactId ? { artifactId: input.artifactId } : {}),
+      },
     })
-    await transaction.insert(streams).values({
-      id: input.streamId,
-      generationId: input.generationId,
+    await transaction.insert(outboxEvents).values({
+      userId: input.userId,
+      type: 'generation.created',
+      aggregateId: input.generationId,
+      payload: {
+        generationId: input.generationId,
+        userId: input.userId,
+        conversationId: input.chatId,
+        attempt: 0,
+      },
     })
 
     return {
       generationId: input.generationId,
       streamId: input.streamId,
+      assistantMessageId,
       userMessage: mapMessage(target),
       reused: false,
-      status: 'pending',
+      status: 'created',
       replacesMessageId: input.replacesMessageId,
       contextMaxSeq: toSafeNumber(target.seq, 'Message.seq'),
     }
@@ -985,20 +1260,31 @@ export async function markGenerationStreaming(
   providerRequestId?: string,
 ): Promise<boolean> {
   const rows = await database
-    .update(generations)
-    .set({
-      status: 'streaming',
-      startedAt: sql`coalesce(${generations.startedAt}, now())`,
-      ...(providerRequestId ? { providerRequestId } : {}),
+    .transaction(async (transaction) => {
+      const claimed = await transaction
+        .update(generations)
+        .set({
+          status: 'running',
+          startedAt: sql`coalesce(${generations.startedAt}, now())`,
+          providerRequestStartedAt:
+            sql`coalesce(${generations.providerRequestStartedAt}, now())`,
+          updatedAt: sql`now()`,
+          ...(providerRequestId ? { providerRequestId } : {}),
+        })
+        .where(and(
+          eq(generations.id, generationId),
+          inArray(generations.status, ['scheduled', 'running']),
+          isNull(generations.cancelRequestedAt),
+        ))
+        .returning({ assistantMessageId: generations.assistantMessageId })
+      if (claimed[0]) {
+        await transaction
+          .update(messages)
+          .set({ status: 'streaming', updatedAt: sql`now()` })
+          .where(eq(messages.id, claimed[0].assistantMessageId))
+      }
+      return claimed
     })
-    .where(
-      and(
-        eq(generations.id, generationId),
-        eq(generations.status, 'pending'),
-        isNull(generations.cancelRequestedAt),
-      ),
-    )
-    .returning({ id: generations.id })
 
   return rows.length > 0
 }
@@ -1017,7 +1303,8 @@ export async function isGenerationCancellationRequested(
     .limit(1)
 
   return row
-    ? row.cancelRequestedAt !== null || row.status === 'cancelled'
+    ? row.cancelRequestedAt !== null ||
+      !['scheduled', 'running'].includes(row.status)
     : true
 }
 
@@ -1027,9 +1314,8 @@ export async function getGeneration(
   generationId: string,
 ): Promise<GenerationDto | null> {
   const [row] = await database
-    .select({ ...generationColumns, streamId: streams.id })
+    .select(generationColumns)
     .from(generations)
-    .leftJoin(streams, eq(streams.generationId, generations.id))
     .where(
       and(
         eq(generations.id, generationId),
@@ -1041,25 +1327,88 @@ export async function getGeneration(
   return row ? mapGeneration(row) : null
 }
 
+export async function getGenerationAssistantMessage(
+  database: Database,
+  userId: string,
+  generationId: string,
+): Promise<ChatMessageDto | null> {
+  const [row] = await database
+    .select({
+      id: messages.id,
+      seq: messages.seq,
+      role: messages.role,
+      status: messages.status,
+      content: messages.content,
+      parts: messages.parts,
+      createdAt: messages.createdAt,
+      isUpvoted: votes.isUpvoted,
+    })
+    .from(generations)
+    .innerJoin(messages, eq(messages.id, generations.assistantMessageId))
+    .leftJoin(
+      votes,
+      and(eq(votes.messageId, messages.id), eq(votes.userId, userId)),
+    )
+    .where(and(
+      eq(generations.id, generationId),
+      eq(generations.userId, userId),
+    ))
+    .limit(1)
+  return row ? mapMessage(row) : null
+}
+
 export async function requestGenerationCancellation(
   database: Database,
   userId: string,
   generationId: string,
   source: NonNullable<GenerationDto['cancelSource']> = 'user_stop',
 ): Promise<GenerationDto | null> {
-  await database
-    .update(generations)
-    .set({
-      cancelRequestedAt: sql`coalesce(${generations.cancelRequestedAt}, now())`,
-      cancelSource: sql`coalesce(${generations.cancelSource}, ${source})`,
-    })
-    .where(
-      and(
+  await database.transaction(async (transaction) => {
+    const [current] = await transaction
+      .select({
+        status: generations.status,
+        assistantMessageId: generations.assistantMessageId,
+      })
+      .from(generations)
+      .where(and(
         eq(generations.id, generationId),
         eq(generations.userId, userId),
-        inArray(generations.status, ['pending', 'streaming']),
-      ),
-    )
+      ))
+      .for('update')
+      .limit(1)
+    if (!current || [
+      'completed', 'failed', 'cancelled', 'interrupted', 'timed_out',
+    ].includes(current.status)) return
+    const queued = ['created', 'queued'].includes(current.status)
+    await transaction
+      .update(generations)
+      .set({
+        status: queued ? 'cancelled' : 'cancelling',
+        cancelRequestedAt: sql`coalesce(${generations.cancelRequestedAt}, now())`,
+        cancelSource: sql`coalesce(${generations.cancelSource}, ${source})`,
+        updatedAt: sql`now()`,
+        ...(queued ? { finishedAt: sql`now()`, finishReason: 'cancelled' } : {}),
+      })
+      .where(eq(generations.id, generationId))
+    if (queued) {
+      await transaction
+        .update(messages)
+        .set({ status: 'cancelled', updatedAt: sql`now()` })
+        .where(eq(messages.id, current.assistantMessageId))
+      await transaction
+        .update(outboxEvents)
+        .set({
+          status: 'published',
+          publishedAt: sql`now()`,
+          lastError: 'generation_cancelled_before_dispatch',
+          updatedAt: sql`now()`,
+        })
+        .where(and(
+          eq(outboxEvents.aggregateId, generationId),
+          eq(outboxEvents.status, 'pending'),
+        ))
+    }
+  })
 
   return getGeneration(database, userId, generationId)
 }
@@ -1074,7 +1423,7 @@ export type GenerationUsage = {
 export type FinalizeGenerationInput = {
   generationId: string
   userId: string
-  desiredStatus: 'completed' | 'failed'
+  desiredStatus: 'completed' | 'failed' | 'interrupted' | 'timed_out'
   content: string
   messageId?: string
   messageParts?: Array<
@@ -1101,10 +1450,12 @@ export type FinalizedGeneration = {
 export function decideGenerationTerminalStatus(
   currentStatus: GenerationDto['status'],
   cancelRequestedAt: Date | string | null,
-  desiredStatus: 'completed' | 'failed',
-): 'completed' | 'failed' | 'cancelled' {
-  if (['completed', 'failed', 'cancelled'].includes(currentStatus)) {
-    return currentStatus as 'completed' | 'failed' | 'cancelled'
+  desiredStatus: 'completed' | 'failed' | 'interrupted' | 'timed_out',
+): 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'timed_out' {
+  if ([
+    'completed', 'failed', 'cancelled', 'interrupted', 'timed_out',
+  ].includes(currentStatus)) {
+    return currentStatus as 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'timed_out'
   }
 
   return cancelRequestedAt ? 'cancelled' : desiredStatus
@@ -1118,11 +1469,9 @@ export async function finalizeGeneration(
     const [row] = await transaction
       .select({
         ...generationColumns,
-        streamId: streams.id,
         assistantMessageId: generations.assistantMessageId,
       })
       .from(generations)
-      .leftJoin(streams, eq(streams.generationId, generations.id))
       .where(
         and(
           eq(generations.id, input.generationId),
@@ -1136,7 +1485,9 @@ export async function finalizeGeneration(
       throw new Error('GENERATION_NOT_FOUND')
     }
 
-    if (['completed', 'failed', 'cancelled'].includes(row.status)) {
+    if ([
+      'completed', 'failed', 'cancelled', 'interrupted', 'timed_out',
+    ].includes(row.status)) {
       const [existingMessage] = row.assistantMessageId
         ? await transaction
             .select({
@@ -1144,6 +1495,7 @@ export async function finalizeGeneration(
               seq: messages.seq,
               role: messages.role,
               status: messages.status,
+              content: messages.content,
               parts: messages.parts,
               createdAt: messages.createdAt,
             })
@@ -1174,26 +1526,8 @@ export async function finalizeGeneration(
       { type: 'text' as const, text: input.content },
     ]
 
-    if ((input.content.trim() || preparedArtifacts.length > 0) && row.chatId) {
-      const [sequence] = await transaction
-        .update(chats)
-        .set({
-          nextMessageSeq: sql`${chats.nextMessageSeq} + 1`,
-          contextRevision: sql`${chats.contextRevision} + 1`,
-        })
-        .where(
-          and(
-            eq(chats.id, row.chatId),
-            eq(chats.userId, input.userId),
-            isNull(chats.deletedAt),
-          ),
-        )
-        .returning({
-          seq: sql`${chats.nextMessageSeq} - 1`.mapWith(chats.nextMessageSeq),
-        })
-
-      if (sequence) {
-        const messageId = input.messageId ?? crypto.randomUUID()
+    if (row.chatId) {
+        const messageId = row.assistantMessageId
         const expectedArtifacts = preparedArtifacts.map((prepared) => ({
           streamArtifactId: prepared.streamArtifactId,
           artifactId: prepared.artifactId,
@@ -1206,22 +1540,30 @@ export async function finalizeGeneration(
           messageParts,
           expectedArtifacts,
         )
+        const messageStatus = finalStatus === 'completed'
+          ? 'completed'
+          : finalStatus === 'cancelled'
+            ? 'cancelled'
+            : 'failed'
         const [messageRow] = await transaction
-          .insert(messages)
-          .values({
-            id: messageId,
-            chatId: row.chatId,
-            seq: sequence.seq,
-            role: 'assistant',
-            status: finalStatus,
+          .update(messages)
+          .set({
+            status: messageStatus,
+            content: input.content || null,
             parts: persistedParts,
             sharedText: finalStatus === 'completed' ? input.content : null,
+            updatedAt: sql`now()`,
           })
+          .where(and(
+            eq(messages.id, messageId),
+            eq(messages.userId, input.userId),
+          ))
           .returning({
             id: messages.id,
             seq: messages.seq,
             role: messages.role,
             status: messages.status,
+            content: messages.content,
             parts: messages.parts,
             createdAt: messages.createdAt,
           })
@@ -1236,13 +1578,11 @@ export async function finalizeGeneration(
             prepared,
           }))
         }
-      }
     }
 
     const [updated] = await transaction
       .update(generations)
       .set({
-        assistantMessageId: assistantMessage?.id ?? null,
         ...(input.providerRequestId
           ? { providerRequestId: input.providerRequestId }
           : {}),
@@ -1263,6 +1603,7 @@ export async function finalizeGeneration(
           finalStatus === 'cancelled'
             ? 'Generation stopped'
             : input.errorMessage || null,
+        updatedAt: sql`now()`,
         finishedAt: sql`now()`,
       })
       .where(eq(generations.id, input.generationId))
@@ -1282,7 +1623,7 @@ export async function finalizeGeneration(
       })
 
     return {
-      generation: mapGeneration({ ...updated, streamId: row.streamId }),
+      generation: mapGeneration(updated),
       assistantMessage,
       newlyFinalized: true,
       committedArtifacts,

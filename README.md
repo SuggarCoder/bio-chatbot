@@ -1,57 +1,84 @@
 # bio-chatbot
 
-SeaweedFS S3 底仓配置与本地验证参见 [docs/object-storage.md](docs/object-storage.md)。
+基于 SolidJS、Fastify、PostgreSQL、Redis Streams 和 OpenAI Compatible API 的多用户 Chatbot。
 
-Artifact Protocol v1 规范、迁移、事件和安全边界参见
-[docs/artifact-protocol-v1.md](docs/artifact-protocol-v1.md)。该能力默认关闭，启用时必须同时配置私有对象存储。
+## 架构约束
 
-基于 SolidJS、Fastify、PostgreSQL、Redis 和阿里云百炼 Qwen 的 GPAS2 Chatbot。
-
-生产环境变量、可信代理、SSE、数据库迁移、Artifact/S3 发布门禁和上线验收参见
-[生产部署清单](docs/production-deployment.md)。
+- `User` 同时是身份主体和租户边界，不存在独立 Tenant 表，也不接受客户端传入的 userId。
+- PostgreSQL 保存会话、消息、Generation、最终/部分回答、用量、错误、Outbox 和审计记录，是最终事实来源。
+- Redis 仅保存按用户队列、公平调度状态、并发租约、取消信号、临时快照和可过期的流事件。
+- API 与 Worker 分进程运行。同一会话一次只运行一个 Generation。
+- SSE 断开只结束订阅；只有取消接口才会停止后台 Generation。
+- 流式 Delta 不写 PostgreSQL。Generation 结束时一次性更新 Assistant 占位消息。
 
 ## 本地开发
 
-需要 Node.js 22、PostgreSQL 15+ 和 Redis。复制 `.env.example` 为 `.env`，填写数据库、Redis 和 `QWEN_API_KEY`。本地默认使用内置的 GPAS2 `/user/info` Mock，不建立独立登录态。
+需要 Node.js 22、PostgreSQL 15+ 和 Redis。复制 `.env.example` 为 `.env` 并填写连接信息和 `QWEN_API_KEY`。
+
+本次数据库是全新基线，不提供旧结构数据迁移。首次使用必须指定一个空的 `public` schema：
 
 ```bash
 npm ci
-npm run db:migrate
+npm run db:init
 npm run dev
+```
+
+`npm run dev` 同时启动 Vite、Fastify API 和独立 Worker。也可以分别运行：
+
+```bash
+npm run dev:web
+npm run dev:api
+npm run dev:worker
 ```
 
 - Web：`http://127.0.0.1:5173/ai-chatbot/`
 - API：`http://127.0.0.1:8090/ai-chatbot/api`
 - 健康检查：`GET /ai-chatbot/api/health`
 
-## 身份流程
+健康检查只有在 PostgreSQL、Redis 和 Worker 心跳均正常时才返回成功；启用对象存储后也会校验对象存储。
 
-开发环境的 `GPAS2_AUTH_MODE=mock` 返回固定测试用户。生产环境必须设置：
+## 核心 API
 
 ```text
-NODE_ENV=production
-GPAS2_AUTH_MODE=upstream
-GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
-TRUSTED_PROXY_CIDRS=<direct-proxy-ip-or-cidr>
+GET    /api/conversations
+POST   /api/conversations
+GET    /api/conversations/:conversationId
+POST   /api/conversations/:conversationId/messages
+GET    /api/generations/:generationId
+GET    /api/generations/:generationId/stream
+POST   /api/generations/:generationId/cancel
+POST   /api/conversations/:conversationId/share
+DELETE /api/conversations/:conversationId/share
+GET    /api/shared/conversations/:shareSlug
 ```
 
-Fastify 会把浏览器请求携带的同域 Cookie 转发给 GPAS2，并以响应中的 `data.userId` 自动创建或更新 Chatbot 用户。请求体、查询参数和自定义 Header 中的 userId 不参与身份判定。
+发送消息和重新生成必须提供 UUID 格式的 `Idempotency-Key`。SSE 恢复使用标准 `Last-Event-ID`，其值是 Redis Stream ID，例如 `1785930000000-0`。
 
-生产环境通过 GPAS2 同一个 HTTPS 域名下的 `/ai-chatbot/` 路径访问。反向代理、Cookie、内部 TLS、错误语义和上线验证参见 [部署认证说明](docs/deployment-auth.md)。
+## 数据库与运行进程
 
-## 数据与缓存
+- `src/server/db/schema.ts`：Drizzle 数据模型。
+- `drizzle/0000_multitenant_queue_baseline.sql`：空库初始化基线。
+- `src/server/initDatabase.ts`：拒绝非空 public schema 的初始化入口。
+- `src/server/index.ts`：API/SSE 进程。
+- `src/server/worker.ts`：Outbox Dispatcher、公平调度、租约恢复和 LLM Worker。
 
-- `src/server/db/schema.ts` 是 PostgreSQL 结构的唯一代码真源，提交的 `drizzle/` 迁移通过 `npm run db:migrate` 显式应用。
-- 修改数据库结构后运行 `npm run db:generate` 生成迁移，并用 `npm run db:check` 校验迁移历史。
-- PostgreSQL 保存用户、会话、最终消息、Generation 和 UsageEvent。
-- Redis 仅保存资料/上下文缓存、生成实时状态、可续传流、限流、并发租约和月度用量投影。
-- `MONTHLY_TOKEN_LIMIT=0` 表示记录用量但不拦截；正整数表示月度 Token 上限。
-- UI 只有在服务端确认消息和 Generation 已落库后才显示 Streaming。关闭浏览器不会取消模型任务；再次进入会话时优先续传，Redis 流不可用时回退轮询 PostgreSQL 最终结果。
+初始化后新增的向前迁移使用 `npm run db:migrate`。修改 schema 后运行 `npm run db:generate` 和 `npm run db:check`。
+
+默认 PostgreSQL 连接预算为 API 4、Worker 4、迁移/运维预留 2。Redis 使用进程级普通连接和进程级 Subscriber，不会为每个 SSE 客户端创建 Redis Client。
+
+## 身份与共享
+
+生产环境身份仍来自 GPAS2 Cookie 和 `/user/info`。`externalUserId` 映射到 PostgreSQL `User.id`；现有用户字段和登录方式保持不变。调度等级、权重、并发和最大排队数保存在同一 User 记录中。
+
+普通会话接口只允许所有者访问。跨用户读取必须由所有者显式创建 `authenticated` 分享链接；分享读取仍要求已认证，并写入审计日志。附件不继承会话分享权限。
 
 ## 验证
 
 ```bash
 npm test
 npm run check
+npm run db:check
 npm run build
 ```
+
+部署、连接预算和故障验收见 [生产部署清单](docs/production-deployment.md)，取消与恢复语义见 [Generation lifecycle](docs/generation-cancellation.md)，Redis Key 规范见 [Redis design](redis.md)。

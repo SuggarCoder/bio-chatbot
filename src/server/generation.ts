@@ -1,18 +1,11 @@
 import OpenAI from 'openai'
-import { createResumableStreamContext } from 'resumable-stream'
-import type { ResumableStreamContext } from 'resumable-stream'
 
 import {
-  acquireGenerationLease,
   advanceCachedChatContext,
+  consumeGenerationRateLimit,
   getCachedChatContext,
-  getGenerationRunnerId,
-  publishGenerationCancellation,
   readMonthlyQuota,
-  releaseGenerationLease,
-  renewGenerationLease,
   setCachedChatContext,
-  setGenerationRealtimeState,
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
@@ -36,6 +29,7 @@ import {
   createGenerationStart,
   createRegenerationStart,
   findGenerationStart,
+  getGenerationStartById,
   getChatContextRevision,
   getGeneration,
   isGenerationCancellationRequested,
@@ -63,6 +57,11 @@ import {
   GenerationRuntimeRegistry,
   type GenerationRuntime,
 } from './generationRuntimeRegistry.js'
+import {
+  GenerationQueue,
+  type GenerationWorkItem,
+} from './generationQueue.js'
+import { GenerationStreamStore } from './streamStore.js'
 
 type StartGenerationInput = {
   user: CurrentUser
@@ -70,6 +69,7 @@ type StartGenerationInput = {
   content: string
   clientMessageId: string
   ip: string
+  model?: string
   artifactId?: string
   supersedesGenerationId?: string
   replacesMessageId?: string
@@ -82,10 +82,6 @@ type StreamEventPayload = StreamEvent extends infer Event
     ? Omit<Event, 'generationId' | 'streamId' | 'messageId' | 'eventId'>
     : never
   : never
-
-function serializeEvent(event: StreamEvent): string {
-  return `id: ${event.eventId}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
-}
 
 function appendContextMessage(
   context: ChatContext,
@@ -132,23 +128,12 @@ function extractUsage(response: unknown): CompletedUsage {
   }
 }
 
-async function drain(stream: ReadableStream<string>): Promise<void> {
-  const reader = stream.getReader()
-
-  try {
-    while (!(await reader.read()).done) {
-      // resumable-stream persists chunks while this internal reader drains.
-    }
-  } finally {
-    reader.releaseLock()
-  }
-}
-
 export class GenerationRejectedError extends Error {
   constructor(
     message: string,
     readonly statusCode: number,
     readonly code: string,
+    readonly retryAfterMs?: number,
   ) {
     super(message)
     this.name = 'GenerationRejectedError'
@@ -181,11 +166,8 @@ export function assertPersistableGenerationOutput(
 
 export class GenerationService {
   private readonly qwen: OpenAI
-  private readonly streamContext: ResumableStreamContext
-  private readonly streamSubscriber: RedisClient
-  private streamSubscriberConnection?: Promise<void>
-  private readonly subscriberCounts = new Map<string, number>()
-  private readonly orphanTimers = new Map<string, NodeJS.Timeout>()
+  private readonly streams: GenerationStreamStore
+  private readonly queue: GenerationQueue
 
   constructor(
     private readonly config: AppConfig,
@@ -199,84 +181,17 @@ export class GenerationService {
       apiKey: config.qwenApiKey,
       baseURL: config.qwenBaseUrl,
       timeout: 5 * 60 * 1000,
-      maxRetries: 1,
+      maxRetries: 0,
     })
-    this.streamSubscriber = redis.duplicate()
-    this.streamSubscriber.on('error', () => {
-      // Stream creation/resumption handles connection failures explicitly.
-    })
-    this.streamContext = createResumableStreamContext({
-      keyPrefix: `${config.redisPrefix}stream`,
-      waitUntil: null,
-      publisher: redis,
-      subscriber: this.streamSubscriber,
-    })
-  }
-
-  private async ensureStreamSubscriber(): Promise<void> {
-    if (this.streamSubscriber.isReady) return
-    if (!this.streamSubscriberConnection) {
-      this.streamSubscriberConnection = this.streamSubscriber.connect()
-        .then(() => undefined)
-        .finally(() => {
-          this.streamSubscriberConnection = undefined
-        })
-    }
-    await this.streamSubscriberConnection
-  }
-
-  private clearOrphanTimer(generationId: string): void {
-    const timer = this.orphanTimers.get(generationId)
-    if (timer) clearTimeout(timer)
-    this.orphanTimers.delete(generationId)
-  }
-
-  private scheduleOrphanAbort(generationId: string): void {
-    this.clearOrphanTimer(generationId)
-    if ((this.subscriberCounts.get(generationId) ?? 0) > 0) return
-
-    const timer = setTimeout(() => {
-      this.orphanTimers.delete(generationId)
-      if ((this.subscriberCounts.get(generationId) ?? 0) === 0) {
-        this.runtimes.abort(generationId)
-      }
-    }, this.config.generationDisconnectGraceSeconds * 1_000)
-    timer.unref()
-    this.orphanTimers.set(generationId, timer)
-  }
-
-  trackSubscriber(generationId: string): () => void {
-    this.clearOrphanTimer(generationId)
-    this.subscriberCounts.set(
-      generationId,
-      (this.subscriberCounts.get(generationId) ?? 0) + 1,
-    )
-    let released = false
-
-    return () => {
-      if (released) return
-      released = true
-      const remaining = Math.max(
-        0,
-        (this.subscriberCounts.get(generationId) ?? 1) - 1,
-      )
-      if (remaining === 0) {
-        this.subscriberCounts.delete(generationId)
-        if (this.runtimes.get(generationId)) {
-          this.scheduleOrphanAbort(generationId)
-        }
-      } else {
-        this.subscriberCounts.set(generationId, remaining)
-      }
-    }
+    this.streams = new GenerationStreamStore(config, redis)
+    this.queue = new GenerationQueue(config, redis)
   }
 
   async create(input: StartGenerationInput): Promise<GenerationStartDto> {
-    const requestId = `${input.chatId}:${input.clientMessageId}`
+    const requestId = input.clientMessageId
     const existing = await findGenerationStart(
       this.database,
       input.user.id,
-      input.chatId,
       requestId,
     )
 
@@ -294,7 +209,8 @@ export class GenerationService {
       return {
         generation,
         userMessage: existing.userMessage,
-        replacesMessageId: input.replacesMessageId ?? null,
+        assistantMessageId: existing.assistantMessageId,
+        replacesMessageId: existing.replacesMessageId ?? null,
       }
     }
 
@@ -320,19 +236,26 @@ export class GenerationService {
       }
     }
 
-    if (input.supersedesGenerationId) {
-      await this.cancel(
-        input.user.id,
-        input.supersedesGenerationId,
-        'superseded',
-      )
-    }
-
     if (!this.redis.isReady) {
       throw new GenerationRejectedError(
         'Generation is temporarily unavailable',
         503,
         'redis_unavailable',
+      )
+    }
+
+    const rateLimit = await consumeGenerationRateLimit(
+      this.redis,
+      this.config,
+      input.user.id,
+      input.ip,
+    )
+    if (!rateLimit.allowed) {
+      throw new GenerationRejectedError(
+        'Too many generation requests',
+        429,
+        'generation_rate_limited',
+        rateLimit.retryAfterMs,
       )
     }
 
@@ -354,22 +277,16 @@ export class GenerationService {
       )
     }
 
-    const generationId = crypto.randomUUID()
-    const streamId = crypto.randomUUID()
-    const acquired = await acquireGenerationLease(
-      this.redis,
-      this.config,
-      input.user.id,
-      generationId,
-    )
-
-    if (!acquired) {
-      throw new GenerationRejectedError(
-        'Another generation is already running',
-        429,
-        'generation_concurrency_exceeded',
+    if (input.supersedesGenerationId) {
+      await this.cancel(
+        input.user.id,
+        input.supersedesGenerationId,
+        'superseded',
       )
     }
+
+    const generationId = crypto.randomUUID()
+    const streamId = `user:${input.user.id}:generation:${generationId}`
 
     let start: GenerationStart
 
@@ -384,6 +301,7 @@ export class GenerationService {
             requestId,
             provider: 'qwen',
             model: this.config.qwenModel,
+            artifactId: input.artifactId,
           })
         : await createGenerationStart(this.database, {
             userId: input.user.id,
@@ -395,15 +313,9 @@ export class GenerationService {
             requestId,
             provider: 'qwen',
             model: this.config.qwenModel,
+            artifactId: input.artifactId,
           })
     } catch (error) {
-      await releaseGenerationLease(
-        this.redis,
-        this.config,
-        input.user.id,
-        generationId,
-      ).catch(() => undefined)
-
       if (error instanceof Error && error.message === 'CHAT_NOT_FOUND') {
         throw new GenerationRejectedError(
           'Chat not found',
@@ -425,19 +337,18 @@ export class GenerationService {
 
       if (
         error instanceof Error &&
-        error.message.includes('uq_generation_chat_active')
+        error.message === 'QUEUE_LIMIT_EXCEEDED'
       ) {
         throw new GenerationRejectedError(
-          'Another generation is already active for this chat',
-          409,
-          'generation_already_active',
+          'Too many generations are already queued',
+          429,
+          'generation_queue_limit_exceeded',
         )
       }
 
       const raced = await findGenerationStart(
         this.database,
         input.user.id,
-        input.chatId,
         requestId,
       )
 
@@ -452,7 +363,8 @@ export class GenerationService {
           return {
             generation,
             userMessage: raced.userMessage,
-            replacesMessageId: input.replacesMessageId ?? null,
+            assistantMessageId: raced.assistantMessageId,
+            replacesMessageId: raced.replacesMessageId ?? null,
           }
         }
       }
@@ -460,88 +372,19 @@ export class GenerationService {
       throw error
     }
 
-    let generation: GenerationDto | null = null
-    try {
-      generation = await getGeneration(
-        this.database,
-        input.user.id,
-        generationId,
-      )
-      if (!generation) {
-        throw new Error('GENERATION_NOT_FOUND')
-      }
-      await setGenerationRealtimeState(
-        this.redis,
-        this.config,
-        generationId,
-        {
-          status: 'pending',
-          chatId: input.chatId,
-          userId: input.user.id,
-          streamId,
-          provider: 'qwen',
-          model: this.config.qwenModel,
-          runnerId: this.runtimes.runnerId,
-        },
-      )
-      await this.ensureStreamSubscriber()
-      const internalStream = await this.streamContext.createNewResumableStream(
-        streamId,
-        () => this.createProducer(input, start),
-      )
-      if (!internalStream) {
-        throw new Error('STREAM_CREATION_FAILED')
-      }
-      void drain(internalStream).catch(() => {
-        this.runtimes.abort(generationId)
-      })
-    } catch (error) {
-      await this.finalizer.finalize({
-        generationId,
-        userId: input.user.id,
-        desiredStatus: 'failed',
-        content: '',
-        providerRequestId: undefined,
-        usage: {
-          inputTokens: 0,
-          outputTokens: 0,
-          cachedInputTokens: 0,
-          reasoningTokens: 0,
-        },
-        latencyMs: 0,
-        timeToFirstTokenMs: null,
-        finishReason: 'failed',
-        errorCode: 'stream_start_failed',
-        errorMessage: error instanceof Error
-          ? error.message
-          : 'Generation stream could not be started',
-      }).catch(() => undefined)
-      await releaseGenerationLease(
-        this.redis,
-        this.config,
-        input.user.id,
-        generationId,
-      ).catch(() => undefined)
-      throw new GenerationRejectedError(
-        'Generation stream could not be started',
-        503,
-        'stream_start_failed',
-      )
-    }
+    const generation = await getGeneration(
+      this.database,
+      input.user.id,
+      generationId,
+    )
+    if (!generation) throw new Error('GENERATION_NOT_FOUND')
 
     return {
-      generation: generation as GenerationDto,
+      generation,
       userMessage: start.userMessage,
+      assistantMessageId: start.assistantMessageId,
       replacesMessageId: start.replacesMessageId ?? null,
     }
-  }
-
-  async resume(
-    streamId: string,
-    resumeAt: number,
-  ): Promise<ReadableStream<string> | null | undefined> {
-    await this.ensureStreamSubscriber()
-    return this.streamContext.resumeExistingStream(streamId, resumeAt)
   }
 
   async cancel(
@@ -558,61 +401,22 @@ export class GenerationService {
 
     if (
       !generation ||
-      ['completed', 'failed', 'cancelled'].includes(generation.status)
+      ['completed', 'failed', 'cancelled', 'interrupted', 'timed_out'].includes(
+        generation.status,
+      )
     ) {
       return generation
     }
 
-    const localAbort = this.runtimes.abort(generationId)
-    const runnerId = await getGenerationRunnerId(
-      this.redis,
-      this.config,
-      generationId,
-    ).catch(() => null)
-    const cancelRequestedAt =
-      generation.cancelRequestedAt ?? new Date().toISOString()
-
-    await Promise.allSettled([
-      releaseGenerationLease(
-        this.redis,
-        this.config,
-        userId,
-        generationId,
-      ),
-      setGenerationRealtimeState(
-        this.redis,
-        this.config,
-        generationId,
-        {
-          status: 'cancelling',
-          cancelRequestedAt,
-        },
-      ),
-      runnerId && !localAbort
-        ? publishGenerationCancellation(
-            this.redis,
-            this.config,
-            runnerId,
-            generationId,
-          )
-        : Promise.resolve(),
-    ])
+    this.runtimes.abort(generationId)
+    await this.queue.requestCancellation(userId, generationId)
 
     return generation
   }
 
   async shutdown(): Promise<void> {
     const runtimes = this.runtimes.list()
-    await Promise.allSettled(
-      runtimes.map(async (runtime) => {
-        await this.cancel(
-          runtime.userId,
-          runtime.generationId,
-          'server_shutdown',
-        )
-      }),
-    )
-    this.runtimes.abortAll()
+    this.runtimes.abortAll('shutdown')
     await Promise.race([
       Promise.allSettled(
         runtimes
@@ -627,18 +431,25 @@ export class GenerationService {
         timeout.unref()
       }),
     ])
-    for (const timer of this.orphanTimers.values()) clearTimeout(timer)
-    this.orphanTimers.clear()
-    this.subscriberCounts.clear()
-    if (this.streamSubscriber.isOpen) {
-      await this.streamSubscriber.close()
-    }
   }
 
-  private createProducer(
-    input: StartGenerationInput,
-    start: GenerationStart,
-  ): ReadableStream<string> {
+  async execute(item: GenerationWorkItem): Promise<void> {
+    const start = await getGenerationStartById(
+      this.database,
+      item.user.id,
+      item.generationId,
+    )
+    if (!start) throw new Error('GENERATION_NOT_FOUND')
+    const input: StartGenerationInput = {
+      user: item.user,
+      chatId: item.conversationId,
+      content: item.content,
+      clientMessageId: item.generationId,
+      ip: '',
+      model: item.model,
+      artifactId: item.artifactId,
+      replacesMessageId: item.replacesMessageId,
+    }
     const runtime: GenerationRuntime = {
       generationId: start.generationId,
       streamId: start.streamId,
@@ -654,21 +465,8 @@ export class GenerationService {
       },
     }
     this.runtimes.register(runtime)
-    this.scheduleOrphanAbort(start.generationId)
-
-    return new ReadableStream<string>({
-      start: (controller) => {
-        runtime.completion = this.runProducer(
-          input,
-          start,
-          runtime,
-          controller,
-        ).catch(() => undefined)
-      },
-      cancel: () => {
-        // Network/reader disconnect is resumable and never implies user Stop.
-      },
-    })
+    runtime.completion = this.runProducer(input, start, runtime)
+    await runtime.completion
   }
 
   private async checkpoint(
@@ -678,16 +476,25 @@ export class GenerationService {
     const execution = runtime.execution ?? new GenerationExecutionContext(
       runtime.generationId,
       runtime.controller.signal,
-      () => isGenerationCancellationRequested(
-        this.database,
-        runtime.generationId,
+      async () => (
+        await this.queue.cancellationRequested(
+          runtime.userId,
+          runtime.generationId,
+        ) || await isGenerationCancellationRequested(
+          this.database,
+          runtime.generationId,
+        )
       ),
+      this.config.generationCancelPollIntervalMs,
     )
     runtime.execution = execution
 
     try {
       await execution.checkpoint(forceDatabasePoll)
     } catch (error) {
+      if (error instanceof GenerationCancellationError && !runtime.abortReason) {
+        runtime.abortReason = 'cancel'
+      }
       runtime.controller.abort()
       throw error
     }
@@ -697,11 +504,10 @@ export class GenerationService {
     input: StartGenerationInput,
     start: GenerationStart,
     runtime: GenerationRuntime,
-    controller: ReadableStreamDefaultController<string>,
   ): Promise<void> {
     const startedAt = Date.now()
     let firstTokenAt: number | null = null
-    const messageId = crypto.randomUUID()
+    const messageId = start.assistantMessageId
     let eventId = 0
     let messageSequence = 0
     const messageParts: Array<
@@ -711,30 +517,37 @@ export class GenerationService {
     const completedDrafts: CompletedArtifactDraft[] = []
     const acceptedArtifactIds = new Set<string>()
     let preparedArtifacts: PreparedArtifactVersion[] = []
-    const leaseTimer = setInterval(() => {
-      if (runtime.controller.signal.aborted) {
-        return
-      }
-
-      void renewGenerationLease(
-        this.redis,
-        this.config,
+    let eventWrites = Promise.resolve()
+    const snapshotTimer = setInterval(() => {
+      void this.queue.saveSnapshot(
         input.user.id,
         start.generationId,
-      )
-    }, Math.max(10_000, (this.config.generationLeaseSeconds * 1000) / 3))
+        {
+          content: runtime.partialOutput,
+          providerRequestId: runtime.providerRequestId,
+          usage: runtime.usage,
+          updatedAt: new Date().toISOString(),
+        },
+      ).catch(() => undefined)
+    }, this.config.generationSnapshotIntervalMs)
+    snapshotTimer.unref()
 
     const emit = (
       event: StreamEventPayload,
     ) => {
       eventId += 1
-      controller.enqueue(serializeEvent({
+      const streamEvent = {
         ...event,
         generationId: start.generationId,
         streamId: start.streamId,
         messageId,
         eventId,
-      } as StreamEvent))
+      } as StreamEvent
+      eventWrites = eventWrites.then(() => this.streams.append(
+        input.user.id,
+        start.generationId,
+        streamEvent,
+      )).then(() => undefined).catch(() => undefined)
     }
 
     const appendTextPart = (delta: string) => {
@@ -814,13 +627,12 @@ export class GenerationService {
         })
       : null
 
-    emit({
-      type: 'message.start',
-      userMessage: start.userMessage,
-    })
-
     try {
       await this.checkpoint(runtime, true)
+      emit({
+        type: 'message.start',
+        userMessage: start.userMessage,
+      })
 
       const revision = await getChatContextRevision(
         this.database,
@@ -941,9 +753,14 @@ export class GenerationService {
                 : artifact.content,
             })))
       }
+      const markedRunning = await markGenerationStreaming(
+        this.database,
+        start.generationId,
+      )
+      if (!markedRunning) await this.checkpoint(runtime, true)
       const responseStream = await this.qwen.responses.create(
         {
-          model: this.config.qwenModel,
+          model: input.model ?? this.config.qwenModel,
           instructions: artifactEnabled
             ? artifactInstructions
             : undefined,
@@ -972,22 +789,6 @@ export class GenerationService {
           if (!marked) {
             await this.checkpoint(runtime, true)
           }
-
-          await setGenerationRealtimeState(
-            this.redis,
-            this.config,
-            start.generationId,
-            {
-              status: 'streaming',
-              chatId: input.chatId,
-              userId: input.user.id,
-              streamId: start.streamId,
-              provider: 'qwen',
-              model: this.config.qwenModel,
-              runnerId: this.runtimes.runnerId,
-              startedAt: new Date().toISOString(),
-            },
-          )
         } else if (event.type === 'response.output_text.delta') {
           if (firstTokenAt === null) {
             firstTokenAt = Date.now()
@@ -1077,7 +878,11 @@ export class GenerationService {
         finishReason: 'completed',
       })
 
-      if (result.newlyFinalized && result.generation.status === 'completed') {
+      if (
+        start.contextMaxSeq === undefined &&
+        result.newlyFinalized &&
+        result.generation.status === 'completed'
+      ) {
         const finalRevision = await getChatContextRevision(
           this.database,
           input.user.id,
@@ -1132,11 +937,14 @@ export class GenerationService {
           : 'stop',
         assistantMessage: result.assistantMessage,
       })
-      controller.close()
+      await eventWrites
     } catch (error) {
-      const cancelled =
-        error instanceof GenerationCancellationError ||
-        runtime.controller.signal.aborted
+      const timedOut = runtime.abortReason === 'timeout'
+      const interrupted = ['lease_lost', 'shutdown'].includes(
+        runtime.abortReason ?? '',
+      )
+      const cancelled = runtime.abortReason === 'cancel' ||
+        (error instanceof GenerationCancellationError && !timedOut && !interrupted)
       const lengthLimited = error instanceof GenerationLengthError
       const message =
         error instanceof Error ? error.message : 'Generation failed'
@@ -1159,7 +967,11 @@ export class GenerationService {
       const result = await this.finalizer.finalize({
         generationId: start.generationId,
         userId: input.user.id,
-        desiredStatus: 'failed',
+        desiredStatus: timedOut
+          ? 'timed_out'
+          : interrupted
+            ? 'interrupted'
+            : 'failed',
         content: runtime.partialOutput,
         messageId,
         messageParts,
@@ -1168,18 +980,26 @@ export class GenerationService {
         latencyMs: Date.now() - startedAt,
         timeToFirstTokenMs:
           firstTokenAt === null ? null : firstTokenAt - startedAt,
-        finishReason: cancelled
-          ? 'cancelled'
-          : lengthLimited
-            ? 'length'
-            : 'failed',
-        errorCode: cancelled
-          ? 'generation_cancelled'
-          : lengthLimited
-            ? 'generation_length'
-            : error instanceof ArtifactServiceError
-              ? error.code.toLocaleLowerCase()
-              : 'generation_failed',
+        finishReason: timedOut
+          ? 'timed_out'
+          : interrupted
+            ? 'interrupted'
+            : cancelled
+              ? 'cancelled'
+              : lengthLimited
+                ? 'length'
+                : 'failed',
+        errorCode: timedOut
+          ? 'generation_timed_out'
+          : interrupted
+            ? 'generation_interrupted'
+            : cancelled
+              ? 'generation_cancelled'
+              : lengthLimited
+                ? 'generation_length'
+                : error instanceof ArtifactServiceError
+                  ? error.code.toLocaleLowerCase()
+                  : 'generation_failed',
         errorMessage: message,
       })
 
@@ -1196,20 +1016,12 @@ export class GenerationService {
           : {
               code: result.generation.errorCode ?? 'generation_failed',
               message: result.generation.errorMessage ?? message,
-            },
+        },
       })
-      controller.close()
+      await eventWrites
     } finally {
-      clearInterval(leaseTimer)
-      this.clearOrphanTimer(start.generationId)
-      this.subscriberCounts.delete(start.generationId)
+      clearInterval(snapshotTimer)
       this.runtimes.delete(start.generationId)
-      await releaseGenerationLease(
-        this.redis,
-        this.config,
-        input.user.id,
-        start.generationId,
-      ).catch(() => undefined)
     }
   }
 }

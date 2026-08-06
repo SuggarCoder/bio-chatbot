@@ -82,6 +82,8 @@ export class StreamCompletedError extends Error {
 }
 
 type StreamRequest = {
+  userId: string
+  conversationId: string
   generationId: string
   streamId: string
   signal: AbortSignal
@@ -89,6 +91,7 @@ type StreamRequest = {
   onConnectionState?: (
     state: 'connected' | 'reconnecting',
   ) => void
+  onRestore?: (content: string) => void
 }
 
 function sleep(duration: number, signal: AbortSignal) {
@@ -110,19 +113,29 @@ function sleep(duration: number, signal: AbortSignal) {
   })
 }
 
-function parseEventBlock(block: string): ChatStreamEvent | null {
+function parseEventBlock(
+  block: string,
+): { id: string | null; event: ChatStreamEvent | null } {
+  const id = block
+    .split('\n')
+    .find((line) => line.startsWith('id:'))
+    ?.slice(3)
+    .trim() ?? null
   const data = block
     .split('\n')
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.slice(5).trimStart())
     .join('\n')
 
-  return data ? JSON.parse(data) as ChatStreamEvent : null
+  return {
+    id,
+    event: data ? JSON.parse(data) as ChatStreamEvent : null,
+  }
 }
 
 async function consumeSse(
   response: Response,
-  state: { buffer: string; receivedCharacters: number; seenEventIds: Set<number> },
+  state: { buffer: string; lastEventId: string; partialText: string },
   request: StreamRequest,
 ): Promise<boolean> {
   if (!response.body) {
@@ -138,13 +151,11 @@ async function consumeSse(
 
     if (result.done) {
       const tail = decoder.decode()
-      state.receivedCharacters += tail.length
       state.buffer += tail
       break
     }
 
     const text = decoder.decode(result.value, { stream: true })
-    state.receivedCharacters += text.length
     state.buffer += text
 
     while (true) {
@@ -156,7 +167,8 @@ async function consumeSse(
 
       const block = state.buffer.slice(0, boundary)
       state.buffer = state.buffer.slice(boundary + 2)
-      const event = parseEventBlock(block)
+      const parsed = parseEventBlock(block)
+      const event = parsed.event
 
       if (
         !event ||
@@ -165,8 +177,32 @@ async function consumeSse(
         continue
       }
 
-      if (state.seenEventIds.has(event.eventId)) continue
-      state.seenEventIds.add(event.eventId)
+      if (event.type === 'message.delta') {
+        const overlap = state.partialText.length - event.startIndex
+        if (overlap < event.delta.length) {
+          state.partialText += event.delta.slice(Math.max(0, overlap))
+        }
+      }
+
+      if (parsed.id && /^\d+-\d+$/.test(parsed.id)) {
+        state.lastEventId = parsed.id
+        try {
+          sessionStorage.setItem(
+            `chat:${request.userId}:generation:${request.generationId}:stream`,
+            JSON.stringify({
+              userId: request.userId,
+              conversationId: request.conversationId,
+              generationId: request.generationId,
+              streamId: request.streamId,
+              lastEventId: parsed.id,
+              partialText: state.partialText,
+              updatedAt: Date.now(),
+            }),
+          )
+        } catch {
+          // Streaming remains functional when browser storage is unavailable.
+        }
+      }
 
       request.onEvent(event)
       terminal = event.type === 'message.finish'
@@ -177,11 +213,54 @@ async function consumeSse(
 }
 
 export async function runChatStream(request: StreamRequest): Promise<void> {
+  const storageKey =
+    `chat:${request.userId}:generation:${request.generationId}:stream`
+  let restoredCursor = '0-0'
+  let restoredText = ''
+  try {
+    const restored = JSON.parse(
+      sessionStorage.getItem(storageKey) ?? 'null',
+    ) as {
+      streamId?: unknown
+      lastEventId?: unknown
+      partialText?: unknown
+    } | null
+    if (
+      restored?.streamId === request.streamId &&
+      typeof restored.lastEventId === 'string' &&
+      /^\d+-\d+$/.test(restored.lastEventId)
+    ) {
+      restoredCursor = restored.lastEventId
+      if (typeof restored.partialText === 'string') {
+        restoredText = restored.partialText.slice(0, 1_000_000)
+      }
+    }
+  } catch {
+    try {
+      sessionStorage.removeItem(storageKey)
+    } catch {
+      // Continue without resumable browser storage.
+    }
+  }
   const state = {
     buffer: '',
-    receivedCharacters: 0,
-    seenEventIds: new Set<number>(),
+    lastEventId: restoredCursor,
+    partialText: restoredText,
   }
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify({
+      userId: request.userId,
+      conversationId: request.conversationId,
+      generationId: request.generationId,
+      streamId: request.streamId,
+      lastEventId: restoredCursor,
+      partialText: restoredText,
+      updatedAt: Date.now(),
+    }))
+  } catch {
+    // Streaming remains functional when browser storage is unavailable.
+  }
+  if (restoredText) request.onRestore?.(restoredText)
   let retries = 0
 
   while (!request.signal.aborted) {
@@ -189,10 +268,13 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
 
     try {
       response = await fetch(
-        streamUrl(request.generationId, state.receivedCharacters),
+        streamUrl(request.generationId),
         {
           credentials: 'include',
           signal: request.signal,
+          headers: state.lastEventId === '0-0'
+            ? undefined
+            : { 'Last-Event-ID': state.lastEventId },
         },
       )
     } catch (error) {
@@ -215,9 +297,15 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
     }
 
     request.onConnectionState?.('connected')
+    state.buffer = ''
 
     try {
       if (await consumeSse(response, state, request)) {
+        try {
+          sessionStorage.removeItem(storageKey)
+        } catch {
+          // Ignore unavailable browser storage after successful completion.
+        }
         return
       }
     } catch (error) {

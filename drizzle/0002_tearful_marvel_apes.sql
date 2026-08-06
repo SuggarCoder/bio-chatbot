@@ -1,2 +1,0 @@
-ALTER TABLE "Artifact" DROP CONSTRAINT "chk_artifact_format";--> statement-breakpoint
-ALTER TABLE "Artifact" ADD CONSTRAINT "chk_artifact_format" CHECK ("Artifact"."format" in ('html', 'markdown', 'text', 'code', 'mermaid', 'pdf', 'csv', 'xlsx', 'json', 'png', 'jpeg', 'svg'));

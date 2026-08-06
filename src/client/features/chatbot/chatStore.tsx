@@ -43,7 +43,7 @@ export type GenerationStartRetry = {
 export type ActiveGeneration = {
   generationId: string
   streamId: string
-  status: 'pending' | 'streaming' | 'cancelling'
+  status: 'created' | 'queued' | 'scheduled' | 'running' | 'cancelling'
   replacesMessageId?: string
 }
 
@@ -625,7 +625,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         id,
         'activeGeneration',
         'status',
-        'streaming',
+        'running',
       )
     }
     applyGenerationActivity(id, {
@@ -708,7 +708,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         conversation.activeGeneration = {
           generationId,
           streamId,
-          status: 'pending',
+          status: 'created',
           replacesMessageId,
         }
       }),

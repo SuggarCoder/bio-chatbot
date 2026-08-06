@@ -1,5 +1,5 @@
 import {
-  generationControlChannel,
+  redisKey,
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
@@ -17,6 +17,7 @@ export type GenerationRuntime = {
   usage: GenerationUsage
   completion?: Promise<void>
   execution?: GenerationExecutionContext
+  abortReason?: 'cancel' | 'timeout' | 'lease_lost' | 'shutdown'
 }
 
 type ControlMessage = {
@@ -25,7 +26,7 @@ type ControlMessage = {
 }
 
 export class GenerationRuntimeRegistry {
-  readonly runnerId = `fastify-${crypto.randomUUID()}`
+  readonly runnerId = `worker-${crypto.randomUUID()}`
   private config: AppConfig
   private redis: RedisClient
   private subscriber?: RedisClient
@@ -47,7 +48,7 @@ export class GenerationRuntimeRegistry {
     })
     await subscriber.connect()
     await subscriber.subscribe(
-      generationControlChannel(this.config, this.runnerId),
+      redisKey(this.config, 'worker:cancel'),
       (payload) => {
         let message: ControlMessage
 
@@ -61,7 +62,7 @@ export class GenerationRuntimeRegistry {
           message.type === 'generation.cancel' &&
           typeof message.generationId === 'string'
         ) {
-          this.abort(message.generationId)
+          this.abort(message.generationId, 'cancel')
         }
       },
     )
@@ -82,13 +83,17 @@ export class GenerationRuntimeRegistry {
     return this.runtimes.get(generationId)
   }
 
-  abort(generationId: string): boolean {
+  abort(
+    generationId: string,
+    reason: GenerationRuntime['abortReason'] = 'cancel',
+  ): boolean {
     const runtime = this.runtimes.get(generationId)
 
     if (!runtime) {
       return false
     }
 
+    runtime.abortReason = reason
     runtime.controller.abort()
     return true
   }
@@ -101,8 +106,9 @@ export class GenerationRuntimeRegistry {
     return [...this.runtimes.values()]
   }
 
-  abortAll(): void {
+  abortAll(reason: GenerationRuntime['abortReason'] = 'shutdown'): void {
     for (const runtime of this.runtimes.values()) {
+      runtime.abortReason = reason
       runtime.controller.abort()
     }
   }

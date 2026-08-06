@@ -7,6 +7,7 @@ export type AppConfig = {
   serveClient: boolean
   trustedProxyCidrs: string | false
   databaseUrl: string
+  pgPoolMax: number
   redisUrl: string
   redisPrefix: string
   qwenApiKey: string
@@ -16,10 +17,15 @@ export type AppConfig = {
   gpas2AuthMode: 'mock' | 'upstream'
   gpas2UserInfoUrl?: string
   chatRateLimitPerMinute: number
-  maxConcurrentGenerations: number
   monthlyTokenLimit: number
-  generationLeaseSeconds: number
-  generationDisconnectGraceSeconds: number
+  globalGenerationConcurrency: number
+  providerGenerationConcurrency: number
+  modelGenerationConcurrency: number
+  generationTimeoutMs: number
+  generationLockLeaseMs: number
+  generationLockRenewIntervalMs: number
+  generationCancelPollIntervalMs: number
+  generationSnapshotIntervalMs: number
   artifactProtocolEnabled: boolean
   objectStorage: ObjectStorageConfig
 }
@@ -214,6 +220,23 @@ export function readConfig(): AppConfig {
 
   const environmentName = nodeEnv === 'production' ? 'prod' : 'dev'
   const trustedProxyCidrs = readTrustedProxyCidrs(process.env, nodeEnv)
+  const pgPoolMax = positiveInteger('PG_POOL_MAX', 4)
+  if (pgPoolMax > 4) {
+    throw new Error('PG_POOL_MAX must not exceed 4 in the 10-connection deployment')
+  }
+  const generationLockLeaseMs = positiveInteger(
+    'GENERATION_LOCK_LEASE_MS',
+    30_000,
+  )
+  const generationLockRenewIntervalMs = positiveInteger(
+    'GENERATION_LOCK_RENEW_INTERVAL_MS',
+    10_000,
+  )
+  if (generationLockRenewIntervalMs >= generationLockLeaseMs) {
+    throw new Error(
+      'GENERATION_LOCK_RENEW_INTERVAL_MS must be less than GENERATION_LOCK_LEASE_MS',
+    )
+  }
 
   return {
     nodeEnv,
@@ -222,10 +245,11 @@ export function readConfig(): AppConfig {
     serveClient: process.env.SERVE_CLIENT !== 'false',
     trustedProxyCidrs,
     databaseUrl: required('DATABASE_URL'),
+    pgPoolMax,
     redisUrl: required('REDIS_URL'),
     redisPrefix:
       process.env.REDIS_KEY_PREFIX?.trim() ||
-      `gpas2cb:${environmentName}:v2:`,
+      `gpas2cb:${environmentName}:v3:`,
     qwenApiKey: required('QWEN_API_KEY'),
     qwenBaseUrl:
       process.env.QWEN_BASE_URL?.trim() ||
@@ -237,12 +261,20 @@ export function readConfig(): AppConfig {
     gpas2AuthMode: authMode,
     gpas2UserInfoUrl,
     chatRateLimitPerMinute: positiveInteger('CHAT_RATE_LIMIT_PER_MINUTE', 10),
-    maxConcurrentGenerations: positiveInteger('MAX_CONCURRENT_GENERATIONS', 1),
     monthlyTokenLimit: positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true),
-    generationLeaseSeconds: positiveInteger('GENERATION_LEASE_SECONDS', 120),
-    generationDisconnectGraceSeconds: positiveInteger(
-      'GENERATION_DISCONNECT_GRACE_SECONDS',
-      45,
+    globalGenerationConcurrency: positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 4),
+    providerGenerationConcurrency: positiveInteger('PROVIDER_GENERATION_CONCURRENCY', 4),
+    modelGenerationConcurrency: positiveInteger('MODEL_GENERATION_CONCURRENCY', 4),
+    generationTimeoutMs: positiveInteger('GENERATION_TIMEOUT_MS', 180_000),
+    generationLockLeaseMs,
+    generationLockRenewIntervalMs,
+    generationCancelPollIntervalMs: positiveInteger(
+      'GENERATION_CANCEL_POLL_INTERVAL_MS',
+      300,
+    ),
+    generationSnapshotIntervalMs: positiveInteger(
+      'GENERATION_SNAPSHOT_INTERVAL_MS',
+      1_000,
     ),
     artifactProtocolEnabled: booleanValue(
       process.env,

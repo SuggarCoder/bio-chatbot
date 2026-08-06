@@ -419,7 +419,11 @@ async function runAssistantReply(
   let responseMarked = false
 
   try {
+    const userId = chatStore.currentUser()?.id
+    if (!userId) throw new Error('Current user is unavailable')
     await runChatStream({
+      userId,
+      conversationId,
       generationId,
       streamId,
       signal: controller.signal,
@@ -434,6 +438,12 @@ async function runAssistantReply(
           type: 'store',
           detail: `connection:${connectionState}`,
         })
+      },
+      onRestore: (content) => {
+        responseMarked = true
+        chatStore.markGenerationStarted(conversationId, generationId)
+        chatStore.markAssistantResponding(conversationId, generationId)
+        streamSession.push(0, content)
       },
       onEvent: (event) => {
         if (controller.signal.aborted) {

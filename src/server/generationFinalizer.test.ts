@@ -6,7 +6,7 @@ import { decideGenerationTerminalStatus } from './db.js'
 test('cancel intent committed before finalization wins', () => {
   assert.equal(
     decideGenerationTerminalStatus(
-      'streaming',
+      'running',
       new Date(),
       'completed',
     ),

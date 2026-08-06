@@ -28,6 +28,10 @@ const currentUser = z.object({
   name: nullableString,
   image: nullableString,
   gpas2Role: z.number().int().nullable(),
+  serviceTier: z.enum(['free', 'pro', 'enterprise']),
+  schedulingWeight: z.number().int().positive(),
+  generationConcurrencyLimit: z.number().int().positive(),
+  maxQueuedGenerations: z.number().int().positive(),
 })
 
 const chatSummary = z.object({
@@ -58,7 +62,7 @@ const chatMessage = z.object({
   id: uuid,
   seq: z.number().int().positive(),
   role: z.enum(['user', 'assistant']),
-  status: z.enum(['completed', 'cancelled', 'failed']),
+  status: z.enum(['pending', 'streaming', 'completed', 'cancelled', 'failed']),
   content: z.string(),
   parts: z.array(messagePart),
   createdAt: isoDate,
@@ -72,16 +76,23 @@ const chatMessage = z.object({
 
 const generation = z.object({
   id: uuid,
-  chatId: uuid.nullable(),
-  streamId: uuid.nullable(),
-  status: z.enum(['pending', 'streaming', 'completed', 'failed', 'cancelled']),
+  chatId: uuid,
+  streamId: z.string(),
+  status: z.enum([
+    'created', 'queued', 'scheduled', 'running', 'cancelling',
+    'completed', 'failed', 'cancelled', 'interrupted', 'timed_out',
+  ]),
   effectiveStatus: z.enum([
-    'pending',
-    'streaming',
+    'created',
+    'queued',
+    'scheduled',
+    'running',
     'cancelling',
     'completed',
     'failed',
     'cancelled',
+    'interrupted',
+    'timed_out',
   ]),
   provider: z.string(),
   model: z.string(),
@@ -114,8 +125,8 @@ const messagePage = z.object({
 
 const activeGeneration = z.object({
   id: uuid,
-  streamId: uuid,
-  status: z.enum(['pending', 'streaming', 'cancelling']),
+  streamId: z.string(),
+  status: z.enum(['created', 'queued', 'scheduled', 'running', 'cancelling']),
   replacesMessageId: uuid.nullable(),
 })
 
@@ -159,6 +170,7 @@ const artifactVersion = z.object({
 const generationStart = z.object({
   generation,
   userMessage: chatMessage,
+  assistantMessageId: uuid,
   replacesMessageId: uuid.nullable(),
 })
 
@@ -178,6 +190,7 @@ export const httpSchemas = {
           postgres: z.enum(['ok', 'unavailable']),
           redis: z.enum(['ok', 'unavailable']),
           objectStorage: z.enum(['ok', 'unavailable', 'disabled']),
+          worker: z.enum(['ok', 'unavailable']),
         }),
         time: isoDate,
       })),
@@ -190,6 +203,7 @@ export const httpSchemas = {
           postgres: z.enum(['ok', 'unavailable']),
           redis: z.enum(['ok', 'unavailable']),
           objectStorage: z.enum(['ok', 'unavailable', 'disabled']),
+          worker: z.enum(['ok', 'unavailable']),
         }),
         time: isoDate,
       })),
@@ -206,6 +220,9 @@ export const httpSchemas = {
   })),
   messageIdParams: jsonSchema(z.object({ messageId: uuid })),
   generationIdParams: jsonSchema(z.object({ generationId: uuid })),
+  shareSlugParams: jsonSchema(z.object({
+    shareSlug: z.string().regex(/^[A-Za-z0-9_-]{32}$/),
+  })),
   createChat: {
     body: jsonSchema(z.object({
       title: z.string().trim().min(1).max(200),
@@ -227,7 +244,6 @@ export const httpSchemas = {
   },
   regenerate: {
     body: jsonSchema(z.object({
-      requestId: uuid,
       artifactId: uuid.optional(),
     })),
     response: { 201: jsonSchema(generationStart), ...errorResponses },
@@ -235,7 +251,6 @@ export const httpSchemas = {
   createGeneration: {
     body: jsonSchema(z.object({
       content: z.string().trim().min(1).max(32_000),
-      clientMessageId: uuid,
       artifactId: uuid.optional(),
       supersedesGenerationId: uuid.optional(),
     })),
@@ -245,11 +260,8 @@ export const httpSchemas = {
     beforeSeq: z.string().regex(/^[1-9]\d*$/),
     limit: z.string().regex(/^(?:[1-9]|[1-9]\d|100)$/).optional(),
   })),
-  streamQuery: jsonSchema(z.object({
-    resumeAt: z.string().regex(/^\d+$/).optional(),
-  })),
   chatsResponse: {
-    200: jsonSchema(z.object({ chats: z.array(chatSummary) })),
+    200: jsonSchema(z.object({ conversations: z.array(chatSummary) })),
     ...errorResponses,
   },
   chatDetailResponse: {
@@ -267,6 +279,33 @@ export const httpSchemas = {
   generationResponse: {
     200: jsonSchema(generation),
     202: jsonSchema(generation),
+    ...errorResponses,
+  },
+  shareChat: {
+    body: jsonSchema(z.object({ mode: z.enum(['snapshot', 'live']) })),
+    response: {
+      200: jsonSchema(z.object({
+        shareSlug: z.string().regex(/^[A-Za-z0-9_-]{32}$/),
+        shareMode: z.enum(['snapshot', 'live']),
+        sharePath: z.string(),
+      })),
+      ...errorResponses,
+    },
+  },
+  sharedConversationResponse: {
+    200: jsonSchema(z.object({
+      id: uuid,
+      title: z.string(),
+      shareMode: z.enum(['snapshot', 'live']),
+      messages: z.array(chatMessage),
+    })),
+    ...errorResponses,
+  },
+  generationStatusResponse: {
+    200: jsonSchema(generation.extend({
+      streamAvailable: z.boolean(),
+      assistantMessage: chatMessage.nullable(),
+    })),
     ...errorResponses,
   },
   artifactListResponse: {

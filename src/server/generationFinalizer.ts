@@ -1,8 +1,6 @@
 import {
   applyMonthlyQuota,
   notifyGenerationStateChanged,
-  releaseGenerationLease,
-  setGenerationRealtimeState,
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
@@ -36,26 +34,6 @@ export class GenerationFinalizer {
           input.userId,
           input.generationId,
           input.usage.inputTokens + input.usage.outputTokens,
-        ),
-        setGenerationRealtimeState(
-          this.redis,
-          this.config,
-          input.generationId,
-          {
-            status: generation.status,
-            chatId: generation.chatId ?? '',
-            userId: input.userId,
-            streamId: generation.streamId ?? '',
-            inputTokens: String(input.usage.inputTokens),
-            outputTokens: String(input.usage.outputTokens),
-            finishedAt: generation.finishedAt ?? new Date().toISOString(),
-          },
-        ),
-        releaseGenerationLease(
-          this.redis,
-          this.config,
-          input.userId,
-          input.generationId,
         ),
         notifyGenerationStateChanged(
           this.redis,

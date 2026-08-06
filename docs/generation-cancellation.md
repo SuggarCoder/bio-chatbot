@@ -1,86 +1,62 @@
-# Generation Cancellation Architecture
+# Generation lifecycle, cancellation, and resume
 
-`Generation` is the only Chat/Agent run entity. Its UUID is the runtime and
-stream-event isolation boundary; no separate Run, epoch, or version exists.
+`Generation` is the durable lifecycle for one assistant response. PostgreSQL is authoritative; Redis provides only scheduling, leases, cancellation acceleration, snapshots, and temporary stream events.
 
-## Durable model
-
-- `Message` is immutable conversation history. Streaming never inserts or
-  updates an assistant message.
-- `Generation` is the durable execution lifecycle. PostgreSQL status is
-  `pending`, `streaming`, `completed`, `failed`, or `cancelled`.
-- A non-terminal Generation with `cancelRequestedAt` is effectively
-  `cancelling`. PostgreSQL does not store a `cancelling` enum value.
-- `Stream` belongs one-to-one to `Generation`. PostgreSQL stores identity and
-  expiry metadata; resumable-stream owns temporary Redis chunks.
-- `Generation.assistantMessageId` is assigned only by terminal finalization,
-  and points to the single immutable assistant message produced by that
-  Generation.
-- `UsageEvent` is written for completed, cancelled, and failed Generations.
-
-Cancelled or failed output is inserted once at terminalization only when it has
-UI-visible content. It remains visible after reload but is excluded from normal
-LLM context and shared-chat views.
-
-## Runtime and cancellation path
-
-Each Fastify instance owns a `runnerId` and a process-local
-`GenerationRuntimeRegistry`. Every running Generation has its own
-`AbortController`, partial-output accumulator, provider request ID, and usage
-accumulator.
+## State machine
 
 ```text
-Stop click
-  -> abort browser reader immediately
-  -> invalidate activeGenerationId and retain partial UI content
-  -> POST /api/generations/:generationId/cancel
-  -> authenticate via GPAS2 cookie and verify Generation.userId
-  -> PostgreSQL sets cancelRequestedAt/cancelSource idempotently
-  -> release logical concurrency lease
-  -> abort local runtime or publish control:runner:{runnerId}
-  -> provider/agent checkpoint observes AbortSignal or PostgreSQL intent
-  -> GenerationFinalizer locks row and commits one terminal result
+created -> queued -> scheduled -> running -> completed
+                                  |        -> failed
+                                  |        -> interrupted
+                                  |        -> timed_out
+                                  -> cancelling -> cancelled
 ```
 
-Redis is a low-latency projection and control plane only. Stream-event
-checkpoints poll PostgreSQL at most once per second; LLM, tool, Agent-iteration,
-and finalization boundaries force an authoritative query. This keeps durable
-cancellation available if Pub/Sub is lost or Redis is flushed.
+The API creates the user message, assistant placeholder, Generation, sequence allocation, and Outbox event in one short transaction. The assistant placeholder begins as `pending`; the Worker changes it to `streaming` and updates the same row once at terminal finalization.
 
-Network/SSE disconnect is intentionally absent from this path. The background
-producer continues and the browser may resume its Generation stream.
+No PostgreSQL transaction or connection remains checked out while the provider is streaming. Deltas go to a native Redis Stream and are aggregated in Worker memory. A one-second Redis snapshot supports crash diagnostics and partial-output recovery.
 
-## Finalization and races
+## Disconnect is not cancellation
 
-All outcomes use `GenerationFinalizer`. The database transaction selects the
-Generation `FOR UPDATE`:
+The SSE request owns only its stream subscription. Closing or refreshing the page cancels that reader but does not touch the Worker `AbortController`.
 
-1. A terminal row is an idempotent no-op.
-2. A row with `cancelRequestedAt` finalizes as `cancelled`.
-3. Otherwise the requested completed/failed outcome wins.
-4. Partial content is inserted as one immutable assistant message.
-5. Generation tokens, timings, terminal status, assistantMessageId, and
-   `UsageEvent` commit atomically.
+The only user cancellation path is:
 
-If Cancel commits first, Finalizer sees cancellation intent and chooses
-cancelled. If Complete commits first, Cancel sees an existing terminal status
-and returns it without overwriting it.
+```text
+POST /api/generations/:generationId/cancel
+  -> authenticate and enforce Generation.userId
+  -> persist cancelling/cancelled in PostgreSQL
+  -> SET generation:{userId}:{generationId}:cancel with TTL
+  -> PUBLISH worker:cancel
+  -> Worker aborts the Generation-scoped AbortController
+  -> finalizer stores partial output and cancelled state
+  -> Redis Stream receives message.finish
+```
 
-## Frontend isolation
+Pub/Sub is best effort. The Worker also checks the cancel key and PostgreSQL at throttled checkpoints, so a lost notification cannot lose durable cancellation intent.
 
-The chat store owns an `ActiveGeneration` object, not an `isGenerating`
-boolean. Every stream event includes `generationId` and `streamId`; an event is
-discarded unless its `generationId` equals the chat's current active
-Generation. Stop clears that identity synchronously, so delayed G1 events
-cannot alter G2.
+## Resume
 
-## Tools and detached jobs
+Each Generation has one logical `streamId`, while the SSE cursor is the Redis Stream entry ID. The client stores `{ userId, conversationId, generationId, streamId, lastEventId }` in `sessionStorage` and reconnects with:
 
-Tool executors must receive the Generation signal and call the authoritative
-checkpoint before and after execution. Cancellable tools pass the signal to
-their HTTP/MCP/provider call. A side-effecting tool creates `ToolRun` before
-execution and records what actually happened; abort never implies rollback.
+```http
+Last-Event-ID: 1785930000000-0
+```
 
-`AnalysisJob` has its own cancellation lifecycle. Generation cancellation does
-not cancel a detached job by default. `AnalysisJob.originToolRunId` records
-lineage without coupling lifecycles.
+The process-level stream hub uses one Redis Subscriber and fans out events to all local SSE readers. Pub/Sub only wakes readers; replay always comes from ordered `XRANGE` reads. Heartbeat comments keep idle SSE connections alive.
+
+If Redis data has expired, terminal Generation state and the assistant message are returned from PostgreSQL. A running Generation stream is retained for one hour with sliding expiry; completed/cancelled streams retain 15 minutes and failed streams 30 minutes.
+
+## Worker recovery
+
+The Worker renews the Generation lease and conversation lock every 10 seconds against a 30-second TTL. Recovery behavior is deliberately conservative:
+
+- No provider request marker: requeue through a new Outbox event.
+- Provider request marker exists: finalize as `interrupted`; never call the provider again automatically.
+- Cancellation intent exists: finalize as `cancelled` using the latest Redis snapshot.
+
+This avoids duplicate provider charges and duplicate assistant answers.
+
+## Race guarantees
+
+Finalization locks the Generation row. Terminal rows are idempotent. If cancellation commits first, finalization chooses `cancelled`; if a terminal result commits first, a later cancel is a no-op. A partial unique index plus the Redis conversation lock ensure only one scheduled/running/cancelling Generation exists per conversation.

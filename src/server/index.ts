@@ -11,9 +11,10 @@ import { GenerationFinalizer } from './generationFinalizer.js'
 import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
 import { SeaweedS3ObjectStore } from './storage/seaweedS3ObjectStore.js'
 import { ArtifactService } from './artifacts/service.js'
+import { GenerationStreamHub } from './streamStore.js'
 
 const config = readConfig()
-const database = createDatabase(config.databaseUrl)
+const database = createDatabase(config.databaseUrl, config.pgPoolMax)
 const redis = createRedisClient(config)
 const objectStore = config.objectStorage.enabled
   ? new SeaweedS3ObjectStore(config.objectStorage)
@@ -36,7 +37,6 @@ try {
 }
 
 const runtimes = new GenerationRuntimeRegistry(config, redis)
-await runtimes.start()
 const finalizer = new GenerationFinalizer(
   config,
   database,
@@ -51,11 +51,14 @@ const generations = new GenerationService(
   finalizer,
   artifactService,
 )
+const streamHub = new GenerationStreamHub(config, redis)
+if (redis.isReady) await streamHub.start()
 const app = await buildApp({
   config,
   database,
   redis,
   generations,
+  streamHub,
   objectStore,
   artifactService,
 })
@@ -80,6 +83,7 @@ async function shutdown(signal: string): Promise<void> {
   await generations.shutdown()
 
   await app.close()
+  await streamHub.close()
   await runtimes.close()
   await Promise.allSettled([
     closeDatabase(database),

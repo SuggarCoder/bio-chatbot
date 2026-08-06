@@ -14,6 +14,7 @@ import {
   ChatbotEmptyState,
   ChatbotPage,
 } from './pages/chatbot/ChatbotPage'
+import { SharedConversationPage } from './pages/shared/SharedConversationPage'
 import { routerBase } from './routes'
 
 
@@ -55,6 +56,7 @@ export default function App() {
 
   return (
     <Router base={routerBase} root={RootLayout}>
+      <Route path="/shared/:shareSlug" component={SharedConversationPage} />
       <Route path="/" component={ChatbotRoute}>
         <Route path="/" component={ChatbotEmptyState} />
         <Route path="/:id" component={ChatSessionPage} />

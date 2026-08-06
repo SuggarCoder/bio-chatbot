@@ -56,6 +56,7 @@ test('Artifact create/replace is append-only and tenant isolated', {
   const otherUserId = randomUUID()
   const chatId = randomUUID()
   const messageId = randomUUID()
+  const userMessageId = randomUUID()
   const generationId = randomUUID()
   const preparedKeys: string[] = []
 
@@ -65,20 +66,37 @@ test('Artifact create/replace is append-only and tenant isolated', {
       { id: otherUserId, externalUserId: `artifact-test-${otherUserId}` },
     ])
     await database.insert(chats).values({ id: chatId, userId, title: 'Artifact test' })
-    await database.insert(messages).values({
-      id: messageId,
-      chatId,
-      seq: 1n,
-      role: 'assistant',
-      status: 'completed',
-      parts: [],
-    })
+    await database.insert(messages).values([
+      {
+        id: userMessageId,
+        userId,
+        chatId,
+        seq: 1n,
+        role: 'user',
+        status: 'completed',
+        content: 'Create an artifact',
+        parts: [{ type: 'text', text: 'Create an artifact' }],
+      },
+      {
+        id: messageId,
+        userId,
+        chatId,
+        generationId,
+        seq: 2n,
+        role: 'assistant',
+        status: 'completed',
+        parts: [],
+      },
+    ])
     await database.insert(generations).values({
       id: generationId,
       chatId,
       userId,
+      userMessageId,
+      assistantMessageId: messageId,
       provider: 'test',
       model: 'test',
+      streamId: `artifact-test-${generationId}`,
       requestId: `artifact-test-${generationId}`,
     })
 
@@ -146,4 +164,3 @@ test('Artifact create/replace is append-only and tenant isolated', {
     await closeDatabase(database)
   }
 })
-

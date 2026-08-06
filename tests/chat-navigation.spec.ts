@@ -6,7 +6,7 @@ const summaries = [
   {
     id: 'conversation-a',
     title: 'Conversation A',
-    chatType: 'chat',
+    chatType: 'general',
     status: 'active',
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -14,7 +14,7 @@ const summaries = [
   {
     id: 'conversation-b',
     title: 'Conversation B',
-    chatType: 'chat',
+    chatType: 'general',
     status: 'active',
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -67,14 +67,18 @@ test('switching directly between sessions loads the destination messages', async
         name: 'Test User',
         image: null,
         gpas2Role: null,
+        serviceTier: 'free',
+        schedulingWeight: 1,
+        generationConcurrencyLimit: 1,
+        maxQueuedGenerations: 5,
       } })
       return
     }
-    if (pathname.endsWith('/api/chats')) {
-      await route.fulfill({ json: { chats: summaries } })
+    if (pathname.endsWith('/api/conversations')) {
+      await route.fulfill({ json: { conversations: summaries } })
       return
     }
-    const match = pathname.match(/\/api\/chats\/(conversation-[ab])$/)
+    const match = pathname.match(/\/api\/conversations\/(conversation-[ab])$/)
     if (match) {
       detailRequests.push(match[1])
       if (match[1] === 'conversation-b') {
@@ -121,6 +125,7 @@ test('a rejected generation start retries the original request instead of regene
   const userMessageId = '44444444-4444-4444-8444-444444444444'
   const assistantMessageId = '55555555-5555-4555-8555-555555555555'
   const generationBodies: Array<Record<string, unknown>> = []
+  const idempotencyKeys: string[] = []
   const regenerateRequests: string[] = []
 
   await page.route('**/ai-chatbot/api/**', async (route) => {
@@ -148,26 +153,31 @@ test('a rejected generation start retries the original request instead of regene
         name: 'Test User',
         image: null,
         gpas2Role: null,
+        serviceTier: 'free',
+        schedulingWeight: 1,
+        generationConcurrencyLimit: 1,
+        maxQueuedGenerations: 5,
       } })
       return
     }
-    if (pathname.endsWith('/api/chats') && request.method() === 'GET') {
-      await route.fulfill({ json: { chats: [] } })
+    if (pathname.endsWith('/api/conversations') && request.method() === 'GET') {
+      await route.fulfill({ json: { conversations: [] } })
       return
     }
-    if (pathname.endsWith('/api/chats') && request.method() === 'POST') {
+    if (pathname.endsWith('/api/conversations') && request.method() === 'POST') {
       await route.fulfill({ json: {
         id: chatId,
         title: 'Retry this request',
-        chatType: 'chat',
+        chatType: 'general',
         status: 'active',
         createdAt: timestamp,
         updatedAt: timestamp,
       } })
       return
     }
-    if (pathname.endsWith(`/api/chats/${chatId}/generations`)) {
+    if (pathname.endsWith(`/api/conversations/${chatId}/messages`)) {
       generationBodies.push(request.postDataJSON() as Record<string, unknown>)
+      idempotencyKeys.push(request.headers()['idempotency-key'] ?? '')
       if (generationBodies.length === 1) {
         await route.fulfill({
           status: 429,
@@ -185,11 +195,12 @@ test('a rejected generation start retries the original request instead of regene
             id: generationId,
             chatId,
             streamId,
-            status: 'pending',
-            effectiveStatus: 'pending',
+            status: 'created',
+            effectiveStatus: 'created',
             cancelRequestedAt: null,
             cancelSource: null,
           },
+          assistantMessageId,
           userMessage: {
             id: userMessageId,
             seq: 1,
@@ -206,7 +217,7 @@ test('a rejected generation start retries the original request instead of regene
       })
       return
     }
-    if (pathname.includes('/api/messages/') && pathname.endsWith('/regenerate')) {
+    if (pathname.includes('/api/messages/') && pathname.endsWith('/regenerations')) {
       regenerateRequests.push(pathname)
       await route.fulfill({ status: 404, json: { error: {
         code: 'message_not_found',
@@ -246,7 +257,9 @@ test('a rejected generation start retries the original request instead of regene
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
-        body: events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+        body: events.map((event, index) => (
+          `id: 1-${index}\ndata: ${JSON.stringify(event)}\n\n`
+        )).join(''),
       })
       return
     }
@@ -263,8 +276,7 @@ test('a rejected generation start retries the original request instead of regene
 
   await expect(page.getByText('Recovered answer')).toBeVisible()
   expect(generationBodies).toHaveLength(2)
-  expect(generationBodies[1].clientMessageId).toBe(
-    generationBodies[0].clientMessageId,
-  )
+  expect(generationBodies[0].clientMessageId).toBeUndefined()
+  expect(idempotencyKeys[1]).toBe(idempotencyKeys[0])
   expect(regenerateRequests).toEqual([])
 })
