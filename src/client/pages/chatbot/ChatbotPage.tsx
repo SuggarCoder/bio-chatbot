@@ -38,6 +38,17 @@ import {
   getAdaptiveStreamSession,
 } from '../../features/chatbot/adaptiveStream'
 import {
+  ConversationAnchorNavigator,
+  type ConversationAnchorItem,
+} from '../../features/chatbot/ConversationAnchorNavigator'
+import {
+  createQuestionAnchorLabel,
+  findActiveConversationAnchor,
+  getConversationAnchorPosition,
+  normalizeQuestionAnchorText,
+  shouldShowConversationAnchors,
+} from '../../features/chatbot/conversationAnchors'
+import {
   StaticMarkdown,
   StreamingMarkdown,
 } from '../../features/chatbot/MarkdownMessage'
@@ -1564,6 +1575,7 @@ function MessageActionToolbar(props: {
 
 function ChatMessageBubble(props: {
   message: ChatMessage
+  highlighted?: boolean
   latestAssistant: boolean
   generationActive: boolean
   onVisibleProgress: (generationId: string) => void
@@ -1602,7 +1614,7 @@ function ChatMessageBubble(props: {
         <div
           class={
             isUser()
-              ? 'relative rounded-3xl bg-slate-100 px-4 py-2 text-slate-400'
+              ? `relative rounded-3xl bg-slate-100 px-4 py-2 text-slate-400 transition-shadow duration-300 ${props.highlighted ? 'ring-2 ring-teal-400 ring-offset-2' : ''}`
               : 'relative rounded-3xl bg-white px-4 py-2 text-slate-700'
           }
         >
@@ -1834,10 +1846,21 @@ function SessionConversationView(props: { conversationId: string }) {
   const [isMessageListScrolling, setIsMessageListScrolling] = createSignal(false)
   const [isConversationLoading, setIsConversationLoading] = createSignal(true)
   const [isStoppingGeneration, setIsStoppingGeneration] = createSignal(false)
+  const [conversationAnchors, setConversationAnchors] = createSignal<ConversationAnchorItem[]>([])
+  const [activeConversationAnchorId, setActiveConversationAnchorId] = createSignal<string>()
+  const [showConversationAnchors, setShowConversationAnchors] = createSignal(false)
+  const [highlightedQuestionId, setHighlightedQuestionId] = createSignal<string>()
   const conversation = () => chatStore.getConversation(props.conversationId)
   let scrollFadeTimer: number | undefined
   let pointerScrollEndTimer: number | undefined
+  let questionHighlightTimer: number | undefined
   let messageListRef: HTMLDivElement | undefined
+  let messageContentRef: HTMLDivElement | undefined
+  let anchorResizeObserver: ResizeObserver | undefined
+  let anchorLayoutFrame: number | undefined
+  let anchorElements = new Map<string, HTMLElement>()
+  let anchorOffsets: Array<{ id: string; top: number }> = []
+  let anchorConversationId = props.conversationId
   let shouldStickToBottom = true
   let isPointerScrollInteraction = false
   let wheelAnimationFrame: number | undefined
@@ -1968,6 +1991,137 @@ function SessionConversationView(props: { conversationId: string }) {
       wheelScrollTarget = messageListRef.scrollTop
     }
   }
+  const updateActiveConversationAnchor = () => {
+    if (!messageListRef) {
+      return
+    }
+
+    setActiveConversationAnchorId(findActiveConversationAnchor(
+      anchorOffsets,
+      messageListRef.scrollTop,
+    ))
+  }
+  const measureConversationAnchors = () => {
+    anchorLayoutFrame = undefined
+
+    if (!messageListRef || !messageContentRef) {
+      setConversationAnchors([])
+      setShowConversationAnchors(false)
+      return
+    }
+
+    const questionMessages = new Map(
+      visibleMessages()
+        .filter((message) => message.role === 'user')
+        .map((message) => [message.id, message]),
+    )
+    const nextElements = new Map<string, HTMLElement>()
+    const nextOffsets: Array<{ id: string; top: number }> = []
+
+    messageContentRef
+      .querySelectorAll<HTMLElement>('[data-question-anchor="true"]')
+      .forEach((element) => {
+        const messageId = element.dataset.messageId
+
+        if (!messageId || !questionMessages.has(messageId)) {
+          return
+        }
+
+        nextElements.set(messageId, element)
+        nextOffsets.push({ id: messageId, top: element.offsetTop })
+      })
+
+    nextOffsets.sort((left, right) => left.top - right.top)
+    anchorElements = nextElements
+    anchorOffsets = nextOffsets
+    const maxScrollTop = Math.max(
+      messageListRef.scrollHeight - messageListRef.clientHeight,
+      0,
+    )
+    const nextAnchors = nextOffsets.flatMap((anchor) => {
+      const message = questionMessages.get(anchor.id)
+
+      if (!message) {
+        return []
+      }
+
+      const fullText = normalizeQuestionAnchorText(message.content)
+
+      return [{
+        id: anchor.id,
+        label: createQuestionAnchorLabel(message.content),
+        fullText,
+        position: getConversationAnchorPosition(
+          Math.max(anchor.top - 16, 0),
+          maxScrollTop,
+        ),
+      }]
+    })
+
+    setConversationAnchors(nextAnchors)
+    setShowConversationAnchors(shouldShowConversationAnchors(
+      messageListRef.scrollHeight,
+      messageListRef.clientHeight,
+      nextAnchors.length,
+    ))
+    updateActiveConversationAnchor()
+  }
+  const scheduleConversationAnchorMeasurement = () => {
+    if (anchorLayoutFrame !== undefined) {
+      return
+    }
+
+    anchorLayoutFrame = window.requestAnimationFrame(measureConversationAnchors)
+  }
+  const connectConversationAnchorObserver = () => {
+    if (!messageListRef || !messageContentRef) {
+      return
+    }
+
+    anchorResizeObserver?.disconnect()
+    anchorResizeObserver = new ResizeObserver(
+      scheduleConversationAnchorMeasurement,
+    )
+    anchorResizeObserver.observe(messageListRef)
+    anchorResizeObserver.observe(messageContentRef)
+    scheduleConversationAnchorMeasurement()
+  }
+  const jumpToConversationAnchor = (messageId: string) => {
+    const element = anchorElements.get(messageId)
+
+    if (!messageListRef || !element) {
+      return
+    }
+
+    cancelWheelAnimation()
+    shouldStickToBottom = false
+    isPointerScrollInteraction = false
+    const maxScrollTop = Math.max(
+      messageListRef.scrollHeight - messageListRef.clientHeight,
+      0,
+    )
+    const targetTop = Math.min(
+      Math.max(element.offsetTop - 16, 0),
+      maxScrollTop,
+    )
+    wheelScrollTarget = targetTop
+    messageListRef.scrollTo({
+      top: targetTop,
+      behavior: prefersReducedMotion.matches ? 'auto' : 'smooth',
+    })
+    setActiveConversationAnchorId(messageId)
+    setHighlightedQuestionId(messageId)
+    showMessageListScrollbar()
+
+    if (questionHighlightTimer !== undefined) {
+      window.clearTimeout(questionHighlightTimer)
+    }
+
+    questionHighlightTimer = window.setTimeout(() => {
+      setHighlightedQuestionId(undefined)
+      questionHighlightTimer = undefined
+    }, 1200)
+  }
   const updateShouldStickToBottom = () => {
     if (!messageListRef) {
       return
@@ -2048,7 +2202,30 @@ function SessionConversationView(props: { conversationId: string }) {
       wheelAnimationFrame = window.requestAnimationFrame(animateWheelScroll)
     }
   }
+  const loadOlderMessagesPreservingPosition = async () => {
+    const activeConversation = conversation()
+
+    if (
+      !messageListRef ||
+      !activeConversation?.hasMoreMessages ||
+      activeConversation.loadingOlderMessages
+    ) {
+      return
+    }
+
+    const previousHeight = messageListRef.scrollHeight
+    const previousTop = messageListRef.scrollTop
+    await chatStore.loadOlderMessages(props.conversationId)
+    window.requestAnimationFrame(() => {
+      if (!messageListRef) return
+      const addedHeight = messageListRef.scrollHeight - previousHeight
+      messageListRef.scrollTop = previousTop + addedHeight
+      wheelScrollTarget = messageListRef.scrollTop
+      scheduleConversationAnchorMeasurement()
+    })
+  }
   const handleMessageListScroll = () => {
+    updateActiveConversationAnchor()
     if (isPointerScrollInteraction) {
       updateShouldStickToBottom()
       finishPointerScrollInteraction()
@@ -2059,16 +2236,7 @@ function SessionConversationView(props: { conversationId: string }) {
       conversation()?.hasMoreMessages &&
       !conversation()?.loadingOlderMessages
     ) {
-      const previousHeight = messageListRef.scrollHeight
-      const previousTop = messageListRef.scrollTop
-      void chatStore.loadOlderMessages(props.conversationId).then(() => {
-        window.requestAnimationFrame(() => {
-          if (!messageListRef) return
-          const addedHeight = messageListRef.scrollHeight - previousHeight
-          messageListRef.scrollTop = previousTop + addedHeight
-          wheelScrollTarget = messageListRef.scrollTop
-        })
-      })
+      void loadOlderMessagesPreservingPosition()
     }
   }
   const followVisibleOutput = (generationId: string) => {
@@ -2132,6 +2300,11 @@ function SessionConversationView(props: { conversationId: string }) {
 
   onCleanup(() => {
     cancelWheelAnimation()
+    anchorResizeObserver?.disconnect()
+
+    if (anchorLayoutFrame !== undefined) {
+      window.cancelAnimationFrame(anchorLayoutFrame)
+    }
 
     if (followScrollFrame !== undefined) {
       window.cancelAnimationFrame(followScrollFrame)
@@ -2143,6 +2316,10 @@ function SessionConversationView(props: { conversationId: string }) {
 
     if (scrollFadeTimer !== undefined) {
       window.clearTimeout(scrollFadeTimer)
+    }
+
+    if (questionHighlightTimer !== undefined) {
+      window.clearTimeout(questionHighlightTimer)
     }
   })
 
@@ -2216,6 +2393,25 @@ function SessionConversationView(props: { conversationId: string }) {
         )
       : messages
   }
+  createEffect(() => {
+    const conversationId = props.conversationId
+    const messageSignature = visibleMessages()
+      .map((message) => `${message.id}:${message.role}`)
+      .join('|')
+    void messageSignature
+
+    if (anchorConversationId !== conversationId) {
+      anchorConversationId = conversationId
+      anchorElements = new Map()
+      anchorOffsets = []
+      setConversationAnchors([])
+      setActiveConversationAnchorId(undefined)
+      setShowConversationAnchors(false)
+      setHighlightedQuestionId(undefined)
+    }
+
+    scheduleConversationAnchorMeasurement()
+  })
   const latestAssistantId = () => {
     const messages = visibleMessages()
 
@@ -2351,47 +2547,78 @@ function SessionConversationView(props: { conversationId: string }) {
             }
           >
             <div class="flex min-h-0 flex-1 flex-col">
-              <div
-                ref={messageListRef}
-                class={`gpas-scrollbar scrollbar-fade flex min-h-0 flex-1 flex-col overflow-y-auto pr-2 ${isMessageListScrolling() ? 'scrollbar-visible' : ''}`}
-                onScroll={handleMessageListScroll}
-                onWheel={handleMessageListWheel}
-                onPointerDown={() => {
-                  isPointerScrollInteraction = true
-                  cancelWheelAnimation()
-                  showMessageListScrollbar()
-                }}
-                onPointerUp={finishPointerScrollInteraction}
-                onPointerCancel={finishPointerScrollInteraction}
-              >
-                <div class="flex flex-col gap-4">
-                  <Show when={activeConversation().hasMoreMessages}>
-                    <button
-                      type="button"
-                      class="mx-auto rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-100 disabled:opacity-50"
-                      disabled={activeConversation().loadingOlderMessages}
-                      onClick={() => handleMessageListScroll()}
-                    >
-                      {activeConversation().loadingOlderMessages
-                        ? 'Loading earlier messages...'
-                        : activeConversation().olderMessagesError
-                          ? 'Retry loading earlier messages'
-                          : 'Load earlier messages'}
-                    </button>
-                  </Show>
-                  <For each={visibleMessages()}>
-                    {(message) => (
-                      <ChatMessageBubble
-                        message={message}
-                        latestAssistant={message.id === latestAssistantId()}
-                        generationActive={Boolean(activeConversation().activeGeneration)}
-                        onVisibleProgress={followVisibleOutput}
-                        onVote={(vote) => updateVote(message, vote)}
-                        onRegenerate={() => regenerate(message)}
-                      />
-                    )}
-                  </For>
+              <div class="relative flex min-h-0 flex-1">
+                <div
+                  ref={(element) => {
+                    messageListRef = element
+                    connectConversationAnchorObserver()
+                  }}
+                  data-testid="conversation-message-list"
+                  class={`gpas-scrollbar scrollbar-fade flex min-h-0 flex-1 flex-col overflow-y-auto pr-8 ${isMessageListScrolling() ? 'scrollbar-visible' : ''}`}
+                  onScroll={handleMessageListScroll}
+                  onWheel={handleMessageListWheel}
+                  onPointerDown={() => {
+                    isPointerScrollInteraction = true
+                    cancelWheelAnimation()
+                    showMessageListScrollbar()
+                  }}
+                  onPointerUp={finishPointerScrollInteraction}
+                  onPointerCancel={finishPointerScrollInteraction}
+                >
+                  <div
+                    ref={(element) => {
+                      messageContentRef = element
+                      connectConversationAnchorObserver()
+                    }}
+                    class="relative flex flex-col gap-4"
+                  >
+                    <Show when={activeConversation().hasMoreMessages}>
+                      <button
+                        type="button"
+                        class="mx-auto rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-100 disabled:opacity-50"
+                        disabled={activeConversation().loadingOlderMessages}
+                        onClick={() => void loadOlderMessagesPreservingPosition()}
+                      >
+                        {activeConversation().loadingOlderMessages
+                          ? 'Loading earlier messages...'
+                          : activeConversation().olderMessagesError
+                            ? 'Retry loading earlier messages'
+                            : 'Load earlier messages'}
+                      </button>
+                    </Show>
+                    <For each={visibleMessages()}>
+                      {(message) => (
+                        <div
+                          data-message-id={message.id}
+                          data-question-anchor={message.role === 'user' ? 'true' : undefined}
+                          data-anchor-highlighted={highlightedQuestionId() === message.id ? 'true' : undefined}
+                        >
+                          <ChatMessageBubble
+                            message={message}
+                            highlighted={highlightedQuestionId() === message.id}
+                            latestAssistant={message.id === latestAssistantId()}
+                            generationActive={Boolean(activeConversation().activeGeneration)}
+                            onVisibleProgress={followVisibleOutput}
+                            onVote={(vote) => updateVote(message, vote)}
+                            onRegenerate={() => regenerate(message)}
+                          />
+                        </div>
+                      )}
+                    </For>
+                  </div>
                 </div>
+
+                <Show when={showConversationAnchors()}>
+                  <ConversationAnchorNavigator
+                    anchors={conversationAnchors()}
+                    activeId={activeConversationAnchorId()}
+                    hasMoreMessages={activeConversation().hasMoreMessages}
+                    loadingOlderMessages={Boolean(activeConversation().loadingOlderMessages)}
+                    olderMessagesError={activeConversation().olderMessagesError}
+                    onLoadOlder={() => void loadOlderMessagesPreservingPosition()}
+                    onSelect={jumpToConversationAnchor}
+                  />
+                </Show>
               </div>
 
               <ChatComposer

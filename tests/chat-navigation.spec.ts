@@ -419,3 +419,162 @@ test('a rejected generation start retries the original request instead of regene
   expect(idempotencyKeys[1]).toBe(idempotencyKeys[0])
   expect(regenerateRequests).toEqual([])
 })
+
+test('long conversations expose question anchors and preserve position while loading earlier questions', async ({ page }) => {
+  const questionTexts = [
+    '这是第一个用于定位的超长问题，请介绍研究背景',
+    '这是第二个用于定位的超长问题，请比较实验方法',
+    '这是第三个用于定位的超长问题，请分析数据质量',
+    '这是第四个用于定位的超长问题，请解释主要结论',
+    '这是第五个用于定位的超长问题，请列出潜在风险',
+    '这是第六个用于定位的超长问题，请给出后续建议',
+  ]
+  const longAnswer = Array.from(
+    { length: 12 },
+    (_, index) => `第 ${index + 1} 段回答用于构造足够长的聊天记录，以便验证提问锚点导航。`,
+  ).join('\n\n')
+  const messages = questionTexts.flatMap((content, index) => ([
+    {
+      id: `long-user-${index + 1}`,
+      seq: 51 + index * 2,
+      role: 'user',
+      status: 'completed',
+      content,
+      parts: [{ type: 'text', order: 0, text: content }],
+      createdAt: timestamp,
+      vote: null,
+      executionSteps: [],
+    },
+    {
+      id: `long-assistant-${index + 1}`,
+      seq: 52 + index * 2,
+      role: 'assistant',
+      status: 'completed',
+      content: longAnswer,
+      parts: [{ type: 'text', order: 0, text: longAnswer }],
+      createdAt: timestamp,
+      vote: null,
+      executionSteps: [],
+    },
+  ]))
+  const earlierQuestion = '这是更早加载的问题，用于验证分页锚点'
+  let olderMessageRequests = 0
+
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname
+
+    if (pathname.endsWith('/api/health')) {
+      await route.fulfill({ json: {
+        status: 'ok',
+        service: 'ai-chatbot',
+        commit: 'test',
+        time: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/me')) {
+      await route.fulfill({ json: {
+        id: 'test-user',
+        externalUserId: 'test-user',
+        externalTeamId: null,
+        realName: 'Test User',
+        userName: 'tester',
+        jobTitle: null,
+        researchField: null,
+        email: 'test@example.com',
+        name: 'Test User',
+        image: null,
+        gpas2Role: null,
+        serviceTier: 'free',
+        schedulingWeight: 1,
+        generationConcurrencyLimit: 1,
+        maxQueuedGenerations: 5,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations')) {
+      await route.fulfill({ json: { conversations: summaries } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations/conversation-a/messages')) {
+      olderMessageRequests += 1
+      await route.fulfill({ json: {
+        messages: [
+          {
+            id: 'long-user-earlier',
+            seq: 49,
+            role: 'user',
+            status: 'completed',
+            content: earlierQuestion,
+            parts: [{ type: 'text', order: 0, text: earlierQuestion }],
+            createdAt: timestamp,
+            vote: null,
+            executionSteps: [],
+          },
+          {
+            id: 'long-assistant-earlier',
+            seq: 50,
+            role: 'assistant',
+            status: 'completed',
+            content: longAnswer,
+            parts: [{ type: 'text', order: 0, text: longAnswer }],
+            createdAt: timestamp,
+            vote: null,
+            executionSteps: [],
+          },
+        ],
+        pageInfo: { hasMore: false, beforeSeq: null },
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations/conversation-a')) {
+      await route.fulfill({ json: {
+        ...summaries[0],
+        messages,
+        pageInfo: { hasMore: true, beforeSeq: 51 },
+        activeGeneration: null,
+      } })
+      return
+    }
+    await route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/conversation-a')
+  const rail = page.getByRole('button', { name: '打开提问导航' })
+  await expect(rail).toBeVisible()
+  await rail.hover()
+
+  const navigator = page.getByRole('navigation', { name: '提问导航' })
+  await expect(navigator).toBeVisible()
+  await expect(navigator.getByText('6 个提问')).toBeVisible()
+  await navigator.getByRole('button', { name: /跳转到提问：这是第四个/ }).click()
+
+  const messageList = page.getByTestId('conversation-message-list')
+  const targetQuestion = page.locator('[data-message-id="long-user-4"]')
+  await expect(targetQuestion).toHaveAttribute('data-anchor-highlighted', 'true')
+  await expect.poll(async () => {
+    const listBox = await messageList.boundingBox()
+    const targetBox = await targetQuestion.boundingBox()
+    return listBox && targetBox ? Math.round(targetBox.y - listBox.y) : -1
+  }).toBeGreaterThanOrEqual(12)
+  await expect.poll(async () => {
+    const listBox = await messageList.boundingBox()
+    const targetBox = await targetQuestion.boundingBox()
+    return listBox && targetBox ? Math.round(targetBox.y - listBox.y) : 999
+  }).toBeLessThanOrEqual(28)
+
+  const targetTopBeforeLoading = await targetQuestion.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  )
+  await navigator.getByRole('button', { name: '加载更早提问' }).click()
+  await expect(navigator.getByRole('button', { name: new RegExp(earlierQuestion) })).toBeVisible()
+  const targetTopAfterLoading = await targetQuestion.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  )
+  expect(Math.abs(targetTopAfterLoading - targetTopBeforeLoading)).toBeLessThan(2)
+  expect(olderMessageRequests).toBe(1)
+
+  await page.setViewportSize({ width: 800, height: 720 })
+  await expect(rail).toBeHidden()
+})
