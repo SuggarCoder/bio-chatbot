@@ -16,6 +16,7 @@ type ArtifactStoreState = {
   activeStreamId: string | null
   activeVersion: number | null
   isPanelOpen: boolean
+  isPanelExpanded: boolean
   panelInteractionRevision: number
   activeTab: 'preview' | 'code'
   panelWidth: number
@@ -29,6 +30,7 @@ const [artifactState, setArtifactState] = createStore<ArtifactStoreState>({
   activeStreamId: null,
   activeVersion: null,
   isPanelOpen: false,
+  isPanelExpanded: false,
   panelInteractionRevision: 0,
   activeTab: 'preview',
   panelWidth: 520,
@@ -47,6 +49,7 @@ function clearPanelSelection() {
     activeStreamId: null,
     activeVersion: null,
     activeTab: 'preview',
+    isPanelExpanded: false,
   })
 }
 
@@ -94,7 +97,10 @@ export const artifactStore = {
       status: 'streaming',
     })
     setArtifactState('activeStreamId', null)
-    setArtifactState('isPanelOpen', false)
+    setArtifactState({
+      isPanelOpen: false,
+      isPanelExpanded: false,
+    })
   },
   delta(streamId: string, delta: string) {
     pendingDeltas.set(streamId, (pendingDeltas.get(streamId) ?? '') + delta)
@@ -215,6 +221,7 @@ export const artifactStore = {
     }
     setArtifactState({
       isPanelOpen: false,
+      isPanelExpanded: false,
       activeTab: 'preview',
     })
   },
@@ -227,6 +234,14 @@ export const artifactStore = {
   setWidth(width: number) {
     setArtifactState('panelWidth', Math.min(840, Math.max(360, width)))
   },
+  toggleExpanded() {
+    if (!artifactState.isPanelOpen) return
+    setArtifactState('panelInteractionRevision', (value) => value + 1)
+    setArtifactState('isPanelExpanded', (value) => !value)
+  },
+  collapse() {
+    setArtifactState('isPanelExpanded', false)
+  },
   setVisibleConversation(conversationId: string | null) {
     if (artifactState.visibleConversationId === conversationId) return
     setArtifactState('visibleConversationId', conversationId)
@@ -234,6 +249,7 @@ export const artifactStore = {
       clearSelectionAfterClose = true
       setArtifactState({
         isPanelOpen: false,
+        isPanelExpanded: false,
         activeTab: 'preview',
       })
     } else {

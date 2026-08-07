@@ -50,8 +50,15 @@ export const ArtifactSidePanel: Component = () => {
       : undefined
   })
   const panelWidth = () => isDesktop()
-    ? `${state.panelWidth}px`
+    ? state.isPanelExpanded
+      ? '100%'
+      : `${state.panelWidth}px`
     : `min(100vw, ${state.panelWidth}px)`
+  const openSlotWidth = () => isDesktop()
+    ? state.isPanelExpanded
+      ? 'auto'
+      : state.panelWidth
+    : '100%'
   const prefersReducedMotion = () => reducedMotionQuery?.matches ?? false
 
   createEffect(() => {
@@ -104,7 +111,7 @@ export const ArtifactSidePanel: Component = () => {
     setPhase('opening')
     if (prefersReducedMotion()) {
       gsap.set(panelRef, { xPercent: 0, opacity: 1 })
-      gsap.set(slotRef, { width: isDesktop() ? state.panelWidth : '100%' })
+      gsap.set(slotRef, { width: openSlotWidth() })
       setPhase('open')
       return
     }
@@ -115,7 +122,7 @@ export const ArtifactSidePanel: Component = () => {
     })
     if (isDesktop()) {
       timeline.to(slotRef, {
-        width: state.panelWidth,
+        width: openSlotWidth(),
         duration: 0.24,
         ease: 'power2.out',
       }, 0)
@@ -181,13 +188,14 @@ export const ArtifactSidePanel: Component = () => {
 
   createEffect(() => {
     const width = state.panelWidth
+    const expanded = state.isPanelExpanded
     if (
       mounted() &&
       phase() === 'open' &&
       isDesktop() &&
       slotRef
     ) {
-      gsap.set(slotRef, { width })
+      gsap.set(slotRef, { width: expanded ? 'auto' : width })
     }
   })
 
@@ -195,13 +203,17 @@ export const ArtifactSidePanel: Component = () => {
     desktopQuery = window.matchMedia('(min-width: 1024px)')
     reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
     const handleViewportChange = () => {
-      setIsDesktop(desktopQuery?.matches ?? false)
+      const desktop = desktopQuery?.matches ?? false
+      setIsDesktop(desktop)
+      if (!desktop && state.isPanelExpanded) artifactStore.collapse()
       timeline?.kill()
       if (!slotRef || !panelRef || !mounted()) return
       gsap.set(slotRef, {
-        width: state.isPanelOpen && desktopQuery?.matches
-          ? state.panelWidth
-          : desktopQuery?.matches
+        width: state.isPanelOpen && desktop
+          ? state.isPanelExpanded
+            ? 'auto'
+            : state.panelWidth
+          : desktop
             ? 0
             : '100%',
       })
@@ -245,7 +257,7 @@ export const ArtifactSidePanel: Component = () => {
   }
 
   const beginResize = (event: PointerEvent & { currentTarget: HTMLDivElement }) => {
-    if (!isDesktop() || event.button !== 0) return
+    if (!isDesktop() || state.isPanelExpanded || event.button !== 0) return
     event.preventDefault()
     stopResize?.()
     const startX = event.clientX
@@ -281,6 +293,7 @@ export const ArtifactSidePanel: Component = () => {
   }
 
   const resizeWithKeyboard = (event: KeyboardEvent) => {
+    if (state.isPanelExpanded) return
     const bounds = resizeBounds()
     const nextWidth = event.key === 'ArrowLeft'
       ? state.panelWidth + 16
@@ -309,25 +322,32 @@ export const ArtifactSidePanel: Component = () => {
     <Show when={mounted()}>
       <div
         ref={slotRef}
-        class="absolute inset-0 z-40 h-full overflow-visible lg:relative lg:inset-auto lg:z-auto lg:shrink-0"
-        classList={{ 'pointer-events-none': phase() === 'closing' }}
+        class="absolute inset-0 z-40 h-full overflow-visible lg:relative lg:inset-auto lg:z-auto"
+        classList={{
+          'pointer-events-none': phase() === 'closing',
+          'lg:flex-1': state.isPanelExpanded,
+          'lg:min-w-0': state.isPanelExpanded,
+          'lg:shrink-0': !state.isPanelExpanded,
+        }}
         aria-hidden={phase() === 'closing' ? 'true' : undefined}
       >
-        <div
-          role="separator"
-          aria-label="Resize Artifact panel"
-          aria-orientation="vertical"
-          aria-valuemin={resizeBounds().min}
-          aria-valuemax={resizeBounds().max}
-          aria-valuenow={state.panelWidth}
-          tabIndex={0}
-          class="group absolute inset-y-0 -left-1 z-30 hidden w-2 touch-none cursor-col-resize place-items-center outline-none print:hidden lg:grid"
-          onPointerDown={beginResize}
-          onKeyDown={resizeWithKeyboard}
-        >
-          <div class="absolute bottom-0 right-1 top-0 w-[0.5px] bg-slate-300 transition-all group-hover:w-px group-hover:translate-x-[0.5px] group-hover:bg-teal-300 group-focus-visible:w-px group-focus-visible:bg-teal-400" />
-          <div class="relative h-6 w-2 cursor-col-resize rounded-full border border-slate-300 bg-white shadow transition duration-200 group-hover:border-teal-700 group-hover:bg-teal-700 group-focus-visible:border-teal-700 group-focus-visible:bg-teal-700" />
-        </div>
+        <Show when={!state.isPanelExpanded}>
+          <div
+            role="separator"
+            aria-label="Resize Artifact panel"
+            aria-orientation="vertical"
+            aria-valuemin={resizeBounds().min}
+            aria-valuemax={resizeBounds().max}
+            aria-valuenow={state.panelWidth}
+            tabIndex={0}
+            class="group absolute inset-y-0 -left-1 z-30 hidden w-2 touch-none cursor-col-resize place-items-center outline-none print:hidden lg:grid"
+            onPointerDown={beginResize}
+            onKeyDown={resizeWithKeyboard}
+          >
+            <div class="absolute bottom-0 right-1 top-0 w-[0.5px] bg-slate-300 transition-all group-hover:w-px group-hover:translate-x-[0.5px] group-hover:bg-teal-300 group-focus-visible:w-px group-focus-visible:bg-teal-400" />
+            <div class="relative h-6 w-2 cursor-col-resize rounded-full border border-slate-300 bg-white shadow transition duration-200 group-hover:border-teal-700 group-hover:bg-teal-700 group-focus-visible:border-teal-700 group-focus-visible:bg-teal-700" />
+          </div>
+        </Show>
         <aside
           ref={panelRef}
           class="absolute inset-y-0 right-0 flex min-w-0 flex-col border-l border-slate-200 bg-white opacity-0 shadow-2xl will-change-transform"
@@ -381,6 +401,28 @@ export const ArtifactSidePanel: Component = () => {
             </button>
 
             <div class="flex shrink-0 items-center gap-1">
+              <Show when={isDesktop()}>
+                <Tooltip
+                  content={state.isPanelExpanded ? 'Restore split view' : 'Expand'}
+                  placement="bottom"
+                >
+                  <button
+                    type="button"
+                    class="grid h-9 w-9 place-items-center rounded-full text-slate-500 transition hover:bg-white/90 hover:text-slate-800 hover:shadow-sm"
+                    onClick={() => artifactStore.toggleExpanded()}
+                    aria-label={state.isPanelExpanded
+                      ? 'Restore split Artifact view'
+                      : 'Expand Artifact panel'}
+                    aria-pressed={state.isPanelExpanded}
+                  >
+                    <span
+                      class={state.isPanelExpanded
+                        ? 'i-lucide-minimize-2 h-4 w-4'
+                        : 'i-lucide-maximize-2 h-4 w-4'}
+                    />
+                  </button>
+                </Tooltip>
+              </Show>
               <Tooltip content="Download" placement="bottom">
                 <button
                   type="button"

@@ -7,6 +7,7 @@ import {
   Switch,
   type Component,
 } from 'solid-js'
+import { Portal } from 'solid-js/web'
 
 import { CodeBlock } from './CodeBlock'
 import { renderStrictMermaid } from './mermaid'
@@ -19,6 +20,9 @@ export const MermaidBlock: Component<{
   const [svg, setSvg] = createSignal('')
   const [error, setError] = createSignal('')
   const [rendering, setRendering] = createSignal(false)
+  const [expanded, setExpanded] = createSignal(false)
+  let expandButtonRef: HTMLButtonElement | undefined
+  let closeButtonRef: HTMLButtonElement | undefined
   let revision = 0
 
   createEffect(() => {
@@ -26,6 +30,7 @@ export const MermaidBlock: Component<{
     const streaming = props.isStreaming ?? false
     const current = ++revision
     setActiveView('preview')
+    setExpanded(false)
     setError('')
 
     if (streaming) {
@@ -44,6 +49,37 @@ export const MermaidBlock: Component<{
       }
     }).finally(() => {
       if (current === revision) setRendering(false)
+    })
+  })
+
+  const openExpanded = () => {
+    if (!svg() || rendering() || error()) return
+    setExpanded(true)
+    queueMicrotask(() => closeButtonRef?.focus())
+  }
+
+  const closeExpanded = () => {
+    setExpanded(false)
+    queueMicrotask(() => expandButtonRef?.focus())
+  }
+
+  createEffect(() => {
+    if (!expanded()) return
+    const previousOverflow = document.body.style.overflow
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeExpanded()
+      } else if (event.key === 'Tab') {
+        event.preventDefault()
+        closeButtonRef?.focus()
+      }
+    }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', handleKeyDown)
+    onCleanup(() => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', handleKeyDown)
     })
   })
 
@@ -92,6 +128,17 @@ export const MermaidBlock: Component<{
             >
               源码
             </button>
+            <span aria-hidden="true" class="mx-0.5 h-4 w-px bg-slate-200" />
+            <button
+              ref={expandButtonRef}
+              type="button"
+              class="grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-35"
+              aria-label="Expand Mermaid diagram"
+              disabled={!svg() || rendering() || Boolean(error())}
+              onClick={openExpanded}
+            >
+              <span aria-hidden="true" class="i-lucide-maximize-2 h-3.5 w-3.5" />
+            </button>
           </div>
         </nav>
         <Switch>
@@ -129,6 +176,47 @@ export const MermaidBlock: Component<{
           </Match>
         </Switch>
       </section>
+
+      <Show when={expanded()}>
+        <Portal>
+          <div
+            class="fixed inset-0 z-[100] flex bg-slate-950/70 p-3 backdrop-blur-sm sm:p-6"
+            onClick={(event) => {
+              if (event.target === event.currentTarget) closeExpanded()
+            }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-label="Expanded Mermaid diagram"
+              class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-white/20"
+            >
+              <header class="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 sm:px-5">
+                <span class="inline-flex items-center gap-2 text-sm font-semibold text-slate-800">
+                  <span aria-hidden="true" class="i-lucide-git-fork h-4 w-4 text-teal-700" />
+                  Mermaid 图形
+                </span>
+                <button
+                  ref={closeButtonRef}
+                  type="button"
+                  class="grid h-9 w-9 place-items-center rounded-full text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+                  aria-label="Close expanded Mermaid diagram"
+                  onClick={closeExpanded}
+                >
+                  <span aria-hidden="true" class="i-lucide-x h-5 w-5" />
+                </button>
+              </header>
+              <div class="gpas-scrollbar scrollbar-fade grid min-h-0 flex-1 place-items-center overflow-auto bg-slate-50 p-4 sm:p-8">
+                <div
+                  aria-label="Expanded Mermaid diagram canvas"
+                  class="grid h-full min-h-full w-full min-w-full place-items-center [&_svg]:h-full [&_svg]:max-h-full [&_svg]:w-full [&_svg]:max-w-full"
+                  innerHTML={svg()}
+                />
+              </div>
+            </section>
+          </div>
+        </Portal>
+      </Show>
     </Show>
   )
 }

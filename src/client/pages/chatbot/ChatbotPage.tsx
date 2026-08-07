@@ -2541,7 +2541,16 @@ function ChatbotChrome(props: ParentProps) {
             />
           </Show>
 
-          <div class="flex min-w-0 flex-1 flex-col overflow-hidden bg-slate-50 pl-20 lg:pl-0">
+          <div
+            class="flex min-w-0 flex-col overflow-hidden bg-slate-50 pl-20 lg:pl-0"
+            classList={{
+              'flex-1': !artifactStore.state.isPanelExpanded,
+              'w-0': artifactStore.state.isPanelExpanded,
+              'flex-none': artifactStore.state.isPanelExpanded,
+              invisible: artifactStore.state.isPanelExpanded,
+            }}
+            aria-hidden={artifactStore.state.isPanelExpanded ? 'true' : undefined}
+          >
             {props.children}
           </div>
 
