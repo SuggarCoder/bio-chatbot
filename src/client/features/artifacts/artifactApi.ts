@@ -2,8 +2,11 @@ import { artifactMimeTypes, type ArtifactClientEntity, type ArtifactMimeType, ty
 
 const API_BASE = `${import.meta.env.BASE_URL}api`
 
-async function requestJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, { credentials: 'include' })
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    credentials: 'include',
+  })
   if (!response.ok) throw new Error(`Artifact request failed (${response.status})`)
   return response.json() as Promise<T>
 }
@@ -52,4 +55,17 @@ export async function fetchArtifactVersion(artifactId: string, version: number) 
 
 export function artifactDownloadUrl(artifactId: string, version: number) {
   return `${API_BASE}/artifacts/${encodeURIComponent(artifactId)}/versions/${version}/download`
+}
+
+export async function restoreArtifactVersion(
+  artifactId: string,
+  version: number,
+) {
+  return requestJson<{ artifactId: string; version: number }>(
+    `/artifacts/${encodeURIComponent(artifactId)}/versions/${version}/restore`,
+    {
+      method: 'POST',
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    },
+  )
 }

@@ -18,6 +18,7 @@ import { alias } from 'drizzle-orm/pg-core'
 import {
   artifactMimeTypes,
 } from './artifacts/protocol.js'
+import { enqueueBackgroundJob } from './backgroundJobs.js'
 import {
   commitPreparedArtifact,
   materializeMessageParts,
@@ -44,6 +45,7 @@ import {
 } from './executionTrace.js'
 import {
   chats,
+  chatSummaries,
   artifacts,
   auditLogs,
   generations,
@@ -676,6 +678,30 @@ export type GenerationStart = {
   status: GenerationDto['status']
   replacesMessageId?: string
   contextMaxSeq?: number
+  summaryVersion?: number
+  summaryCoveredMaxSeq?: number
+}
+
+async function latestSummarySnapshot(
+  database: Database | Parameters<Parameters<Database['transaction']>[0]>[0],
+  userId: string,
+  chatId: string,
+  maxSeq: bigint,
+) {
+  const [summary] = await database
+    .select({
+      version: chatSummaries.version,
+      coveredMaxSeq: chatSummaries.coveredMaxSeq,
+    })
+    .from(chatSummaries)
+    .where(and(
+      eq(chatSummaries.userId, userId),
+      eq(chatSummaries.chatId, chatId),
+      lt(chatSummaries.coveredMaxSeq, maxSeq),
+    ))
+    .orderBy(desc(chatSummaries.coveredMaxSeq), desc(chatSummaries.version))
+    .limit(1)
+  return summary ?? null
 }
 
 export async function findGenerationStart(
@@ -887,6 +913,12 @@ export async function getGenerationStartById(
     contextMaxSeq: typeof metadata.contextMaxSeq === 'number'
       ? metadata.contextMaxSeq
       : undefined,
+    summaryVersion: typeof metadata.summaryVersion === 'number'
+      ? metadata.summaryVersion
+      : undefined,
+    summaryCoveredMaxSeq: typeof metadata.summaryCoveredMaxSeq === 'number'
+      ? metadata.summaryCoveredMaxSeq
+      : undefined,
   }
 }
 
@@ -904,6 +936,7 @@ export async function createGenerationStart(
     model: string
     supersedesGenerationId?: string
     artifactId?: string
+    contextMemoryEnabled?: boolean
   },
 ): Promise<GenerationStart> {
   return database.transaction(async (transaction) => {
@@ -969,6 +1002,14 @@ export async function createGenerationStart(
         createdAt: messages.createdAt,
       })
     const userMessage = mapMessage(messageRow)
+    const summary = input.contextMemoryEnabled
+      ? await latestSummarySnapshot(
+          transaction,
+          input.userId,
+          input.chatId,
+          sequence.userSeq,
+        )
+      : null
     const assistantMessageId = crypto.randomUUID()
     await transaction.insert(messages).values({
       id: assistantMessageId,
@@ -994,6 +1035,13 @@ export async function createGenerationStart(
       status: 'created',
       metadata: {
         contextMaxSeq: toSafeNumber(sequence.userSeq, 'Message.seq'),
+        ...(summary ? {
+          summaryVersion: summary.version,
+          summaryCoveredMaxSeq: toSafeNumber(
+            summary.coveredMaxSeq,
+            'ChatSummary.coveredMaxSeq',
+          ),
+        } : {}),
         ...(input.artifactId ? { artifactId: input.artifactId } : {}),
       },
     })
@@ -1017,6 +1065,10 @@ export async function createGenerationStart(
       reused: false,
       status: 'created',
       contextMaxSeq: toSafeNumber(sequence.userSeq, 'Message.seq'),
+      summaryVersion: summary?.version,
+      summaryCoveredMaxSeq: summary
+        ? toSafeNumber(summary.coveredMaxSeq, 'ChatSummary.coveredMaxSeq')
+        : undefined,
     }
   })
 }
@@ -1033,6 +1085,7 @@ export async function createRegenerationStart(
     provider: string
     model: string
     artifactId?: string
+    contextMemoryEnabled?: boolean
   },
 ): Promise<GenerationStart> {
   return database.transaction(async (transaction) => {
@@ -1153,6 +1206,14 @@ export async function createRegenerationStart(
       })
     if (!sequence) throw new Error('CHAT_NOT_FOUND')
     const assistantMessageId = crypto.randomUUID()
+    const summary = input.contextMemoryEnabled
+      ? await latestSummarySnapshot(
+          transaction,
+          input.userId,
+          input.chatId,
+          target.seq,
+        )
+      : null
     await transaction.insert(messages).values({
       id: assistantMessageId,
       userId: input.userId,
@@ -1179,6 +1240,13 @@ export async function createRegenerationStart(
       metadata: {
         replacesMessageId: input.replacesMessageId,
         contextMaxSeq: toSafeNumber(target.seq, 'Message.seq'),
+        ...(summary ? {
+          summaryVersion: summary.version,
+          summaryCoveredMaxSeq: toSafeNumber(
+            summary.coveredMaxSeq,
+            'ChatSummary.coveredMaxSeq',
+          ),
+        } : {}),
         ...(input.artifactId ? { artifactId: input.artifactId } : {}),
       },
     })
@@ -1203,6 +1271,10 @@ export async function createRegenerationStart(
       status: 'created',
       replacesMessageId: input.replacesMessageId,
       contextMaxSeq: toSafeNumber(target.seq, 'Message.seq'),
+      summaryVersion: summary?.version,
+      summaryCoveredMaxSeq: summary
+        ? toSafeNumber(summary.coveredMaxSeq, 'ChatSummary.coveredMaxSeq')
+        : undefined,
     }
   })
 }
@@ -1503,6 +1575,8 @@ export type FinalizeGenerationInput = {
   errorCode?: string
   errorMessage?: string
   executionSteps?: MessageExecutionStep[]
+  enqueueSummaryJob?: boolean
+  enqueueUserMemoryJob?: boolean
 }
 
 export type FinalizedGeneration = {
@@ -1535,6 +1609,7 @@ export async function finalizeGeneration(
       .select({
         ...generationColumns,
         assistantMessageId: generations.assistantMessageId,
+        userMessageId: generations.userMessageId,
       })
       .from(generations)
       .where(
@@ -1656,6 +1731,33 @@ export async function finalizeGeneration(
             generationId: input.generationId,
             prepared,
           }))
+        }
+
+        if (finalStatus === 'completed' && input.enqueueSummaryJob) {
+          await enqueueBackgroundJob(transaction, {
+            userId: input.userId,
+            type: 'chat.summary',
+            dedupeKey: `chat.summary:${input.generationId}`,
+            chatId: row.chatId,
+            payload: {
+              generationId: input.generationId,
+              assistantMessageId: messageId,
+              assistantSeq: Number(messageRow.seq),
+            },
+          })
+        }
+        if (finalStatus === 'completed' && input.enqueueUserMemoryJob) {
+          await enqueueBackgroundJob(transaction, {
+            userId: input.userId,
+            type: 'user.memory',
+            dedupeKey: `user.memory:${input.generationId}`,
+            chatId: row.chatId,
+            payload: {
+              generationId: input.generationId,
+              userMessageId: row.userMessageId,
+              assistantMessageId: messageId,
+            },
+          })
         }
     }
 

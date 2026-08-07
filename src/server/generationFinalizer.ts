@@ -23,7 +23,11 @@ export class GenerationFinalizer {
   async finalize(
     input: FinalizeGenerationInput,
   ): Promise<FinalizedGeneration> {
-    const result = await finalizeGeneration(this.database, input)
+    const result = await finalizeGeneration(this.database, {
+      ...input,
+      enqueueSummaryJob: this.config.contextMemoryEnabled,
+      enqueueUserMemoryJob: this.config.userMemoryEnabled,
+    })
     const generation = result.generation
 
     if (result.newlyFinalized) {

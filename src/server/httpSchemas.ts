@@ -205,6 +205,8 @@ export const httpSchemas = {
           redis: z.enum(['ok', 'unavailable']),
           objectStorage: z.enum(['ok', 'unavailable', 'disabled']),
           worker: z.enum(['ok', 'unavailable']),
+          tokenizer: z.enum(['ok', 'unavailable', 'disabled']),
+          embeddings: z.enum(['ok', 'unavailable', 'disabled']),
         }),
         time: isoDate,
       })),
@@ -218,6 +220,8 @@ export const httpSchemas = {
           redis: z.enum(['ok', 'unavailable']),
           objectStorage: z.enum(['ok', 'unavailable', 'disabled']),
           worker: z.enum(['ok', 'unavailable']),
+          tokenizer: z.enum(['ok', 'unavailable', 'disabled']),
+          embeddings: z.enum(['ok', 'unavailable', 'disabled']),
         }),
         time: isoDate,
       })),
@@ -336,6 +340,17 @@ export const httpSchemas = {
   },
   artifactVersionResponse: {
     200: jsonSchema(artifactVersion.extend({ content: z.string() })),
+    ...errorResponses,
+  },
+  restoreArtifactVersionResponse: {
+    200: jsonSchema(z.object({
+      artifactId: uuid,
+      version: z.number().int().positive(),
+    })),
+    201: jsonSchema(z.object({
+      artifactId: uuid,
+      version: z.number().int().positive(),
+    })),
     ...errorResponses,
   },
   errorResponses,

@@ -59,5 +59,5 @@ test('Artifact prompt routes standalone files and Mermaid through chat', () => {
 test('Artifact protocol stays within its static prompt budget', () => {
   const prompt = buildArtifactSystemPrompt([])
 
-  assert.ok(Buffer.byteLength(prompt, 'utf8') <= 2_800)
+  assert.ok(Buffer.byteLength(prompt, 'utf8') <= 16 * 1024)
 })

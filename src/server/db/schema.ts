@@ -21,6 +21,7 @@ import {
   uniqueIndex,
   uuid,
   varchar,
+  vector,
 } from 'drizzle-orm/pg-core'
 
 export type JsonRecord = Record<string, unknown>
@@ -476,6 +477,71 @@ export const generations = pgTable(
   ],
 )
 
+export const chatSummaries = pgTable(
+  'ChatSummary',
+  {
+    userId: uuid('userId')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    chatId: uuid('chatId')
+      .notNull()
+      .references(() => chats.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    coveredMaxSeq: bigintValue('coveredMaxSeq').notNull(),
+    summary: text('summary').notNull(),
+    createdAt: timestampTz('createdAt').notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.chatId, table.version] }),
+    unique('uq_chat_summary_coverage').on(table.chatId, table.coveredMaxSeq),
+    unique('uq_chat_summary_user_chat_version').on(
+      table.userId,
+      table.chatId,
+      table.version,
+    ),
+    foreignKey({
+      name: 'fk_chat_summary_user_chat',
+      columns: [table.userId, table.chatId],
+      foreignColumns: [chats.userId, chats.id],
+    }),
+    check('chk_chat_summary_version', sql`${table.version} >= 1`),
+    check('chk_chat_summary_seq', sql`${table.coveredMaxSeq} >= 1`),
+    check('chk_chat_summary_content', sql`length(${table.summary}) > 0`),
+    index('idx_chat_summary_latest').on(
+      table.chatId,
+      table.coveredMaxSeq.desc(),
+      table.version.desc(),
+    ),
+  ],
+)
+
+export const userMemories = pgTable(
+  'UserMemory',
+  {
+    userId: uuid('userId')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    key: varchar('key', { length: 96 }).notNull(),
+    content: varchar('content', { length: 200 }).notNull(),
+    sourceChatId: uuid('sourceChatId'),
+    updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.key] }),
+    check('chk_user_memory_key', sql`length(trim(${table.key})) > 0`),
+    check(
+      'chk_user_memory_content',
+      sql`length(trim(${table.content})) between 1 and 200`,
+    ),
+    foreignKey({
+      name: 'fk_user_memory_source_chat',
+      columns: [table.userId, table.sourceChatId],
+      foreignColumns: [chats.userId, chats.id],
+    }).onDelete('cascade'),
+    index('idx_user_memory_recent').on(table.userId, table.updatedAt.desc()),
+  ],
+)
+
 export const outboxEvents = pgTable(
   'OutboxEvent',
   {
@@ -789,12 +855,19 @@ export const artifactVersions = pgTable(
     storageKey: text('storageKey').notNull(),
     contentHash: varchar('contentHash', { length: 64 }).notNull(),
     byteLength: bigintValue('byteLength').notNull(),
+    outline: text('outline'),
+    outlineStatus: varchar('outlineStatus', { length: 20 })
+      .notNull()
+      .default('pending'),
+    outlineError: text('outlineError'),
+    outlinedAt: timestampTz('outlinedAt'),
     sourceMessageId: uuid('sourceMessageId')
       .references(() => messages.id, { onDelete: 'set null' }),
     sourceGenerationId: uuid('sourceGenerationId')
       .references(() => generations.id, { onDelete: 'set null' }),
-    streamArtifactId: uuid('streamArtifactId').notNull(),
-    createdBy: varchar('createdBy', { length: 20 }).notNull(),
+      streamArtifactId: uuid('streamArtifactId').notNull(),
+      restoreRequestId: uuid('restoreRequestId'),
+      createdBy: varchar('createdBy', { length: 20 }).notNull(),
     createdAt: timestampTz('createdAt').notNull().defaultNow(),
   },
   (table) => [
@@ -805,6 +878,10 @@ export const artifactVersions = pgTable(
     ),
     check('chk_artifact_version_bytes', sql`${table.byteLength} >= 0`),
     check(
+      'chk_artifact_outline_status',
+      sql`${table.outlineStatus} in ('pending', 'processing', 'ready', 'failed')`,
+    ),
+    check(
       'chk_artifact_version_hash',
       sql`${table.contentHash} ~ '^[a-f0-9]{64}$'`,
     ),
@@ -813,6 +890,14 @@ export const artifactVersions = pgTable(
       sql`${table.createdBy} in ('assistant', 'user')`,
     ),
     unique('uq_artifact_version').on(table.artifactId, table.version),
+      unique('uq_artifact_version_user_artifact_version').on(
+        table.userId,
+        table.artifactId,
+        table.version,
+      ),
+      uniqueIndex('uq_artifact_version_restore_request')
+        .on(table.userId, table.restoreRequestId)
+        .where(sql`${table.restoreRequestId} is not null`),
     foreignKey({
       name: 'fk_artifact_version_user_artifact',
       columns: [table.userId, table.artifactId],
@@ -841,6 +926,106 @@ export const artifactVersions = pgTable(
   ],
 )
 
+export const artifactSections = pgTable(
+  'ArtifactSection',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('userId')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    artifactId: uuid('artifactId')
+      .notNull()
+      .references(() => artifacts.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    ordinal: integer('ordinal').notNull(),
+    byteStart: bigintValue('byteStart').notNull(),
+    byteEnd: bigintValue('byteEnd').notNull(),
+    headingPath: text('headingPath').notNull().default(''),
+    preview: text('preview').notNull().default(''),
+    embedding: vector('embedding', { dimensions: 512 }),
+    createdAt: timestampTz('createdAt').notNull().defaultNow(),
+  },
+  (table) => [
+    unique('uq_artifact_section_ordinal').on(
+      table.artifactId,
+      table.version,
+      table.ordinal,
+    ),
+    foreignKey({
+      name: 'fk_artifact_section_version',
+      columns: [table.userId, table.artifactId, table.version],
+      foreignColumns: [
+        artifactVersions.userId,
+        artifactVersions.artifactId,
+        artifactVersions.version,
+      ],
+    }),
+    check('chk_artifact_section_ordinal', sql`${table.ordinal} >= 0`),
+    check(
+      'chk_artifact_section_range',
+      sql`${table.byteStart} >= 0 and ${table.byteEnd} > ${table.byteStart}`,
+    ),
+    index('idx_artifact_section_version').on(
+      table.artifactId,
+      table.version,
+      table.ordinal,
+    ),
+    index('idx_artifact_section_embedding')
+      .using('hnsw', table.embedding.op('vector_cosine_ops'))
+      .where(sql`${table.embedding} is not null`),
+  ],
+)
+
+export const backgroundJobs = pgTable(
+  'BackgroundJob',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('userId')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    type: varchar('type', { length: 40 }).notNull(),
+    status: varchar('status', { length: 20 }).notNull().default('created'),
+    dedupeKey: varchar('dedupeKey', { length: 255 }).notNull().unique(),
+    chatId: uuid('chatId').references(() => chats.id, { onDelete: 'cascade' }),
+    artifactVersionId: uuid('artifactVersionId').references(
+      () => artifactVersions.id,
+      { onDelete: 'cascade' },
+    ),
+    payload: jsonb('payload').$type<JsonRecord>().notNull().default({}),
+    attempt: integer('attempt').notNull().default(0),
+    availableAt: timestampTz('availableAt').notNull().defaultNow(),
+    workerId: varchar('workerId', { length: 128 }),
+    startedAt: timestampTz('startedAt'),
+    finishedAt: timestampTz('finishedAt'),
+    error: text('error'),
+    createdAt: timestampTz('createdAt').notNull().defaultNow(),
+    updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
+  },
+  (table) => [
+    unique('uq_background_job_user_id').on(table.userId, table.id),
+    check(
+      'chk_background_job_type',
+      sql`${table.type} in ('chat.summary', 'user.memory', 'artifact.index')`,
+    ),
+    check(
+      'chk_background_job_status',
+      sql`${table.status} in ('created', 'queued', 'running', 'completed', 'failed')`,
+    ),
+    check('chk_background_job_attempt', sql`${table.attempt} >= 0`),
+    foreignKey({
+      name: 'fk_background_job_user_chat',
+      columns: [table.userId, table.chatId],
+      foreignColumns: [chats.userId, chats.id],
+    }),
+    index('idx_background_job_dispatch').on(
+      table.status,
+      table.availableAt,
+      table.createdAt,
+    ),
+    index('idx_background_job_chat').on(table.chatId, table.createdAt.desc()),
+  ],
+)
+
 export const usageEvents = pgTable(
   'UsageEvent',
   {
@@ -851,6 +1036,10 @@ export const usageEvents = pgTable(
     generationId: uuid('generationId').references(() => generations.id, {
       onDelete: 'set null',
     }),
+    backgroundJobId: uuid('backgroundJobId').references(() => backgroundJobs.id, {
+      onDelete: 'set null',
+    }),
+    kind: varchar('kind', { length: 32 }).notNull().default('chat'),
     inputTokens: bigintValue('inputTokens').notNull().default(sql`0`),
     outputTokens: bigintValue('outputTokens').notNull().default(sql`0`),
     totalTokens: bigintValue('totalTokens')
@@ -865,10 +1054,22 @@ export const usageEvents = pgTable(
     uniqueIndex('uq_usage_generation')
       .on(table.generationId)
       .where(sql`${table.generationId} is not null`),
+    uniqueIndex('uq_usage_background_job')
+      .on(table.backgroundJobId)
+      .where(sql`${table.backgroundJobId} is not null`),
+    check(
+      'chk_usage_kind',
+      sql`${table.kind} in ('chat', 'summary', 'memory')`,
+    ),
     foreignKey({
       name: 'fk_usage_user_generation',
       columns: [table.userId, table.generationId],
       foreignColumns: [generations.userId, generations.id],
+    }),
+    foreignKey({
+      name: 'fk_usage_user_background_job',
+      columns: [table.userId, table.backgroundJobId],
+      foreignColumns: [backgroundJobs.userId, backgroundJobs.id],
     }),
     index('idx_usage_user_created').on(table.userId, table.createdAt.desc()),
   ],

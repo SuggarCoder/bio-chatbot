@@ -2,6 +2,7 @@ import { createClient, type RedisClientType } from 'redis'
 
 import type { AppConfig } from './config.js'
 import { getMonthlyTokenUsage, type ChatContext, type Database } from './db.js'
+import type { BudgetedContextResult } from './conversationMemory.js'
 
 export type RedisClient = RedisClientType
 
@@ -230,6 +231,58 @@ export async function setCachedChatContext(
       EX: 2 * 60 * 60,
     },
   )
+}
+
+function budgetedContextKey(
+  config: AppConfig,
+  input: {
+    chatId: string
+    contextMaxSeq: number
+    summaryVersion?: number
+    policyFingerprint: string
+  },
+): string {
+  return redisKey(
+    config,
+    `chat:ctx:v2:${input.policyFingerprint}:${input.chatId}:${input.contextMaxSeq}:${input.summaryVersion ?? 0}`,
+  )
+}
+
+export async function getCachedBudgetedChatContext(
+  redis: RedisClient,
+  config: AppConfig,
+  input: {
+    chatId: string
+    contextMaxSeq: number
+    summaryVersion?: number
+    policyFingerprint: string
+  },
+): Promise<BudgetedContextResult | null> {
+  if (!redis.isReady) return null
+  const value = await redis.get(budgetedContextKey(config, input))
+  if (!value) return null
+  try {
+    return JSON.parse(value) as BudgetedContextResult
+  } catch {
+    return null
+  }
+}
+
+export async function setCachedBudgetedChatContext(
+  redis: RedisClient,
+  config: AppConfig,
+  input: {
+    chatId: string
+    contextMaxSeq: number
+    summaryVersion?: number
+    policyFingerprint: string
+  },
+  context: BudgetedContextResult,
+): Promise<void> {
+  if (!redis.isReady) return
+  await redis.set(budgetedContextKey(config, input), JSON.stringify(context), {
+    EX: 24 * 60 * 60,
+  })
 }
 
 const advanceChatContextScript = `

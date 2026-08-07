@@ -82,3 +82,16 @@ npm run build
 ```
 
 部署、连接预算和故障验收见 [生产部署清单](docs/production-deployment.md)，取消与恢复语义见 [Generation lifecycle](docs/generation-cancellation.md)，Redis Key 规范见 [Redis design](redis.md)。
+
+## 分层会话与 Artifact 上下文
+
+新上下文管线由独立开关渐进启用：
+
+- `CONTEXT_MEMORY_ENABLED`：按 token 预算装载最近原文，并注入创建请求时冻结的滚动摘要版本。
+- `USER_MEMORY_ENABLED`：异步提取稳定的跨会话事实；总注入量不超过 2 KiB。
+- `ARTIFACT_CONTEXT_V2_ENABLED`：小 Artifact 附全文，大 Artifact 附结构大纲和相关区块；区块向量使用本地 BGE 模型和 pgvector。
+- `ARTIFACT_PATCH_ENABLED`：大于等于 32 KiB 的 Artifact 只接受唯一匹配的 SEARCH/REPLACE 补丁，应用后执行语法校验；失败会带校验错误自动重试一次。
+
+这些开关默认关闭。启用前先执行 `npm run db:migrate`，部署 Worker，并把与线上 Qwen 模型完全匹配且包含 `chat_template` 的 tokenizer 文件放在 `QWEN_TOKENIZER_PATH`（默认 `models/qwen-tokenizer`）。BGE 模型默认从 `models/bge-small-zh-v1.5/onnx/model_int8.onnx` 加载。Docker 构建会把 `models/` 复制进运行镜像；不会在运行时联网下载模型。
+
+Artifact 历史版本不会被覆盖。`POST /api/artifacts/:artifactId/versions/:version/restore` 使用 UUID 格式的 `Idempotency-Key`，把旧快照复制为新的当前版本。

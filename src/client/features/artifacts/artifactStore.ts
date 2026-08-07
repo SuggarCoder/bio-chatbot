@@ -1,5 +1,10 @@
 import { createStore, produce } from 'solid-js/store'
-import { fetchArtifact, fetchArtifactVersion, fetchArtifactVersions } from './artifactApi'
+import {
+  fetchArtifact,
+  fetchArtifactVersion,
+  fetchArtifactVersions,
+  restoreArtifactVersion,
+} from './artifactApi'
 import { shouldRevealCommittedArtifact } from './streamingParts'
 import type { ArtifactClientEntity, ArtifactDraftClientState, ArtifactMimeType } from './types'
 
@@ -184,6 +189,25 @@ export const artifactStore = {
   async loadHistory(artifactId: string) {
     const versions = await fetchArtifactVersions(artifactId)
     setArtifactState('artifactsById', artifactId, 'versions', versions)
+  },
+  async restore(artifactId: string, sourceVersion: number) {
+    const restored = await restoreArtifactVersion(artifactId, sourceVersion)
+    const [loaded, versions] = await Promise.all([
+      fetchArtifactVersion(artifactId, restored.version),
+      fetchArtifactVersions(artifactId),
+    ])
+    setArtifactState('artifactsById', artifactId, {
+      currentVersion: restored.version,
+      loadedVersion: restored.version,
+      title: loaded.title,
+      type: loaded.type,
+      language: loaded.language ?? undefined,
+      content: loaded.content,
+      versions,
+      renderStatus: 'ready',
+    })
+    setArtifactState('activeVersion', restored.version)
+    return restored.version
   },
   close(cause: PanelChangeCause = 'user') {
     if (cause === 'user') {

@@ -7,10 +7,14 @@ import pg from 'pg'
 import * as schema from './schema.js'
 import {
   chats,
+  chatSummaries,
+  backgroundJobs,
+  artifactSections,
   generations,
   messages,
   outboxEvents,
   usageEvents,
+  userMemories,
   users,
 } from './schema.js'
 
@@ -59,6 +63,10 @@ export async function verifyCoreSchema(database: Database): Promise<void> {
       database.select({ id: generations.id }).from(generations).limit(1),
       database.select({ id: outboxEvents.id }).from(outboxEvents).limit(1),
       database.select({ id: usageEvents.id }).from(usageEvents).limit(1),
+      database.select({ chatId: chatSummaries.chatId }).from(chatSummaries).limit(1),
+      database.select({ id: backgroundJobs.id }).from(backgroundJobs).limit(1),
+      database.select({ id: artifactSections.id }).from(artifactSections).limit(1),
+      database.select({ userId: userMemories.userId }).from(userMemories).limit(1),
     ])
   } catch (error) {
     if (

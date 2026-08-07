@@ -1,3 +1,7 @@
+const PATCH_SEARCH_MARKER = `${'<'.repeat(7)} SEARCH`
+const PATCH_DIVIDER = '='.repeat(7)
+const PATCH_REPLACE_MARKER = `${'>'.repeat(7)} REPLACE`
+
 export const ARTIFACT_PROTOCOL_SYSTEM_PROMPT = `
 Create a persistent Artifact only for a complete HTML/Web page, SVG image, or
 Markdown document that needs preview or continued editing. Never create one for an
@@ -55,25 +59,72 @@ Example (correct multiline output):
 </artifact>
 `.trim()
 
+export const ARTIFACT_PATCH_SYSTEM_PROMPT = `
+Large Artifact patch protocol:
+- If the directory says status="outline_fragments_attached", editing must use
+  exactly one <artifact_edit id="the-exact-id"> block, never <artifact> and never
+  a complete rewrite.
+- Each patch hunk has this exact form. SEARCH must be an exact, unique 10-30 line
+  excerpt from an attached fragment. Include enough surrounding lines to be unique.
+${PATCH_SEARCH_MARKER}
+original source
+${PATCH_DIVIDER}
+replacement source
+${PATCH_REPLACE_MARKER}
+- Multiple non-overlapping hunks are allowed inside the same artifact_edit block.
+  Do not add Markdown fences, explanations, ellipses, or unchanged source inside it.
+- If status is "catalog_loaded" or "metadata_only", do not edit that Artifact.
+`.trim()
+
 export type ArtifactPromptCatalogItem = {
   logicalId: string
   version: number
   type: string
   title: string
+  byteLength?: number
+  status?:
+    | 'catalog_loaded'
+    | 'full_content_attached'
+    | 'outline_fragments_attached'
+    | 'metadata_only'
   content?: string | null
+  outline?: string
+  fragments?: Array<{
+    byteStart: number
+    byteEnd: number
+    headingPath: string
+    content: string
+  }>
 }
 
 export function buildArtifactSystemPrompt(
   catalog: ArtifactPromptCatalogItem[],
+  options: { patchEnabled?: boolean } = {},
 ): string {
+  const protocol = options.patchEnabled
+    ? `${ARTIFACT_PROTOCOL_SYSTEM_PROMPT}\n\n${ARTIFACT_PATCH_SYSTEM_PROMPT}`
+    : ARTIFACT_PROTOCOL_SYSTEM_PROMPT
   if (catalog.length === 0) {
-    return `${ARTIFACT_PROTOCOL_SYSTEM_PROMPT}\n\nThere are no existing Artifacts in this conversation.`
+    return `${protocol}\n\nThere are no existing Artifacts in this conversation.`
   }
 
   const current = catalog.map((item) => {
-    const identity = `- id="${item.logicalId}" version=${item.version} type="${item.type}" title=${JSON.stringify(item.title)}`
+    const identity = `- id="${item.logicalId}" version=${item.version} type="${item.type}" title=${JSON.stringify(item.title)} size=${item.byteLength ?? 'unknown'} status="${item.status ?? 'catalog_loaded'}"`
+    if (item.status === 'outline_fragments_attached') {
+      const fragments = (item.fragments ?? []).map((fragment) =>
+        `  Fragment [${fragment.byteStart}-${fragment.byteEnd}] ${JSON.stringify(fragment.headingPath)} (JSON string): ${JSON.stringify(fragment.content)}`,
+      )
+      return [
+        identity,
+        `  Structural outline:\n${item.outline ?? '[unavailable]'}`,
+        ...fragments,
+        options.patchEnabled
+          ? '  Use only the large Artifact patch protocol to edit this item.'
+          : '  This context is read-only because large Artifact patch editing is disabled.',
+      ].join('\n')
+    }
     if (item.content === undefined) {
-      return `${identity}\n  Complete content is not attached to this request. Do not replace it.`
+      return `${identity}\n  Complete content is not attached to this request.`
     }
     if (item.content === null) {
       return `${identity}\n  Complete content is unavailable because it exceeds the model-context limit. Do not replace it.`
@@ -81,5 +132,5 @@ export function buildArtifactSystemPrompt(
     return `${identity}\n  Current complete content (JSON string; decode it before producing a replacement): ${JSON.stringify(item.content)}`
   })
 
-  return `${ARTIFACT_PROTOCOL_SYSTEM_PROMPT}\n\nCurrent Artifacts (use these exact ids and versions for replace):\n${current.join('\n')}`
+  return `${protocol}\n\nCurrent Artifacts (use these exact ids and versions for replace):\n${current.join('\n')}`
 }

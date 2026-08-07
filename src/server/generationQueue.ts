@@ -35,6 +35,8 @@ export type GenerationWorkItem = {
   artifactId?: string
   replacesMessageId?: string
   contextMaxSeq?: number
+  summaryVersion?: number
+  summaryCoveredMaxSeq?: number
   user: CurrentUser
 }
 
@@ -556,6 +558,12 @@ export async function loadGenerationWorkItem(
       : undefined,
     contextMaxSeq: typeof metadata.contextMaxSeq === 'number'
       ? metadata.contextMaxSeq
+      : undefined,
+    summaryVersion: typeof metadata.summaryVersion === 'number'
+      ? metadata.summaryVersion
+      : undefined,
+    summaryCoveredMaxSeq: typeof metadata.summaryCoveredMaxSeq === 'number'
+      ? metadata.summaryCoveredMaxSeq
       : undefined,
     user: {
       id: row.userId,

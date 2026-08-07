@@ -13,7 +13,26 @@ export type AppConfig = {
   qwenApiKey: string
   qwenBaseUrl: string
   qwenModel: string
+  qwenTokenizerPath: string
+  qwenContextWindowTokens: number
+  qwenMaxInputTokens: number
   qwenMaxOutputTokens: number
+  chatHistoryTokenBudget: number
+  chatSummaryTokenBudget: number
+  summaryTriggerTokens: number
+  instructionsTokenBudget: number
+  artifactProtocolTokenBudget: number
+  artifactOutlineTokenBudget: number
+  artifactFragmentTokenBudget: number
+  contextMemoryEnabled: boolean
+  userMemoryEnabled: boolean
+  artifactContextV2Enabled: boolean
+  artifactPatchEnabled: boolean
+  backgroundModel: string
+  backgroundMaxOutputTokens: number
+  backgroundConcurrency: number
+  backgroundTimeoutMs: number
+  embeddingModelPath: string
   gpas2AuthMode: 'mock' | 'upstream'
   gpas2UserInfoUrl?: string
   chatRateLimitPerMinute: number
@@ -238,6 +257,62 @@ export function readConfig(): AppConfig {
     )
   }
 
+  const qwenContextWindowTokens = positiveInteger(
+    'QWEN_CONTEXT_WINDOW_TOKENS',
+    1_000_000,
+  )
+  const qwenMaxInputTokens = positiveInteger(
+    'QWEN_MAX_INPUT_TOKENS',
+    991_808,
+  )
+  const qwenMaxOutputTokens = positiveInteger(
+    'QWEN_MAX_OUTPUT_TOKENS',
+    65_536,
+  )
+  if (qwenMaxInputTokens > qwenContextWindowTokens) {
+    throw new Error('QWEN_MAX_INPUT_TOKENS must not exceed QWEN_CONTEXT_WINDOW_TOKENS')
+  }
+  if (qwenMaxOutputTokens > qwenContextWindowTokens) {
+    throw new Error('QWEN_MAX_OUTPUT_TOKENS must not exceed QWEN_CONTEXT_WINDOW_TOKENS')
+  }
+
+  const chatHistoryTokenBudget = positiveInteger(
+    'CHAT_HISTORY_TOKEN_BUDGET',
+    131_072,
+  )
+  const chatSummaryTokenBudget = positiveInteger(
+    'CHAT_SUMMARY_TOKEN_BUDGET',
+    8_192,
+  )
+  if (chatHistoryTokenBudget + chatSummaryTokenBudget > qwenMaxInputTokens) {
+    throw new Error('Chat history and summary budgets must fit QWEN_MAX_INPUT_TOKENS')
+  }
+  const contextMemoryEnabled = booleanValue(
+    process.env,
+    'CONTEXT_MEMORY_ENABLED',
+    false,
+  )
+  const userMemoryEnabled = booleanValue(
+    process.env,
+    'USER_MEMORY_ENABLED',
+    false,
+  )
+  const artifactContextV2Enabled = booleanValue(
+    process.env,
+    'ARTIFACT_CONTEXT_V2_ENABLED',
+    false,
+  )
+  const artifactPatchEnabled = booleanValue(
+    process.env,
+    'ARTIFACT_PATCH_ENABLED',
+    false,
+  )
+  if (artifactPatchEnabled && !artifactContextV2Enabled) {
+    throw new Error(
+      'ARTIFACT_PATCH_ENABLED requires ARTIFACT_CONTEXT_V2_ENABLED=true',
+    )
+  }
+
   return {
     nodeEnv,
     host: process.env.HOST?.trim() || '0.0.0.0',
@@ -257,7 +332,44 @@ export function readConfig(): AppConfig {
     qwenModel:
       process.env.QWEN_MODEL?.trim() ||
       'qwen3.6-flash',
-    qwenMaxOutputTokens: positiveInteger('QWEN_MAX_OUTPUT_TOKENS', 4096),
+    qwenTokenizerPath:
+      process.env.QWEN_TOKENIZER_PATH?.trim() || 'models/qwen-tokenizer',
+    qwenContextWindowTokens,
+    qwenMaxInputTokens,
+    qwenMaxOutputTokens,
+    chatHistoryTokenBudget,
+    chatSummaryTokenBudget,
+    summaryTriggerTokens: positiveInteger('SUMMARY_TRIGGER_TOKENS', 16_384),
+    instructionsTokenBudget: positiveInteger(
+      'INSTRUCTIONS_TOKEN_BUDGET',
+      32_768,
+    ),
+    artifactProtocolTokenBudget: positiveInteger(
+      'ARTIFACT_PROTOCOL_TOKEN_BUDGET',
+      4_096,
+    ),
+    artifactOutlineTokenBudget: positiveInteger(
+      'ARTIFACT_OUTLINE_TOKEN_BUDGET',
+      8_192,
+    ),
+    artifactFragmentTokenBudget: positiveInteger(
+      'ARTIFACT_FRAGMENT_TOKEN_BUDGET',
+      16_384,
+    ),
+    contextMemoryEnabled,
+    userMemoryEnabled,
+    artifactContextV2Enabled,
+    artifactPatchEnabled,
+    backgroundModel:
+      process.env.BACKGROUND_MODEL?.trim() || 'qwen3.6-flash',
+    backgroundMaxOutputTokens: positiveInteger(
+      'BACKGROUND_MAX_OUTPUT_TOKENS',
+      4_096,
+    ),
+    backgroundConcurrency: positiveInteger('BACKGROUND_CONCURRENCY', 1),
+    backgroundTimeoutMs: positiveInteger('BACKGROUND_TIMEOUT_MS', 120_000),
+    embeddingModelPath:
+      process.env.EMBEDDING_MODEL_PATH?.trim() || 'models/bge-small-zh-v1.5',
     gpas2AuthMode: authMode,
     gpas2UserInfoUrl,
     chatRateLimitPerMinute: positiveInteger('CHAT_RATE_LIMIT_PER_MINUTE', 10),

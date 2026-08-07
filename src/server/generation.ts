@@ -3,13 +3,22 @@ import OpenAI from 'openai'
 import {
   advanceCachedChatContext,
   consumeGenerationRateLimit,
+  getCachedBudgetedChatContext,
   getCachedChatContext,
   readMonthlyQuota,
   setCachedChatContext,
+  setCachedBudgetedChatContext,
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
+import {
+  buildBudgetedChatContext,
+  buildUserMemoryInstructions,
+} from './conversationMemory.js'
+import { assembleArtifactContext } from './artifacts/context.js'
+import { createPatchedArtifactDraft } from './artifacts/patch.js'
 import { ArtifactStreamParser } from './artifacts/parser.js'
+import type { ArtifactMimeType } from './artifacts/protocol.js'
 import {
   ArtifactCommitError,
   getArtifactForUser,
@@ -49,6 +58,7 @@ import type {
   MessageExecutionStep,
   StreamEvent,
 } from './domain.js'
+import { LocalEmbeddingService } from './embedding.js'
 import {
   settleExecutionSteps,
   upsertExecutionStep,
@@ -67,6 +77,7 @@ import {
   type GenerationWorkItem,
 } from './generationQueue.js'
 import { GenerationStreamStore } from './streamStore.js'
+import { QwenTokenCounter, type TokenCounter } from './tokenBudget.js'
 
 type StartGenerationInput = {
   user: CurrentUser
@@ -133,6 +144,26 @@ function extractUsage(response: unknown): CompletedUsage {
   }
 }
 
+function addUsage(
+  left: CompletedUsage,
+  right: CompletedUsage,
+): CompletedUsage {
+  return {
+    inputTokens: left.inputTokens + right.inputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    cachedInputTokens: left.cachedInputTokens + right.cachedInputTokens,
+    reasoningTokens: left.reasoningTokens + right.reasoningTokens,
+  }
+}
+
+function escapeArtifactAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+}
+
 export class GenerationRejectedError extends Error {
   constructor(
     message: string,
@@ -173,6 +204,8 @@ export class GenerationService {
   private readonly qwen: OpenAI
   private readonly streams: GenerationStreamStore
   private readonly queue: GenerationQueue
+  private readonly tokenCounter: TokenCounter
+  private readonly embeddings: LocalEmbeddingService
 
   constructor(
     private readonly config: AppConfig,
@@ -181,6 +214,8 @@ export class GenerationService {
     private readonly runtimes: GenerationRuntimeRegistry,
     private readonly finalizer: GenerationFinalizer,
     private readonly artifactService: ArtifactService | null = null,
+    tokenCounter?: TokenCounter,
+    embeddings?: LocalEmbeddingService,
   ) {
     this.qwen = new OpenAI({
       apiKey: config.qwenApiKey,
@@ -190,6 +225,8 @@ export class GenerationService {
     })
     this.streams = new GenerationStreamStore(config, redis)
     this.queue = new GenerationQueue(config, redis)
+    this.tokenCounter = tokenCounter ?? new QwenTokenCounter(config)
+    this.embeddings = embeddings ?? new LocalEmbeddingService(config)
   }
 
   async create(input: StartGenerationInput): Promise<GenerationStartDto> {
@@ -307,6 +344,7 @@ export class GenerationService {
             provider: 'qwen',
             model: this.config.qwenModel,
             artifactId: input.artifactId,
+            contextMemoryEnabled: this.config.contextMemoryEnabled,
           })
         : await createGenerationStart(this.database, {
             userId: input.user.id,
@@ -319,6 +357,7 @@ export class GenerationService {
             provider: 'qwen',
             model: this.config.qwenModel,
             artifactId: input.artifactId,
+            contextMemoryEnabled: this.config.contextMemoryEnabled,
           })
     } catch (error) {
       if (error instanceof Error && error.message === 'CHAT_NOT_FOUND') {
@@ -795,6 +834,41 @@ export class GenerationService {
         context = null
       }
 
+      if (this.config.contextMemoryEnabled && start.contextMaxSeq !== undefined) {
+        await this.tokenCounter.initialize()
+        const cacheInput = {
+          chatId: input.chatId,
+          contextMaxSeq: start.contextMaxSeq,
+          summaryVersion: start.summaryVersion,
+          policyFingerprint: this.tokenCounter.policyFingerprint,
+        }
+        context = await getCachedBudgetedChatContext(
+          this.redis,
+          this.config,
+          cacheInput,
+        )
+        if (!context) {
+          const budgetedContext = await buildBudgetedChatContext(this.database, {
+            userId: input.user.id,
+            chatId: input.chatId,
+            contextMaxSeq: start.contextMaxSeq,
+            summaryVersion: start.summaryVersion,
+            historyTokenBudget: this.config.chatHistoryTokenBudget,
+            summaryTokenBudget: this.config.chatSummaryTokenBudget,
+            tokenCounter: this.tokenCounter,
+          })
+          if (budgetedContext) {
+            context = budgetedContext
+            await setCachedBudgetedChatContext(
+              this.redis,
+              this.config,
+              cacheInput,
+              budgetedContext,
+            )
+          }
+        }
+      }
+
       if (!context) {
         context = await rebuildChatContext(
           this.database,
@@ -823,74 +897,147 @@ export class GenerationService {
           status: 'active',
         })
       }
-      const artifactCatalog = artifactEnabled
-        ? await listArtifactPromptCatalogForChat(
-            this.database,
-            input.user.id,
-            input.chatId,
-          )
-        : []
-      const artifactPromptCatalog = artifactCatalog.flatMap((artifact) =>
-        artifact.logicalId && artifact.type
-          ? [{
-              artifactId: artifact.id,
-              logicalId: artifact.logicalId,
-              version: artifact.currentVersion,
-              type: artifact.type,
-              title: artifact.title,
-            }]
-          : [],
-      )
-      const promptText = (input.content || start.userMessage.content).toLocaleLowerCase()
-      const referencedArtifacts = artifactPromptCatalog.filter((artifact) =>
-        artifact.artifactId === input.artifactId ||
-        promptText.includes(artifact.logicalId.toLocaleLowerCase()) ||
-        (
-          artifact.title.trim().length >= 2 &&
-          promptText.includes(artifact.title.trim().toLocaleLowerCase())
-        ),
-      )
-      const selectedArtifact = input.artifactId
-        ? artifactPromptCatalog.find((artifact) => artifact.artifactId === input.artifactId)
-        : referencedArtifacts.length === 1
-          ? referencedArtifacts[0]
-          : undefined
-      let promptCatalog: ArtifactPromptCatalogItem[] = artifactPromptCatalog.map(
-        ({ artifactId: _, ...artifact }) => artifact,
-      )
-      let artifactInstructions = buildArtifactSystemPrompt(promptCatalog)
-
-      if (artifactEnabled && artifactService && selectedArtifact) {
-        const content = await artifactService.readVersionContent(
+      const promptText = input.content || start.userMessage.content
+      let artifactCount = 0
+      let artifactInstructions = ''
+      let selectedArtifact: {
+        artifactId: string
+        logicalId: string
+        version: number
+        type: string
+        title: string
+        byteLength?: number
+        content?: string | null
+        status?: ArtifactPromptCatalogItem['status']
+      } | undefined
+      if (
+        artifactEnabled &&
+        artifactService &&
+        this.config.artifactContextV2Enabled
+      ) {
+        await this.tokenCounter.initialize()
+        const assembled = await assembleArtifactContext(this.database, {
+          config: this.config,
+          artifactService,
+          embeddings: this.embeddings,
+          tokenCounter: this.tokenCounter,
+          userId: input.user.id,
+          chatId: input.chatId,
+          prompt: promptText,
+          artifactId: input.artifactId,
+          signal: runtime.controller.signal,
+        })
+        artifactInstructions = assembled.instructions
+        selectedArtifact = assembled.selectedArtifact
+        artifactCount = (artifactInstructions.match(/^- id=/gm) ?? []).length
+      } else if (artifactEnabled) {
+        const artifactCatalog = await listArtifactPromptCatalogForChat(
+          this.database,
           input.user.id,
-          selectedArtifact.artifactId,
-          selectedArtifact.version,
-          32 * 1024,
-          runtime.controller.signal,
-        ).catch(() => null)
-        promptCatalog = promptCatalog.map((artifact) =>
-          artifact.logicalId === selectedArtifact.logicalId
-            ? { ...artifact, content }
-            : artifact,
+          input.chatId,
         )
-        const candidate = buildArtifactSystemPrompt(promptCatalog)
-        artifactInstructions = Buffer.byteLength(candidate, 'utf8') <= 48 * 1024
-          ? candidate
-          : buildArtifactSystemPrompt(promptCatalog.map((artifact) => ({
-              ...artifact,
-              content: artifact.logicalId === selectedArtifact.logicalId
-                ? null
-                : artifact.content,
-            })))
+        const artifactPromptCatalog = artifactCatalog.flatMap((artifact) =>
+          artifact.logicalId && artifact.type
+            ? [{
+                artifactId: artifact.id,
+                logicalId: artifact.logicalId,
+                version: artifact.currentVersion,
+                type: artifact.type,
+                title: artifact.title,
+              }]
+            : [],
+        )
+        artifactCount = artifactPromptCatalog.length
+        const normalizedPrompt = promptText.toLocaleLowerCase()
+        const referencedArtifacts = artifactPromptCatalog.filter((artifact) =>
+          artifact.artifactId === input.artifactId ||
+          normalizedPrompt.includes(artifact.logicalId.toLocaleLowerCase()) ||
+          (
+            artifact.title.trim().length >= 2 &&
+            normalizedPrompt.includes(artifact.title.trim().toLocaleLowerCase())
+          ),
+        )
+        selectedArtifact = input.artifactId
+          ? artifactPromptCatalog.find(
+              (artifact) => artifact.artifactId === input.artifactId,
+            )
+          : referencedArtifacts.length === 1
+            ? referencedArtifacts[0]
+            : undefined
+        let promptCatalog: ArtifactPromptCatalogItem[] =
+          artifactPromptCatalog.map(({ artifactId: _, ...artifact }) => artifact)
+        artifactInstructions = buildArtifactSystemPrompt(promptCatalog)
+        if (artifactService && selectedArtifact) {
+          const content = await artifactService.readVersionContent(
+            input.user.id,
+            selectedArtifact.artifactId,
+            selectedArtifact.version,
+            32 * 1024,
+            runtime.controller.signal,
+          ).catch(() => null)
+          selectedArtifact.content = content
+          promptCatalog = promptCatalog.map((artifact) =>
+            artifact.logicalId === selectedArtifact!.logicalId
+              ? { ...artifact, content }
+              : artifact,
+          )
+          const candidate = buildArtifactSystemPrompt(promptCatalog)
+          artifactInstructions = Buffer.byteLength(candidate, 'utf8') <= 48 * 1024
+            ? candidate
+            : buildArtifactSystemPrompt(promptCatalog.map((artifact) => ({
+                ...artifact,
+                content: artifact.logicalId === selectedArtifact!.logicalId
+                  ? null
+                  : artifact.content,
+              })))
+        }
       }
       if (artifactEnabled) {
         completeStep(
           'artifact-context',
           selectedArtifact
             ? `已载入 ${selectedArtifact.type} Artifact`
-            : `发现 ${artifactPromptCatalog.length} 个可用 Artifact`,
+            : `发现 ${artifactCount} 个可用 Artifact`,
         )
       }
+      const userMemoryInstructions = this.config.userMemoryEnabled
+        ? await buildUserMemoryInstructions(this.database, input.user.id)
+        : ''
+      const combinedInstructions = [
+        artifactEnabled ? artifactInstructions : '',
+        userMemoryInstructions,
+      ].filter(Boolean).join('\n\n')
+      if (combinedInstructions && (
+        this.config.contextMemoryEnabled ||
+        this.config.userMemoryEnabled ||
+        this.config.artifactContextV2Enabled
+      )) {
+        await this.tokenCounter.initialize()
+        if (
+          this.tokenCounter.countText(combinedInstructions) >
+            this.config.instructionsTokenBudget
+        ) {
+          throw new Error('ASSEMBLED_INSTRUCTIONS_TOKEN_BUDGET_EXCEEDED')
+        }
+        const inputTokens = this.tokenCounter.countMessages(
+          context.messages,
+          combinedInstructions,
+        )
+        if (
+          inputTokens > this.config.qwenMaxInputTokens ||
+          inputTokens + this.config.qwenMaxOutputTokens >
+            this.config.qwenContextWindowTokens
+        ) {
+          throw new Error('ASSEMBLED_CONTEXT_TOKEN_BUDGET_EXCEEDED')
+        }
+      }
+      const patchMode = Boolean(
+        this.config.artifactPatchEnabled &&
+        selectedArtifact &&
+        selectedArtifact.status === 'outline_fragments_attached' &&
+        (selectedArtifact.byteLength ?? 0) >= 32 * 1024,
+      )
+      let patchOutput = ''
       updateStep({
         id: 'model',
         kind: 'model',
@@ -905,9 +1052,7 @@ export class GenerationService {
       const responseStream = await this.qwen.responses.create(
         {
           model: input.model ?? this.config.qwenModel,
-          instructions: artifactEnabled
-            ? artifactInstructions
-            : undefined,
+          instructions: combinedInstructions || undefined,
           input: context.messages.map((message) => ({
             role: message.role,
             content: message.content,
@@ -1021,7 +1166,9 @@ export class GenerationService {
             firstTokenAt = Date.now()
           }
 
-          if (parser) {
+          if (patchMode) {
+            patchOutput += event.delta
+          } else if (parser) {
             parser.push(event.delta)
           } else {
             const startIndex = runtime.partialOutput.length
@@ -1052,6 +1199,62 @@ export class GenerationService {
       }
 
       await this.checkpoint(runtime, true)
+      if (patchMode && selectedArtifact && parser && artifactService) {
+        const baseContent = await artifactService.readVersionContent(
+          input.user.id,
+          selectedArtifact.artifactId,
+          selectedArtifact.version,
+          1024 * 1024,
+          runtime.controller.signal,
+        )
+        if (baseContent === null) {
+          throw new Error('ARTIFACT_PATCH_BASE_UNAVAILABLE')
+        }
+        const buildDraft = (output: string) => createPatchedArtifactDraft({
+          output,
+          logicalId: selectedArtifact!.logicalId,
+          title: selectedArtifact!.title,
+          type: selectedArtifact!.type as ArtifactMimeType,
+          baseVersion: selectedArtifact!.version,
+          content: baseContent,
+        })
+        let draft: CompletedArtifactDraft
+        try {
+          draft = buildDraft(patchOutput)
+        } catch (firstError) {
+          const correction = [
+            combinedInstructions,
+            'The previous patch was rejected by the server.',
+            `Validation error: ${firstError instanceof Error ? firstError.message : String(firstError)}`,
+            'Return one corrected artifact_edit block only. Reuse exact SEARCH text from the attached fragments.',
+          ].filter(Boolean).join('\n\n')
+          const retryResponse = await this.qwen.responses.create(
+            {
+              model: input.model ?? this.config.qwenModel,
+              instructions: correction,
+              input: context.messages.map((message) => ({
+                role: message.role,
+                content: message.content,
+              })),
+              max_output_tokens: this.config.qwenMaxOutputTokens,
+            },
+            { signal: runtime.controller.signal },
+          )
+          runtime.providerRequestId = retryResponse.id
+          runtime.usage = addUsage(
+            runtime.usage,
+            extractUsage(retryResponse),
+          )
+          draft = buildDraft(retryResponse.output_text)
+        }
+        const escapedContent = draft.content.replaceAll(
+          '</artifact>',
+          '\\</artifact>',
+        )
+        parser.push(
+          `<artifact v="1" id="${selectedArtifact.logicalId}" op="replace" type="${selectedArtifact.type}" title="${escapeArtifactAttribute(selectedArtifact.title)}" base_version="${selectedArtifact.version}">\n${escapedContent}\n</artifact>`,
+        )
+      }
       parser?.finish()
 
       if (this.artifactService) {

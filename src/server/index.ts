@@ -12,6 +12,8 @@ import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
 import { SeaweedS3ObjectStore } from './storage/seaweedS3ObjectStore.js'
 import { ArtifactService } from './artifacts/service.js'
 import { GenerationStreamHub } from './streamStore.js'
+import { LocalEmbeddingService } from './embedding.js'
+import { QwenTokenCounter } from './tokenBudget.js'
 
 const config = readConfig()
 const database = createDatabase(config.databaseUrl, config.pgPoolMax)
@@ -43,6 +45,18 @@ const finalizer = new GenerationFinalizer(
   redis,
   runtimes,
 )
+const tokenCounter = new QwenTokenCounter(config)
+const embeddingService = new LocalEmbeddingService(config)
+if (
+  config.contextMemoryEnabled ||
+  config.userMemoryEnabled ||
+  config.artifactContextV2Enabled
+) {
+  await tokenCounter.initialize()
+}
+if (config.artifactContextV2Enabled) {
+  await embeddingService.initialize()
+}
 const generations = new GenerationService(
   config,
   database,
@@ -50,6 +64,8 @@ const generations = new GenerationService(
   runtimes,
   finalizer,
   artifactService,
+  tokenCounter,
+  embeddingService,
 )
 const streamHub = new GenerationStreamHub(config, redis)
 if (redis.isReady) await streamHub.start()

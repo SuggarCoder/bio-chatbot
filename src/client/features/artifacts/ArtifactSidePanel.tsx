@@ -3,6 +3,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  For,
   onCleanup,
   onMount,
   Match,
@@ -25,6 +26,8 @@ export const ArtifactSidePanel: Component = () => {
   const [phase, setPhase] = createSignal<PanelPhase>('closed')
   const [isDesktop, setIsDesktop] = createSignal(false)
   const [notice, setNotice] = createSignal('')
+  const [historyOpen, setHistoryOpen] = createSignal(false)
+  const [restoringVersion, setRestoringVersion] = createSignal<number | null>(null)
   let slotRef: HTMLDivElement | undefined
   let panelRef: HTMLElement | undefined
   let timeline: gsap.core.Timeline | undefined
@@ -50,6 +53,34 @@ export const ArtifactSidePanel: Component = () => {
     ? `${state.panelWidth}px`
     : `min(100vw, ${state.panelWidth}px)`
   const prefersReducedMotion = () => reducedMotionQuery?.matches ?? false
+
+  createEffect(() => {
+    const artifactId = state.activeArtifactId
+    if (!artifactId) return
+    untrack(() => {
+      void artifactStore.loadHistory(artifactId).catch(() => {
+        setNotice('Version history could not be loaded.')
+      })
+    })
+  })
+
+  const restoreVersion = async (sourceVersion: number) => {
+    const artifactId = state.activeArtifactId
+    if (!artifactId || restoringVersion() !== null) return
+    setRestoringVersion(sourceVersion)
+    try {
+      const restoredVersion = await artifactStore.restore(
+        artifactId,
+        sourceVersion,
+      )
+      setNotice(`Restored v${sourceVersion} as v${restoredVersion}.`)
+      setHistoryOpen(false)
+    } catch {
+      setNotice('This version could not be restored.')
+    } finally {
+      setRestoringVersion(null)
+    }
+  }
 
   const finishClosed = (revision: number) => {
     if (revision !== animationRevision) return
@@ -339,10 +370,15 @@ export const ArtifactSidePanel: Component = () => {
               </div>
             </Show>
 
-            <div class="min-w-0 flex-1">
+            <button
+              type="button"
+              class="min-w-0 flex-1 rounded-lg px-1 py-1 text-left transition hover:bg-white/70"
+              aria-expanded={historyOpen()}
+              onClick={() => setHistoryOpen((value) => !value)}
+            >
               <h2 class="truncate text-sm font-semibold text-slate-900">{title()}</h2>
               <p class="truncate text-[11px] font-medium text-slate-500">Version {version()}</p>
-            </div>
+            </button>
 
             <div class="flex shrink-0 items-center gap-1">
               <Tooltip content="Download" placement="bottom">
@@ -375,6 +411,52 @@ export const ArtifactSidePanel: Component = () => {
                   class="absolute right-3 top-[calc(100%+0.5rem)] rounded-xl border border-white/80 bg-white/90 px-3 py-2 text-xs font-medium text-slate-700 shadow-lg backdrop-blur-xl"
                 >
                   {message()}
+                </div>
+              )}
+            </Show>
+
+            <Show when={historyOpen() && artifact()}>
+              {(activeArtifact) => (
+                <div class="absolute left-3 right-3 top-[calc(100%+0.5rem)] z-30 max-h-72 overflow-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                  <div class="px-2 pb-2 pt-1 text-xs font-semibold text-slate-700">
+                    Version history
+                  </div>
+                  <Show
+                    when={activeArtifact().versions.length > 0}
+                    fallback={<p class="px-2 py-3 text-xs text-slate-500">Loading history…</p>}
+                  >
+                    <For each={activeArtifact().versions}>
+                      {(item) => (
+                        <div class="flex items-center gap-2 rounded-xl px-2 py-2 hover:bg-slate-50">
+                          <button
+                            type="button"
+                            class="min-w-0 flex-1 text-left"
+                            onClick={() => {
+                              setHistoryOpen(false)
+                              void artifactStore.open(activeArtifact().id, item.version)
+                            }}
+                          >
+                            <span class="block text-xs font-semibold text-slate-800">
+                              v{item.version}{item.version === activeArtifact().currentVersion ? ' · current' : ''}
+                            </span>
+                            <span class="block truncate text-[11px] text-slate-500">
+                              {item.createdBy} · {new Date(item.createdAt).toLocaleString()}
+                            </span>
+                          </button>
+                          <Show when={item.version !== activeArtifact().currentVersion}>
+                            <button
+                              type="button"
+                              class="rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-semibold text-teal-700 transition hover:border-teal-300 hover:bg-teal-50 disabled:opacity-50"
+                              disabled={restoringVersion() !== null}
+                              onClick={() => void restoreVersion(item.version)}
+                            >
+                              {restoringVersion() === item.version ? 'Restoring…' : 'Restore'}
+                            </button>
+                          </Show>
+                        </div>
+                      )}
+                    </For>
+                  </Show>
                 </div>
               )}
             </Show>

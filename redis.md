@@ -45,6 +45,10 @@ stream:{userId}:{generationId}                 STREAM
 stream:events                                  Pub/Sub
 
 chat:ctx:{conversationId}                      STRING JSON, 2h
+chat:ctx:v2:{policy}:{chatId}:{maxSeq}:{summaryVersion} STRING JSON, 24h
+queue:maintenance                              STREAM
+queue:maintenance:dedupe:{jobId}:{attempt}     STRING, 24h
+maintenance:{jobId}:lease                      STRING
 rl:user:{userId}:generation:{window}           counter
 rl:ip:{ip}:generation:{window}                 counter
 quota:user:{userId}:{yyyyMM}                   counter
@@ -59,6 +63,8 @@ Each User/tenant owns a Redis Stream queue. `queue:ready-users` stores a weighte
 Before scheduling, one Lua operation removes expired slots and checks global, provider, model, and user limits, then acquires those slots plus the conversation lock and Generation lease. Failed lock acquisition defers the user score so a blocked conversation cannot spin or starve other users.
 
 The PostgreSQL Outbox is the reliable enqueue source. A queued PostgreSQL Generation missing from Redis is periodically re-enqueued idempotently.
+
+Rolling-summary, user-memory, and Artifact-index jobs use the separate maintenance stream and `BackgroundJob`/Outbox records. Redis loss only delays them: the Worker reconciles unfinished PostgreSQL jobs. Their concurrency and provider usage are independent from user Generation quota; background LLM usage is recorded in `UsageEvent` with kind `summary` or `memory`.
 
 ## Streaming
 

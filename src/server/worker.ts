@@ -1,4 +1,16 @@
 import { ArtifactService } from './artifacts/service.js'
+import { ArtifactIndexer } from './artifacts/indexer.js'
+import {
+  BackgroundQueue,
+  claimBackgroundJob,
+  claimBackgroundOutboxBatch,
+  completeBackgroundJob,
+  enqueuePendingArtifactIndexJobs,
+  failBackgroundJob,
+  listQueuedBackgroundJobs,
+  markBackgroundOutboxFailed,
+  markBackgroundOutboxPublished,
+} from './backgroundJobs.js'
 import { createRedisClient } from './cache.js'
 import { readConfig } from './config.js'
 import {
@@ -8,6 +20,8 @@ import {
 } from './db.js'
 import { GenerationService } from './generation.js'
 import { GenerationFinalizer } from './generationFinalizer.js'
+import { LocalEmbeddingService } from './embedding.js'
+import { MemoryProcessor } from './memoryWorker.js'
 import {
   claimGeneration,
   claimOutboxBatch,
@@ -24,6 +38,7 @@ import {
 import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
 import { normalizeExecutionSteps } from './executionTrace.js'
 import { SeaweedS3ObjectStore } from './storage/seaweedS3ObjectStore.js'
+import { QwenTokenCounter } from './tokenBudget.js'
 
 const config = readConfig()
 const database = createDatabase(config.databaseUrl, config.pgPoolMax)
@@ -46,6 +61,18 @@ await redis.connect()
 const runtimes = new GenerationRuntimeRegistry(config, redis)
 await runtimes.start()
 const finalizer = new GenerationFinalizer(config, database, redis, runtimes)
+const tokenCounter = new QwenTokenCounter(config)
+const embeddingService = new LocalEmbeddingService(config)
+if (
+  config.contextMemoryEnabled ||
+  config.userMemoryEnabled ||
+  config.artifactContextV2Enabled
+) {
+  await tokenCounter.initialize()
+}
+if (config.artifactContextV2Enabled) {
+  await embeddingService.initialize()
+}
 const generations = new GenerationService(
   config,
   database,
@@ -53,9 +80,17 @@ const generations = new GenerationService(
   runtimes,
   finalizer,
   artifactService,
+  tokenCounter,
+  embeddingService,
 )
 const queue = new GenerationQueue(config, redis)
+const backgroundQueue = new BackgroundQueue(config, redis)
+const memoryProcessor = new MemoryProcessor(config, database, tokenCounter)
+const artifactIndexer = objectStore
+  ? new ArtifactIndexer(database, objectStore, embeddingService)
+  : null
 const active = new Set<Promise<void>>()
+const backgroundActive = new Set<Promise<void>>()
 const heartbeatIntervalMs = 10_000
 const outboxPollIntervalMs = 250
 const reconcileIntervalMs = 15_000
@@ -112,6 +147,71 @@ async function dispatchOutbox(): Promise<void> {
       await markOutboxFailed(database, row, error).catch(() => undefined)
     }
   }
+  const backgroundRows = await claimBackgroundOutboxBatch(database)
+  for (const row of backgroundRows) {
+    try {
+      await backgroundQueue.enqueue({
+        jobId: row.aggregateId,
+        userId: row.userId,
+        attempt: row.jobAttempt,
+      })
+      await markBackgroundOutboxPublished(database, row)
+    } catch (error) {
+      await markBackgroundOutboxFailed(database, row, error).catch(() => undefined)
+    }
+  }
+}
+
+async function scheduleBackgroundOne(): Promise<boolean> {
+  if (backgroundActive.size >= config.backgroundConcurrency) return false
+  const queued = await backgroundQueue.pop()
+  if (!queued) return false
+  const token = await backgroundQueue.acquire(queued.jobId)
+  if (!token) {
+    await backgroundQueue.enqueue(queued)
+    return false
+  }
+  const job = await claimBackgroundJob(
+    database,
+    queued,
+    backgroundQueue.workerId,
+  )
+  if (!job) {
+    await backgroundQueue.release(queued.jobId, token)
+    return true
+  }
+  const running = (async () => {
+    try {
+      if (job.type === 'artifact.index') {
+        if (!config.artifactContextV2Enabled) {
+          await completeBackgroundJob(database, job)
+          return
+        }
+        if (!artifactIndexer) throw new Error('Artifact storage is unavailable')
+        await artifactIndexer.process(job)
+        await completeBackgroundJob(database, job)
+      } else {
+        if (
+          (job.type === 'chat.summary' && !config.contextMemoryEnabled) ||
+          (job.type === 'user.memory' && !config.userMemoryEnabled)
+        ) {
+          await completeBackgroundJob(database, job)
+          return
+        }
+        const usage = await memoryProcessor.process(job)
+        await completeBackgroundJob(database, job, usage)
+      }
+    } catch (error) {
+      await failBackgroundJob(database, job, error)
+    } finally {
+      await backgroundQueue.release(queued.jobId, token).catch(() => undefined)
+    }
+  })().finally(() => {
+    backgroundActive.delete(running)
+    wakeScheduler()
+  })
+  backgroundActive.add(running)
+  return true
 }
 
 async function runGeneration(
@@ -229,6 +329,11 @@ async function reconcile(): Promise<void> {
       executionSteps: normalizeExecutionSteps(snapshot?.executionSteps),
     })
   }
+  const background = await listQueuedBackgroundJobs(database)
+  for (const job of background) await backgroundQueue.enqueue(job)
+  if (config.artifactContextV2Enabled) {
+    await enqueuePendingArtifactIndexJobs(database)
+  }
 }
 
 async function mainLoop(): Promise<void> {
@@ -255,6 +360,14 @@ async function mainLoop(): Promise<void> {
       scheduled = await scheduleOne()
     } while (scheduled && active.size < config.globalGenerationConcurrency)
 
+    let backgroundScheduled = false
+    do {
+      backgroundScheduled = await scheduleBackgroundOne()
+    } while (
+      backgroundScheduled &&
+      backgroundActive.size < config.backgroundConcurrency
+    )
+
     const nextPeriodicTaskAt = Math.min(
       nextHeartbeatAt,
       nextOutboxPollAt,
@@ -271,7 +384,7 @@ async function shutdown(signal: string): Promise<void> {
   console.info('Worker shutting down', { signal })
   runtimes.abortAll('shutdown')
   await Promise.race([
-    Promise.allSettled([...active]),
+    Promise.allSettled([...active, ...backgroundActive]),
     wait(15_000),
   ])
   await generations.shutdown()

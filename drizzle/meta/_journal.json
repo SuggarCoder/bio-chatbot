@@ -15,6 +15,13 @@
       "when": 1786022400000,
       "tag": "0001_restore_database_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786065411829,
+      "tag": "0002_kind_slyde",
+      "breakpoints": true
     }
   ]
 }

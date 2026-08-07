@@ -1,8 +1,18 @@
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
+import {
+  and,
+  cosineDistance,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+} from 'drizzle-orm'
 
 import type { Database } from '../db.js'
+import { enqueueBackgroundJob } from '../backgroundJobs.js'
 import {
   artifacts,
+  artifactSections,
   artifactVersions,
   chats,
   type MessagePart,
@@ -213,7 +223,7 @@ export async function commitPreparedArtifact(
     }
   }
 
-  await transaction.insert(artifactVersions).values({
+  const [versionRow] = await transaction.insert(artifactVersions).values({
     userId: input.userId,
     artifactId: prepared.artifactId,
     version: prepared.version,
@@ -229,6 +239,18 @@ export async function commitPreparedArtifact(
     sourceGenerationId: input.generationId,
     streamArtifactId: prepared.streamArtifactId,
     createdBy: 'assistant',
+  }).returning({ id: artifactVersions.id })
+
+  await enqueueBackgroundJob(transaction, {
+    userId: input.userId,
+    type: 'artifact.index',
+    dedupeKey: `artifact.index:${prepared.artifactId}:${prepared.version}`,
+    chatId: input.chatId,
+    artifactVersionId: versionRow.id,
+    payload: {
+      artifactId: prepared.artifactId,
+      version: prepared.version,
+    },
   })
 
   return {
@@ -323,6 +345,9 @@ export async function listArtifactPromptCatalogForChat(
       title: artifacts.title,
       type: artifacts.mimeType,
       currentVersion: artifacts.currentVersion,
+      byteLength: artifactVersions.byteLength,
+      outline: artifactVersions.outline,
+      outlineStatus: artifactVersions.outlineStatus,
       updatedAt: artifacts.updatedAt,
     })
     .from(artifacts)
@@ -334,6 +359,14 @@ export async function listArtifactPromptCatalogForChat(
         isNull(chats.deletedAt),
       ),
     )
+    .innerJoin(
+      artifactVersions,
+      and(
+        eq(artifactVersions.userId, artifacts.userId),
+        eq(artifactVersions.artifactId, artifacts.id),
+        eq(artifactVersions.version, artifacts.currentVersion),
+      ),
+    )
     .where(
       and(
         eq(artifacts.chatId, chatId),
@@ -343,7 +376,67 @@ export async function listArtifactPromptCatalogForChat(
       ),
     )
     .orderBy(desc(artifacts.updatedAt))
-    .limit(50)
+}
+
+export async function searchArtifactSections(
+  database: Database,
+  input: {
+    userId: string
+    artifactId: string
+    version: number
+    embedding: number[]
+    limit?: number
+  },
+) {
+  const distance = cosineDistance(
+    artifactSections.embedding,
+    input.embedding,
+  )
+  return database
+    .select({
+      ordinal: artifactSections.ordinal,
+      byteStart: artifactSections.byteStart,
+      byteEnd: artifactSections.byteEnd,
+      headingPath: artifactSections.headingPath,
+      preview: artifactSections.preview,
+      distance,
+    })
+    .from(artifactSections)
+    .where(and(
+      eq(artifactSections.userId, input.userId),
+      eq(artifactSections.artifactId, input.artifactId),
+      eq(artifactSections.version, input.version),
+      isNotNull(artifactSections.embedding),
+    ))
+    .orderBy(distance)
+    .limit(input.limit ?? 12)
+}
+
+export async function listArtifactSections(
+  database: Database,
+  input: {
+    userId: string
+    artifactId: string
+    version: number
+    limit?: number
+  },
+) {
+  return database
+    .select({
+      ordinal: artifactSections.ordinal,
+      byteStart: artifactSections.byteStart,
+      byteEnd: artifactSections.byteEnd,
+      headingPath: artifactSections.headingPath,
+      preview: artifactSections.preview,
+    })
+    .from(artifactSections)
+    .where(and(
+      eq(artifactSections.userId, input.userId),
+      eq(artifactSections.artifactId, input.artifactId),
+      eq(artifactSections.version, input.version),
+    ))
+    .orderBy(artifactSections.ordinal)
+    .limit(input.limit ?? 200)
 }
 
 export async function getArtifactForUser(

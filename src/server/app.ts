@@ -5,6 +5,7 @@ import Fastify, {
   type FastifyRequest,
 } from 'fastify'
 import { Readable } from 'node:stream'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -315,9 +316,23 @@ export async function buildApp(
     const worker = redis.isReady && await redis.exists(
       redisKey(config, 'worker:heartbeat'),
     ) > 0 ? 'ok' : 'unavailable'
+    const tokenizerRequired = config.contextMemoryEnabled ||
+      config.userMemoryEnabled ||
+      config.artifactContextV2Enabled
+    const tokenizer = !tokenizerRequired
+      ? 'disabled'
+      : existsSync(path.resolve(config.qwenTokenizerPath, 'tokenizer.json'))
+        ? 'ok'
+        : 'unavailable'
+    const embeddings = !config.artifactContextV2Enabled
+      ? 'disabled'
+      : existsSync(path.resolve(config.embeddingModelPath, 'onnx/model_int8.onnx'))
+        ? 'ok'
+        : 'unavailable'
     const status =
       postgres === 'ok' && redisStatus === 'ok'
         && objectStorage !== 'unavailable' && worker === 'ok'
+        && tokenizer !== 'unavailable' && embeddings !== 'unavailable'
         ? 'ok'
         : postgres === 'ok'
           ? 'degraded'
@@ -337,6 +352,8 @@ export async function buildApp(
         redis: redisStatus,
         objectStorage,
         worker,
+        tokenizer,
+        embeddings,
       },
       time: new Date().toISOString(),
     }
@@ -551,6 +568,71 @@ export async function buildApp(
   }, (request, reply) =>
     readArtifactVersion(request, reply, false),
   )
+
+  app.post<{
+    Params: { artifactId: string; version: string }
+  }>(`${API_BASE}/artifacts/:artifactId/versions/:version/restore`, {
+    schema: {
+      params: httpSchemas.artifactVersionParams,
+      response: httpSchemas.restoreArtifactVersionResponse,
+    },
+  }, async (request, reply) => {
+    const user = await authenticate(request)
+    const artifactId = requireUuid(
+      request,
+      reply,
+      request.params.artifactId,
+      'artifactId',
+    )
+    const restoreRequestId = requireUuid(
+      request,
+      reply,
+      request.headers['idempotency-key'],
+      'Idempotency-Key',
+    )
+    const sourceVersion = Number(request.params.version)
+    if (!artifactId || !restoreRequestId) return
+    if (!Number.isSafeInteger(sourceVersion) || sourceVersion < 1) {
+      return reply.code(400).send(
+        errorBody(request, 'invalid_request', 'version must be a positive integer'),
+      )
+    }
+    if (!artifactService) {
+      return reply.code(503).send(
+        errorBody(
+          request,
+          'artifact_storage_unavailable',
+          'Artifact storage is unavailable',
+        ),
+      )
+    }
+    try {
+      const restored = await artifactService.restoreVersion(
+        user.id,
+        artifactId,
+        sourceVersion,
+        restoreRequestId,
+      )
+      return reply.code(restored.created ? 201 : 200).send({
+        artifactId: restored.artifactId,
+        version: restored.version,
+      })
+    } catch (error) {
+      if (error instanceof ArtifactServiceError) {
+        const status = error.code === 'ARTIFACT_NOT_FOUND'
+          ? 404
+          : error.code === 'ARTIFACT_VERSION_CONFLICT'
+            ? 409
+            : 503
+        return reply.code(status).send(errorBody(
+          request,
+          error.code.toLocaleLowerCase(),
+          error.message,
+        ))
+      }
+      throw error
+    }
+  })
 
   app.get<{
     Params: { artifactId: string; version: string }

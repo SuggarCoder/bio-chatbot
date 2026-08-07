@@ -45,6 +45,26 @@ GENERATION_SNAPSHOT_INTERVAL_MS=1000
 QWEN_API_KEY=<secret>
 QWEN_BASE_URL=<openai-compatible-base-url>
 QWEN_MODEL=<model>
+QWEN_TOKENIZER_PATH=models/qwen-tokenizer
+QWEN_CONTEXT_WINDOW_TOKENS=1000000
+QWEN_MAX_INPUT_TOKENS=991808
+QWEN_MAX_OUTPUT_TOKENS=40960
+
+CHAT_HISTORY_TOKEN_BUDGET=131072
+CHAT_SUMMARY_TOKEN_BUDGET=8192
+SUMMARY_TRIGGER_TOKENS=16384
+INSTRUCTIONS_TOKEN_BUDGET=32768
+CONTEXT_MEMORY_ENABLED=false
+USER_MEMORY_ENABLED=false
+
+BACKGROUND_MODEL=qwen3.6-flash
+BACKGROUND_MAX_OUTPUT_TOKENS=4096
+BACKGROUND_CONCURRENCY=1
+BACKGROUND_TIMEOUT_MS=120000
+
+ARTIFACT_CONTEXT_V2_ENABLED=false
+ARTIFACT_PATCH_ENABLED=false
+EMBEDDING_MODEL_PATH=models/bge-small-zh-v1.5
 
 GPAS2_AUTH_MODE=upstream
 GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
@@ -68,6 +88,14 @@ docker compose --env-file /secure/path/bio-chatbot.env up -d app worker
 ```
 
 `db:init` 只能执行一次。API 和 Worker 都只校验 schema，不会在启动时并发执行迁移。
+
+### 分层上下文上线顺序
+
+1. 先执行 `npm run db:migrate`，确认 PostgreSQL 已启用 `vector` 扩展。
+2. 构建前放入与线上 Qwen 模型完全匹配的本地 tokenizer（至少包含 `tokenizer.json`、`tokenizer_config.json` 和 `chat_template`），并确认 BGE INT8 ONNX 文件存在。
+3. 同时部署 API 与 Worker，先保持四个新功能开关为 `false`。
+4. 依次开启 `CONTEXT_MEMORY_ENABLED`、`USER_MEMORY_ENABLED`、`ARTIFACT_CONTEXT_V2_ENABLED`，最后开启 `ARTIFACT_PATCH_ENABLED`。
+5. 每一步都检查 `/ai-chatbot/api/health`：启用相关功能后 `tokenizer`、`embeddings` 和 `worker` 必须为 `ok`。运行时只从镜像本地读取模型，禁止联网回退。
 
 ## 反向代理
 
