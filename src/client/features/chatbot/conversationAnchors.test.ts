@@ -33,7 +33,7 @@ test('conversation anchors only appear for long conversations with multiple ques
   assert.equal(shouldShowConversationAnchors(1600, 0, 4), false)
 })
 
-test('anchor positions are proportional and clamped to the scroll track', () => {
+test('anchor positions are proportional and clamped to the available height', () => {
   assert.equal(getConversationAnchorPosition(250, 1000), 0.25)
   assert.equal(getConversationAnchorPosition(-20, 1000), 0)
   assert.equal(getConversationAnchorPosition(1200, 1000), 1)

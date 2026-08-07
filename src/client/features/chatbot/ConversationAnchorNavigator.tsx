@@ -16,6 +16,8 @@ export type ConversationAnchorItem = {
 type ConversationAnchorNavigatorProps = {
   anchors: ConversationAnchorItem[]
   activeId?: string
+  viewportTop: number
+  viewportBottom: number
   hasMoreMessages: boolean
   loadingOlderMessages: boolean
   olderMessagesError?: string
@@ -81,7 +83,11 @@ export function ConversationAnchorNavigator(
   return (
     <Show when={desktopFinePointer()}>
       <div
-        class={`absolute bottom-2 right-3 top-2 z-30 transition-[width] duration-200 ${isOpen() ? 'w-72' : 'w-6'}`}
+        class={`fixed right-4 z-30 transition-[width] duration-200 ${isOpen() ? 'w-72' : 'w-6'}`}
+        style={{
+          top: `${props.viewportTop}px`,
+          bottom: `${props.viewportBottom}px`,
+        }}
         onPointerEnter={() => setPointerOpen(true)}
         onPointerLeave={() => setPointerOpen(false)}
         onPointerCancel={() => setPointerOpen(false)}
@@ -106,7 +112,7 @@ export function ConversationAnchorNavigator(
         <button
           ref={railButtonRef}
           type="button"
-          class="absolute inset-y-0 right-0 z-10 w-6 rounded-full bg-white/88 shadow-sm ring-1 ring-slate-200/90 backdrop-blur transition hover:ring-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+          class="group absolute inset-y-0 right-0 z-10 w-6 bg-transparent focus-visible:outline-none"
           aria-label="打开提问导航"
           aria-expanded={isOpen()}
           aria-controls="conversation-question-anchor-list"
@@ -116,11 +122,11 @@ export function ConversationAnchorNavigator(
             setFocusOpen(nextOpen)
           }}
         >
-          <span class="absolute inset-y-3 left-1/2 w-px -translate-x-1/2 rounded-full bg-slate-200" />
+          <span class="pointer-events-none absolute inset-y-2 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-slate-300/45 transition-colors group-hover:bg-teal-500/35 group-focus-visible:bg-teal-500/45" />
           <For each={props.anchors}>
             {(anchor) => (
               <span
-                class={`pointer-events-none absolute left-1/2 h-0.5 -translate-x-1/2 rounded-full transition-all ${anchor.id === props.activeId ? 'w-3.5 bg-teal-600' : 'w-2 bg-slate-400'}`}
+                class={`pointer-events-none absolute left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full transition-all ${anchor.id === props.activeId ? 'h-2.5 w-2.5 bg-teal-600' : 'h-1.5 w-1.5 bg-slate-400/65 group-hover:bg-slate-500'}`}
                 style={{
                   top: `${Math.min(Math.max(anchor.position, 0.02), 0.98) * 100}%`,
                 }}
@@ -133,9 +139,9 @@ export function ConversationAnchorNavigator(
           <nav
             id="conversation-question-anchor-list"
             aria-label="提问导航"
-            class="absolute inset-y-0 left-0 right-8 flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white/96 shadow-xl backdrop-blur"
+            class="absolute inset-y-0 left-0 right-8 flex min-h-0 flex-col overflow-hidden bg-white border-[0.5px] border-slate-200 rounded-3xl"
           >
-            <div class="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+            <div class="flex items-center justify-between px-4 py-3">
               <p class="text-sm font-semibold text-slate-700">提问导航</p>
               <span class="text-xs text-slate-400">{props.anchors.length} 个提问</span>
             </div>

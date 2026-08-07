@@ -1850,6 +1850,10 @@ function SessionConversationView(props: { conversationId: string }) {
   const [activeConversationAnchorId, setActiveConversationAnchorId] = createSignal<string>()
   const [showConversationAnchors, setShowConversationAnchors] = createSignal(false)
   const [highlightedQuestionId, setHighlightedQuestionId] = createSignal<string>()
+  const [conversationAnchorViewport, setConversationAnchorViewport] = createSignal({
+    top: 8,
+    bottom: 8,
+  })
   const conversation = () => chatStore.getConversation(props.conversationId)
   let scrollFadeTimer: number | undefined
   let pointerScrollEndTimer: number | undefined
@@ -2038,6 +2042,22 @@ function SessionConversationView(props: { conversationId: string }) {
       messageListRef.scrollHeight - messageListRef.clientHeight,
       0,
     )
+    const messageListBounds = messageListRef.getBoundingClientRect()
+    const nextViewport = {
+      top: Math.max(Math.round(messageListBounds.top + 8), 8),
+      bottom: Math.max(
+        Math.round(window.innerHeight - messageListBounds.bottom + 8),
+        8,
+      ),
+    }
+    const currentViewport = conversationAnchorViewport()
+
+    if (
+      currentViewport.top !== nextViewport.top ||
+      currentViewport.bottom !== nextViewport.bottom
+    ) {
+      setConversationAnchorViewport(nextViewport)
+    }
     const nextAnchors = nextOffsets.flatMap((anchor) => {
       const message = questionMessages.get(anchor.id)
 
@@ -2612,6 +2632,8 @@ function SessionConversationView(props: { conversationId: string }) {
                   <ConversationAnchorNavigator
                     anchors={conversationAnchors()}
                     activeId={activeConversationAnchorId()}
+                    viewportTop={conversationAnchorViewport().top}
+                    viewportBottom={conversationAnchorViewport().bottom}
                     hasMoreMessages={activeConversation().hasMoreMessages}
                     loadingOlderMessages={Boolean(activeConversation().loadingOlderMessages)}
                     olderMessagesError={activeConversation().olderMessagesError}
