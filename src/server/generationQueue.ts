@@ -17,6 +17,10 @@ export type GenerationQueueJob = {
   attempt: number
 }
 
+export type PoppedGenerationQueueJob = GenerationQueueJob & {
+  schedulingScore: number
+}
+
 export type GenerationWorkItem = {
   generationId: string
   streamId: string
@@ -41,6 +45,7 @@ export type QueueLease = {
   provider: string
   model: string
   workerId: string
+  token: string
 }
 
 export type OutboxRow = {
@@ -67,7 +72,24 @@ if redis.call('ZSCORE', KEYS[1], ARGV[2]) == false then
   if first[2] then score = tonumber(first[2]) end
   redis.call('ZADD', KEYS[1], score, ARGV[2])
 end
-redis.call('PUBLISH', ARGV[5], ARGV[2])
+return 1
+`
+
+const deferScript = `
+local inserted = redis.call('SET', KEYS[3], '1', 'EX', 86400, 'NX')
+if inserted ~= false then
+  redis.call('XADD', KEYS[4], '*',
+    'generationId', ARGV[1],
+    'userId', ARGV[2],
+    'attempt', ARGV[3])
+end
+redis.call('HSET', KEYS[2], ARGV[2], ARGV[4])
+local current = redis.call('ZSCORE', KEYS[1], ARGV[2])
+local restored = tonumber(ARGV[5])
+if current == false or tonumber(current) < restored then
+  redis.call('ZADD', KEYS[1], restored, ARGV[2])
+end
+if inserted == false then return 0 end
 return 1
 `
 
@@ -97,12 +119,13 @@ redis.call('XDEL', queueKey, entryId)
 redis.call('DEL', ARGV[2] .. userId .. ':' .. generationId .. ':' .. attempt)
 local weight = tonumber(redis.call('HGET', KEYS[2], userId) or '1')
 local score = tonumber(redis.call('ZSCORE', KEYS[1], userId) or '0')
+local nextScore = score + (1 / math.max(weight, 1))
 if redis.call('XLEN', queueKey) == 0 then
   redis.call('ZREM', KEYS[1], userId)
 else
-  redis.call('ZADD', KEYS[1], score + (1 / math.max(weight, 1)), userId)
+  redis.call('ZADD', KEYS[1], nextScore, userId)
 end
-return {userId, generationId, attempt}
+return {userId, generationId, attempt, tostring(nextScore)}
 `
 
 const acquireScript = `
@@ -115,30 +138,33 @@ if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return 0 end
 if redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[5]) then return 0 end
 if redis.call('ZCARD', KEYS[4]) >= tonumber(ARGV[6]) then return 0 end
-if redis.call('SET', KEYS[5], ARGV[7], 'NX', 'PX', ARGV[9]) == false then return 0 end
+if redis.call('SET', KEYS[5], ARGV[7], 'NX', 'PX', ARGV[8]) == false then return 0 end
+if redis.call('SET', KEYS[6], ARGV[7], 'NX', 'PX', ARGV[8]) == false then
+  if redis.call('GET', KEYS[5]) == ARGV[7] then redis.call('DEL', KEYS[5]) end
+  return 0
+end
 redis.call('ZADD', KEYS[1], expires, ARGV[7])
 redis.call('ZADD', KEYS[2], expires, ARGV[7])
 redis.call('ZADD', KEYS[3], expires, ARGV[7])
 redis.call('ZADD', KEYS[4], expires, ARGV[7])
-redis.call('SET', KEYS[6], ARGV[8], 'PX', ARGV[9])
 return 1
 `
 
 const renewScript = `
 if redis.call('GET', KEYS[5]) ~= ARGV[2] then return 0 end
-if redis.call('GET', KEYS[6]) ~= ARGV[3] then return 0 end
+if redis.call('GET', KEYS[6]) ~= ARGV[2] then return 0 end
 for index = 1, 4 do
   redis.call('ZADD', KEYS[index], ARGV[1], ARGV[2])
 end
-redis.call('PEXPIRE', KEYS[5], ARGV[4])
-redis.call('PEXPIRE', KEYS[6], ARGV[4])
+redis.call('PEXPIRE', KEYS[5], ARGV[3])
+redis.call('PEXPIRE', KEYS[6], ARGV[3])
 return 1
 `
 
 const releaseScript = `
 for index = 1, 4 do redis.call('ZREM', KEYS[index], ARGV[1]) end
 if redis.call('GET', KEYS[5]) == ARGV[1] then redis.call('DEL', KEYS[5]) end
-if redis.call('GET', KEYS[6]) == ARGV[2] then redis.call('DEL', KEYS[6]) end
+if redis.call('GET', KEYS[6]) == ARGV[1] then redis.call('DEL', KEYS[6]) end
 return 1
 `
 
@@ -186,21 +212,32 @@ export class GenerationQueue {
         job.userId,
         String(job.attempt),
         String(schedulingWeight),
-        redisKey(this.config, 'queue:wakeup'),
       ],
     })
   }
 
-  async defer(job: GenerationQueueJob, schedulingWeight: number): Promise<void> {
-    await this.enqueue(job, schedulingWeight)
-    await this.redis.zIncrBy(
-      this.readyKey(),
-      1 / Math.max(1, schedulingWeight),
-      job.userId,
-    )
+  async defer(
+    job: PoppedGenerationQueueJob,
+    schedulingWeight: number,
+  ): Promise<void> {
+    await this.redis.eval(deferScript, {
+      keys: [
+        this.readyKey(),
+        this.weightsKey(),
+        this.dedupeKey(job),
+        this.queueKey(job.userId),
+      ],
+      arguments: [
+        job.generationId,
+        job.userId,
+        String(job.attempt),
+        String(schedulingWeight),
+        String(job.schedulingScore),
+      ],
+    })
   }
 
-  async pop(): Promise<GenerationQueueJob | null> {
+  async pop(): Promise<PoppedGenerationQueueJob | null> {
     const result = await this.redis.eval(popScript, {
       keys: [this.readyKey(), this.weightsKey()],
       arguments: [
@@ -208,11 +245,14 @@ export class GenerationQueue {
         redisKey(this.config, 'queue:dedupe:'),
       ],
     })
-    if (!Array.isArray(result) || result.length < 3) return null
+    if (!Array.isArray(result) || result.length < 4) return null
+    const schedulingScore = Number(result[3])
+    if (!Number.isFinite(schedulingScore)) return null
     return {
       userId: String(result[0]),
       generationId: String(result[1]),
       attempt: Number(result[2]),
+      schedulingScore,
     }
   }
 
@@ -247,8 +287,7 @@ export class GenerationQueue {
         String(this.config.providerGenerationConcurrency),
         String(this.config.modelGenerationConcurrency),
         String(userLimit),
-        lease.generationId,
-        lease.workerId,
+        lease.token,
         String(this.config.generationLockLeaseMs),
       ],
     })
@@ -260,8 +299,7 @@ export class GenerationQueue {
       keys: this.leaseKeys(lease),
       arguments: [
         String(Date.now() + this.config.generationLockLeaseMs),
-        lease.generationId,
-        lease.workerId,
+        lease.token,
         String(this.config.generationLockLeaseMs),
       ],
     })
@@ -271,7 +309,7 @@ export class GenerationQueue {
   async release(lease: QueueLease): Promise<void> {
     await this.redis.eval(releaseScript, {
       keys: this.leaseKeys(lease),
-      arguments: [lease.generationId, lease.workerId],
+      arguments: [lease.token],
     })
   }
 

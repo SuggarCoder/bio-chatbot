@@ -9,6 +9,7 @@ import {
   createGenerationStart,
   finalizeGeneration,
   getChatDetail,
+  markGenerationStreaming,
   migrateDatabase,
   rebuildChatContext,
   requestGenerationCancellation,
@@ -74,6 +75,14 @@ test(
             'Message rows are immutable after insert',
           )
         },
+      )
+      await database
+        .update(generations)
+        .set({ status: 'scheduled' })
+        .where(eq(generations.id, first.generationId))
+      assert.equal(
+        await markGenerationStreaming(database, first.generationId),
+        true,
       )
       const cancelled = await requestGenerationCancellation(
         database,
@@ -143,12 +152,15 @@ test(
       )
 
       const detail = await getChatDetail(database, userId, chat.id)
+      const cancelledMessage = detail?.messages.find(
+        (message) => message.id === finalized.assistantMessage?.id,
+      )
       assert.equal(
-        detail?.messages.at(-1)?.status,
+        cancelledMessage?.status,
         'cancelled',
       )
       assert.equal(
-        detail?.messages.at(-1)?.executionSteps.at(-1)?.status,
+        cancelledMessage?.executionSteps.at(-1)?.status,
         'interrupted',
       )
       assert.equal(

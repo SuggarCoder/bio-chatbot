@@ -26,15 +26,14 @@ queue:ready-users                              ZSET
 queue:user-weights                             HASH
 queue:tenant:{userId}                          STREAM
 queue:dedupe:{userId}:{generationId}:{attempt} STRING, 24h
-queue:wakeup                                   Pub/Sub
 
 running:global                                 ZSET lease slots
 running:provider:{provider}                    ZSET lease slots
 running:model:{provider}:{model}               ZSET lease slots
 tenant:{userId}:running                        ZSET lease slots
-conversation:{userId}:{conversationId}:lock    STRING, 30s
+conversation:{userId}:{conversationId}:lock    STRING lease token, 30s
 
-generation:{userId}:{generationId}:lease       STRING, 30s
+generation:{userId}:{generationId}:lease       STRING lease token, 30s
 generation:{userId}:{generationId}:cancel      STRING, 1h
 generation:{userId}:{generationId}:snapshot    STRING JSON, 1h
 

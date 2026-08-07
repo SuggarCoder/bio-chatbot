@@ -10,7 +10,6 @@ class FakeRedis {
     keys: string[]
     arguments: string[]
   }> = []
-  increments: Array<{ key: string; increment: number; member: string }> = []
   publications: Array<{ channel: string; payload: string }> = []
   values = new Map<string, string>()
 
@@ -20,11 +19,6 @@ class FakeRedis {
   ): Promise<number> {
     this.evaluations.push(options)
     return 1
-  }
-
-  async zIncrBy(key: string, increment: number, member: string): Promise<number> {
-    this.increments.push({ key, increment, member })
-    return increment
   }
 
   async set(key: string, value: string): Promise<string> {
@@ -46,33 +40,33 @@ const config = {
   generationLockLeaseMs: 30_000,
 } as unknown as AppConfig
 
-test('queue keys, fairness deferral, and leases are user scoped', async () => {
+test('queue keys and lease arguments are user scoped', async () => {
   const redis = new FakeRedis()
   const queue = new GenerationQueue(config, redis as unknown as RedisClient)
   const job = {
     userId: '11111111-1111-4111-8111-111111111111',
     generationId: '22222222-2222-4222-8222-222222222222',
     attempt: 0,
+    schedulingScore: 1.25,
   }
 
   await queue.defer(job, 4)
-  const enqueue = redis.evaluations[0]
-  assert.ok(enqueue.keys.includes(`test:v3:queue:tenant:${job.userId}`))
-  assert.ok(enqueue.keys.some((key) => key.includes(job.generationId)))
-  assert.deepEqual(redis.increments[0], {
-    key: 'test:v3:queue:ready-users',
-    increment: 0.25,
-    member: job.userId,
-  })
+  const deferred = redis.evaluations[0]
+  assert.ok(deferred.keys.includes(`test:v3:queue:tenant:${job.userId}`))
+  assert.ok(deferred.keys.some((key) => key.includes(job.generationId)))
+  assert.equal(deferred.arguments.at(-1), '1.25')
 
-  const acquired = await queue.acquire({
+  const token = `lease:${crypto.randomUUID()}`
+  const queueLease = {
     userId: job.userId,
     generationId: job.generationId,
     conversationId: '33333333-3333-4333-8333-333333333333',
     provider: 'Qwen',
     model: 'Qwen-Max',
     workerId: queue.workerId,
-  }, 1)
+    token,
+  }
+  const acquired = await queue.acquire(queueLease, 1)
   assert.equal(acquired, true)
   const lease = redis.evaluations[1]
   assert.ok(lease.keys.includes(`test:v3:tenant:${job.userId}:running`))
@@ -80,6 +74,12 @@ test('queue keys, fairness deferral, and leases are user scoped', async () => {
     `test:v3:conversation:${job.userId}:33333333-3333-4333-8333-333333333333:lock`,
   ))
   assert.deepEqual(lease.arguments.slice(2, 6), ['4', '3', '2', '1'])
+  assert.equal(lease.arguments[6], token)
+
+  assert.equal(await queue.renew(queueLease), true)
+  await queue.release(queueLease)
+  assert.equal(redis.evaluations[2].arguments[1], token)
+  assert.deepEqual(redis.evaluations[3].arguments, [token])
 })
 
 test('cancellation uses both a durable-enough key and global worker Pub/Sub', async () => {

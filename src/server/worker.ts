@@ -56,12 +56,45 @@ const generations = new GenerationService(
 )
 const queue = new GenerationQueue(config, redis)
 const active = new Set<Promise<void>>()
+const heartbeatIntervalMs = 10_000
+const outboxPollIntervalMs = 250
+const reconcileIntervalMs = 15_000
 let stopping = false
+let schedulerWakePending = false
+let schedulerWakeResolver: (() => void) | undefined
 
 function wait(duration: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, duration)
     timer.unref()
+  })
+}
+
+function wakeScheduler(): void {
+  schedulerWakePending = true
+  const resolve = schedulerWakeResolver
+  schedulerWakeResolver = undefined
+  resolve?.()
+}
+
+function waitForScheduler(duration: number): Promise<void> {
+  if (schedulerWakePending) {
+    schedulerWakePending = false
+    return Promise.resolve()
+  }
+
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer)
+      if (schedulerWakeResolver === finish) {
+        schedulerWakeResolver = undefined
+      }
+      schedulerWakePending = false
+      resolve()
+    }
+    const timer = setTimeout(finish, duration)
+    timer.unref()
+    schedulerWakeResolver = finish
   })
 }
 
@@ -120,6 +153,7 @@ async function scheduleOne(): Promise<boolean> {
     provider: item.provider,
     model: item.model,
     workerId: queue.workerId,
+    token: `${item.generationId}:${queue.workerId}:${crypto.randomUUID()}`,
   }
   const acquired = await queue.acquire(
     lease,
@@ -140,7 +174,10 @@ async function scheduleOne(): Promise<boolean> {
         error,
       })
     })
-    .finally(() => active.delete(running))
+    .finally(() => {
+      active.delete(running)
+      wakeScheduler()
+    })
   active.add(running)
   return true
 }
@@ -195,25 +232,42 @@ async function reconcile(): Promise<void> {
 }
 
 async function mainLoop(): Promise<void> {
-  let lastReconcileAt = 0
+  let nextHeartbeatAt = 0
+  let nextOutboxPollAt = 0
+  let nextReconcileAt = 0
+
   while (!stopping) {
-    await queue.heartbeat()
-    await dispatchOutbox()
-    if (Date.now() - lastReconcileAt >= 15_000) {
-      await reconcile()
-      lastReconcileAt = Date.now()
+    if (Date.now() >= nextHeartbeatAt) {
+      await queue.heartbeat()
+      nextHeartbeatAt = Date.now() + heartbeatIntervalMs
     }
+    if (Date.now() >= nextOutboxPollAt) {
+      await dispatchOutbox()
+      nextOutboxPollAt = Date.now() + outboxPollIntervalMs
+    }
+    if (Date.now() >= nextReconcileAt) {
+      await reconcile()
+      nextReconcileAt = Date.now() + reconcileIntervalMs
+    }
+
     let scheduled = false
     do {
       scheduled = await scheduleOne()
     } while (scheduled && active.size < config.globalGenerationConcurrency)
-    await wait(scheduled ? 25 : 250)
+
+    const nextPeriodicTaskAt = Math.min(
+      nextHeartbeatAt,
+      nextOutboxPollAt,
+      nextReconcileAt,
+    )
+    await waitForScheduler(Math.max(0, nextPeriodicTaskAt - Date.now()))
   }
 }
 
 async function shutdown(signal: string): Promise<void> {
   if (stopping) return
   stopping = true
+  wakeScheduler()
   console.info('Worker shutting down', { signal })
   runtimes.abortAll('shutdown')
   await Promise.race([
