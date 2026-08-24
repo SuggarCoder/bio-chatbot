@@ -41,6 +41,7 @@
     "@aws-sdk/lib-storage": "^3.1101.0",
     "@fastify/static": "^10.1.0",
     "@huggingface/transformers": "^4.2.0",
+    "@openai/agents": "^0.14.3",
     "@solidjs/router": "^0.16.1",
     "dompurify": "^3.4.12",
     "dotenv": "^17.4.2",

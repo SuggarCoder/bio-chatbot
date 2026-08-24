@@ -322,7 +322,7 @@ export const ArtifactSidePanel: Component = () => {
     <Show when={mounted()}>
       <div
         ref={slotRef}
-        class="absolute inset-0 z-40 h-full overflow-visible lg:relative lg:inset-auto lg:z-auto"
+        class="absolute inset-0 z-40 h-full overflow-visible lg:relative lg:inset-auto"
         classList={{
           'pointer-events-none': phase() === 'closing',
           'lg:flex-1': state.isPanelExpanded,
