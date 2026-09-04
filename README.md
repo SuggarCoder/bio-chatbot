@@ -92,6 +92,6 @@ npm run build
 - `ARTIFACT_CONTEXT_V2_ENABLED`：小 Artifact 附全文，大 Artifact 附结构大纲和相关区块；区块向量使用本地 BGE 模型和 pgvector。
 - `ARTIFACT_PATCH_ENABLED`：大于等于 32 KiB 的 Artifact 只接受唯一匹配的 SEARCH/REPLACE 补丁，应用后执行语法校验；失败会带校验错误自动重试一次。
 
-这些开关默认关闭。启用前先执行 `npm run db:migrate`，部署 Worker，并把与线上 Qwen 模型完全匹配且包含 `chat_template` 的 tokenizer 文件放在 `QWEN_TOKENIZER_PATH`（默认 `models/qwen-tokenizer`）。BGE 模型默认从 `models/bge-small-zh-v1.5/onnx/model_int8.onnx` 加载。Docker 构建会把 `models/` 复制进运行镜像；不会在运行时联网下载模型。
+这些开关默认关闭。启用前先执行 `npm run db:migrate` 并部署 Worker。模型文件不进入 Git 仓库或 Docker 镜像；生产机必须提前准备 `/home/lu/models`，Compose 会将其只读挂载到容器的 `/app/models`。其中 Qwen tokenizer 位于 `/home/lu/models/qwen-tokenizer`，必须与线上模型完全匹配且包含 `chat_template`；BGE INT8 模型位于 `/home/lu/models/bge-small-zh-v1.5/onnx/model_int8.onnx`。服务只读取本地挂载，不会在运行时联网下载模型。
 
 Artifact 历史版本不会被覆盖。`POST /api/artifacts/:artifactId/versions/:version/restore` 使用 UUID 格式的 `Idempotency-Key`，把旧快照复制为新的当前版本。

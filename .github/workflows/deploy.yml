@@ -159,6 +159,49 @@ jobs:
 
           echo "Deployment environment file is ready"
 
+      - name: Verify host model assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          model_root=/home/lu/models
+          bge_model="$model_root/bge-small-zh-v1.5/onnx/model_int8.onnx"
+          tokenizer_config="$model_root/qwen-tokenizer/tokenizer_config.json"
+
+          if [ -L "$model_root" ] || [ ! -d "$model_root" ]; then
+            echo "Host model directory is missing or is a symbolic link: $model_root"
+            exit 1
+          fi
+
+          for required_file in \
+            "$model_root/qwen-tokenizer/tokenizer.json" \
+            "$tokenizer_config" \
+            "$model_root/bge-small-zh-v1.5/config.json" \
+            "$bge_model"
+          do
+            if [ ! -f "$required_file" ] || [ ! -r "$required_file" ]; then
+              echo "Required model file is missing or unreadable: $required_file"
+              exit 1
+            fi
+          done
+
+          echo \
+            "b9837c19ce154ff0726d398ee77abbc03a7faf0476c6f93016c84e531be7ebb5  $bge_model" \
+            | sha256sum --check --strict
+
+          TOKENIZER_CONFIG="$tokenizer_config" node <<'NODE'
+          const fs = require('node:fs')
+          const config = JSON.parse(
+            fs.readFileSync(process.env.TOKENIZER_CONFIG, 'utf8'),
+          )
+
+          if (typeof config.chat_template !== 'string' || !config.chat_template) {
+            throw new Error('Qwen tokenizer_config.json must contain chat_template')
+          }
+          NODE
+
+          echo "Host model assets are ready"
+
       - name: Build and deploy
         env:
           APP_COMMIT: ${{ github.sha }}

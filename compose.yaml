@@ -25,7 +25,7 @@ services:
       QWEN_API_KEY: "${QWEN_API_KEY}"
       QWEN_BASE_URL: "${QWEN_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
       QWEN_MODEL: "${QWEN_MODEL:-qwen3.6-flash}"
-      QWEN_TOKENIZER_PATH: "${QWEN_TOKENIZER_PATH:-models/qwen-tokenizer}"
+      QWEN_TOKENIZER_PATH: /app/models/qwen-tokenizer
       QWEN_CONTEXT_WINDOW_TOKENS: "${QWEN_CONTEXT_WINDOW_TOKENS:-1000000}"
       QWEN_MAX_INPUT_TOKENS: "${QWEN_MAX_INPUT_TOKENS:-991808}"
       QWEN_MAX_OUTPUT_TOKENS: "${QWEN_MAX_OUTPUT_TOKENS:-40960}"
@@ -44,7 +44,7 @@ services:
       ARTIFACT_FRAGMENT_TOKEN_BUDGET: "${ARTIFACT_FRAGMENT_TOKEN_BUDGET:-16384}"
       ARTIFACT_CONTEXT_V2_ENABLED: "${ARTIFACT_CONTEXT_V2_ENABLED:-false}"
       ARTIFACT_PATCH_ENABLED: "${ARTIFACT_PATCH_ENABLED:-false}"
-      EMBEDDING_MODEL_PATH: "${EMBEDDING_MODEL_PATH:-models/bge-small-zh-v1.5}"
+      EMBEDDING_MODEL_PATH: /app/models/bge-small-zh-v1.5
       GPAS2_AUTH_MODE: "${GPAS2_AUTH_MODE:-upstream}"
       GPAS2_USER_INFO_URL: "${GPAS2_USER_INFO_URL}"
       CHAT_RATE_LIMIT_PER_MINUTE: "${CHAT_RATE_LIMIT_PER_MINUTE:-10}"
@@ -70,6 +70,14 @@ services:
 
     ports:
       - "10.88.20.19:8090:8090"
+
+    volumes:
+      - type: bind
+        source: /home/lu/models
+        target: /app/models
+        read_only: true
+        bind:
+          create_host_path: false
 
     networks:
       - chatbot-backend
@@ -107,7 +115,7 @@ services:
       QWEN_API_KEY: "${QWEN_API_KEY}"
       QWEN_BASE_URL: "${QWEN_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
       QWEN_MODEL: "${QWEN_MODEL:-qwen3.6-flash}"
-      QWEN_TOKENIZER_PATH: "${QWEN_TOKENIZER_PATH:-models/qwen-tokenizer}"
+      QWEN_TOKENIZER_PATH: /app/models/qwen-tokenizer
       QWEN_CONTEXT_WINDOW_TOKENS: "${QWEN_CONTEXT_WINDOW_TOKENS:-1000000}"
       QWEN_MAX_INPUT_TOKENS: "${QWEN_MAX_INPUT_TOKENS:-991808}"
       QWEN_MAX_OUTPUT_TOKENS: "${QWEN_MAX_OUTPUT_TOKENS:-40960}"
@@ -126,7 +134,7 @@ services:
       ARTIFACT_FRAGMENT_TOKEN_BUDGET: "${ARTIFACT_FRAGMENT_TOKEN_BUDGET:-16384}"
       ARTIFACT_CONTEXT_V2_ENABLED: "${ARTIFACT_CONTEXT_V2_ENABLED:-false}"
       ARTIFACT_PATCH_ENABLED: "${ARTIFACT_PATCH_ENABLED:-false}"
-      EMBEDDING_MODEL_PATH: "${EMBEDDING_MODEL_PATH:-models/bge-small-zh-v1.5}"
+      EMBEDDING_MODEL_PATH: /app/models/bge-small-zh-v1.5
       GPAS2_AUTH_MODE: "${GPAS2_AUTH_MODE:-upstream}"
       GPAS2_USER_INFO_URL: "${GPAS2_USER_INFO_URL}"
       CHAT_RATE_LIMIT_PER_MINUTE: "${CHAT_RATE_LIMIT_PER_MINUTE:-10}"
@@ -149,6 +157,13 @@ services:
       S3_FORCE_PATH_STYLE: "${S3_FORCE_PATH_STYLE:-true}"
       S3_MAX_ATTEMPTS: "${S3_MAX_ATTEMPTS:-3}"
       S3_SERVER_SIDE_ENCRYPTION: "${S3_SERVER_SIDE_ENCRYPTION:-}"
+    volumes:
+      - type: bind
+        source: /home/lu/models
+        target: /app/models
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - chatbot-backend
     security_opt:

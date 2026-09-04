@@ -45,7 +45,7 @@ GENERATION_SNAPSHOT_INTERVAL_MS=1000
 QWEN_API_KEY=<secret>
 QWEN_BASE_URL=<openai-compatible-base-url>
 QWEN_MODEL=<model>
-QWEN_TOKENIZER_PATH=models/qwen-tokenizer
+QWEN_TOKENIZER_PATH=/app/models/qwen-tokenizer
 QWEN_CONTEXT_WINDOW_TOKENS=1000000
 QWEN_MAX_INPUT_TOKENS=991808
 QWEN_MAX_OUTPUT_TOKENS=40960
@@ -64,7 +64,7 @@ BACKGROUND_TIMEOUT_MS=120000
 
 ARTIFACT_CONTEXT_V2_ENABLED=false
 ARTIFACT_PATCH_ENABLED=false
-EMBEDDING_MODEL_PATH=models/bge-small-zh-v1.5
+EMBEDDING_MODEL_PATH=/app/models/bge-small-zh-v1.5
 
 GPAS2_AUTH_MODE=upstream
 GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
@@ -74,6 +74,20 @@ TRUSTED_PROXY_CIDRS=<direct-proxy-ip-or-cidr>
 不要配置旧变量 `GENERATION_DISCONNECT_GRACE_SECONDS`。SSE 断开永远不会自动取消后台 Generation。
 
 ## 构建和启动
+
+生产机必须预先准备 `/home/lu/models`。该目录不属于 Git 工作区，不能使用符号链接，并由 Compose 只读挂载到 API 和 Worker 的 `/app/models`。目录至少包含：
+
+```text
+/home/lu/models/
+├── qwen-tokenizer/
+│   ├── tokenizer.json
+│   └── tokenizer_config.json
+└── bge-small-zh-v1.5/
+    ├── config.json
+    └── onnx/model_int8.onnx
+```
+
+当前 BGE INT8 ONNX 文件的 SHA-256 为 `b9837c19ce154ff0726d398ee77abbc03a7faf0476c6f93016c84e531be7ebb5`。部署工作流会在构建前校验模型文件、该摘要以及 tokenizer 的 `chat_template`。
 
 ```bash
 npm ci
@@ -92,10 +106,10 @@ docker compose --env-file /secure/path/bio-chatbot.env up -d app worker
 ### 分层上下文上线顺序
 
 1. 先执行 `npm run db:migrate`，确认 PostgreSQL 已启用 `vector` 扩展。
-2. 构建前放入与线上 Qwen 模型完全匹配的本地 tokenizer（至少包含 `tokenizer.json`、`tokenizer_config.json` 和 `chat_template`），并确认 BGE INT8 ONNX 文件存在。
+2. 在宿主机 `/home/lu/models` 放入与线上 Qwen 模型完全匹配的 tokenizer（至少包含 `tokenizer.json`、`tokenizer_config.json` 和 `chat_template`），并确认 BGE INT8 ONNX 文件存在且校验和正确。
 3. 同时部署 API 与 Worker，先保持四个新功能开关为 `false`。
 4. 依次开启 `CONTEXT_MEMORY_ENABLED`、`USER_MEMORY_ENABLED`、`ARTIFACT_CONTEXT_V2_ENABLED`，最后开启 `ARTIFACT_PATCH_ENABLED`。
-5. 每一步都检查 `/ai-chatbot/api/health`：启用相关功能后 `tokenizer`、`embeddings` 和 `worker` 必须为 `ok`。运行时只从镜像本地读取模型，禁止联网回退。
+5. 每一步都检查 `/ai-chatbot/api/health`：启用相关功能后 `tokenizer`、`embeddings` 和 `worker` 必须为 `ok`。运行时只从宿主机只读挂载读取模型，禁止联网回退。
 
 ## 反向代理
 

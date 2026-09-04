@@ -34,11 +34,6 @@ COPY --from=build \
     /app/drizzle \
     ./drizzle
 
-COPY --from=build \
-    --chown=node:node \
-    /app/models \
-    ./models
-
 USER node
 
 EXPOSE 8090
