@@ -13,7 +13,7 @@ const config = {
   chatRateLimitPerMinute: 10,
 } as AppConfig
 
-test('generation rate limit evaluates user and IP windows atomically', async () => {
+test('generation rate limit evaluates only the authenticated user window', async () => {
   const calls: Array<{
     keys: string[]
     arguments: string[]
@@ -25,7 +25,7 @@ test('generation rate limit evaluates user and IP windows atomically', async () 
       arguments: string[]
     }) => {
       calls.push(options)
-      return [0, 1_500, 0, 3]
+      return [0, 1_500, 0]
     },
   } as unknown as RedisClient
 
@@ -33,23 +33,17 @@ test('generation rate limit evaluates user and IP windows atomically', async () 
     redis,
     config,
     'user-1',
-    '127.0.0.1',
   )
 
   assert.deepEqual(result, {
     allowed: false,
     retryAfterMs: 1_500,
     remainingUser: 0,
-    remainingIp: 3,
   })
   assert.equal(calls.length, 1)
-  assert.deepEqual(calls[0]?.keys, [
-    'test:rl:user:user-1:generation',
-    'test:rl:ip:127.0.0.1:generation',
-  ])
+  assert.deepEqual(calls[0]?.keys, ['test:rl:user:user-1:generation'])
   assert.equal(calls[0]?.arguments[1], '60000')
   assert.equal(calls[0]?.arguments[2], '10')
-  assert.equal(calls[0]?.arguments[3], '50')
 })
 
 test('chat context CAS uses one stable per-chat key', async () => {

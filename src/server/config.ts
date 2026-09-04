@@ -5,7 +5,6 @@ export type AppConfig = {
   host: string
   port: number
   serveClient: boolean
-  trustedProxyCidrs: string | false
   databaseUrl: string
   pgPoolMax: number
   redisUrl: string
@@ -183,33 +182,6 @@ export function readObjectStorageConfig(
   }
 }
 
-export function readTrustedProxyCidrs(
-  environment: NodeJS.ProcessEnv = process.env,
-  nodeEnv = environment.NODE_ENV?.trim() || 'development',
-): string | false {
-  const value = environment.TRUSTED_PROXY_CIDRS?.trim()
-
-  if (!value) {
-    if (nodeEnv === 'production') {
-      throw new Error(
-        'TRUSTED_PROXY_CIDRS is required in production because the application runs behind a reverse proxy',
-      )
-    }
-
-    return false
-  }
-
-  const trustedRanges = value.split(',').map((range) => range.trim())
-
-  if (trustedRanges.some((range) => /\/0$/.test(range))) {
-    throw new Error(
-      'TRUSTED_PROXY_CIDRS must not trust every address; configure only the reverse proxy IP address or CIDR',
-    )
-  }
-
-  return value
-}
-
 export function readConfig(): AppConfig {
   const nodeEnv = process.env.NODE_ENV?.trim() || 'development'
   const defaultAuthMode = nodeEnv === 'production' ? 'upstream' : 'mock'
@@ -238,7 +210,6 @@ export function readConfig(): AppConfig {
   }
 
   const environmentName = nodeEnv === 'production' ? 'prod' : 'dev'
-  const trustedProxyCidrs = readTrustedProxyCidrs(process.env, nodeEnv)
   const pgPoolMax = positiveInteger('PG_POOL_MAX', 4)
   if (pgPoolMax > 4) {
     throw new Error('PG_POOL_MAX must not exceed 4 in the 10-connection deployment')
@@ -318,7 +289,6 @@ export function readConfig(): AppConfig {
     host: process.env.HOST?.trim() || '0.0.0.0',
     port: positiveInteger('PORT', 8090),
     serveClient: process.env.SERVE_CLIENT !== 'false',
-    trustedProxyCidrs,
     databaseUrl: required('DATABASE_URL'),
     pgPoolMax,
     redisUrl: required('REDIS_URL'),

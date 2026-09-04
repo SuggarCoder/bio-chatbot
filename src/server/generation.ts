@@ -84,7 +84,6 @@ type StartGenerationInput = {
   chatId: string
   content: string
   clientMessageId: string
-  ip: string
   model?: string
   artifactId?: string
   supersedesGenerationId?: string
@@ -290,7 +289,6 @@ export class GenerationService {
       this.redis,
       this.config,
       input.user.id,
-      input.ip,
     )
     if (!rateLimit.allowed) {
       throw new GenerationRejectedError(
@@ -489,7 +487,6 @@ export class GenerationService {
       chatId: item.conversationId,
       content: item.content,
       clientMessageId: item.generationId,
-      ip: '',
       model: item.model,
       artifactId: item.artifactId,
       replacesMessageId: item.replacesMessageId,

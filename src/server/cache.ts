@@ -32,53 +32,38 @@ const rateLimitScript = `
 local now = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
 local userLimit = tonumber(ARGV[3])
-local ipLimit = tonumber(ARGV[4])
-local member = ARGV[5]
-local ttl = tonumber(ARGV[6])
+local member = ARGV[4]
+local ttl = tonumber(ARGV[5])
 local cutoff = now - window
 
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
 
 local userCount = redis.call('ZCARD', KEYS[1])
-local ipCount = redis.call('ZCARD', KEYS[2])
 
-if userCount >= userLimit or ipCount >= ipLimit then
+if userCount >= userLimit then
   local retryAfter = 0
-  if userCount >= userLimit then
-    local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-    if oldest[2] then
-      retryAfter = math.max(retryAfter, tonumber(oldest[2]) + window - now)
-    end
+  local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+  if oldest[2] then
+    retryAfter = math.max(retryAfter, tonumber(oldest[2]) + window - now)
   end
-  if ipCount >= ipLimit then
-    local oldest = redis.call('ZRANGE', KEYS[2], 0, 0, 'WITHSCORES')
-    if oldest[2] then
-      retryAfter = math.max(retryAfter, tonumber(oldest[2]) + window - now)
-    end
-  end
-  return {0, math.max(retryAfter, 1), math.max(userLimit - userCount, 0), math.max(ipLimit - ipCount, 0)}
+  return {0, math.max(retryAfter, 1), math.max(userLimit - userCount, 0)}
 end
 
 redis.call('ZADD', KEYS[1], now, member)
-redis.call('ZADD', KEYS[2], now, member)
 redis.call('PEXPIRE', KEYS[1], ttl)
-redis.call('PEXPIRE', KEYS[2], ttl)
-return {1, 0, userLimit - userCount - 1, ipLimit - ipCount - 1}
+return {1, 0, userLimit - userCount - 1}
 `
 
 export type GenerationRateLimitResult = {
   allowed: boolean
   retryAfterMs: number
   remainingUser: number
-  remainingIp: number
 }
 
 export async function consumeGenerationRateLimit(
   redis: RedisClient,
   config: AppConfig,
   userId: string,
-  ip: string,
 ): Promise<GenerationRateLimitResult> {
   if (!redis.isReady) {
     throw new Error('Redis is unavailable')
@@ -87,15 +72,11 @@ export async function consumeGenerationRateLimit(
   const now = Date.now()
   const windowMs = 60_000
   const result = await redis.eval(rateLimitScript, {
-    keys: [
-      redisKey(config, `rl:user:${userId}:generation`),
-      redisKey(config, `rl:ip:${ip}:generation`),
-    ],
+    keys: [redisKey(config, `rl:user:${userId}:generation`)],
     arguments: [
       String(now),
       String(windowMs),
       String(config.chatRateLimitPerMinute),
-      String(config.chatRateLimitPerMinute * 5),
       `${now}:${crypto.randomUUID()}`,
       String(windowMs + 1_000),
     ],
@@ -106,7 +87,6 @@ export async function consumeGenerationRateLimit(
     allowed: Number(values[0]) === 1,
     retryAfterMs: Math.max(0, Number(values[1]) || 0),
     remainingUser: Math.max(0, Number(values[2]) || 0),
-    remainingIp: Math.max(0, Number(values[3]) || 0),
   }
 }
 

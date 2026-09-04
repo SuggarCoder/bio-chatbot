@@ -228,7 +228,6 @@ export async function buildApp(
   } = dependencies
   const app = Fastify({
     logger: true,
-    trustProxy: config.trustedProxyCidrs,
     requestTimeout: 120_000,
     bodyLimit: 64 * 1024,
   })
@@ -1011,7 +1010,6 @@ export async function buildApp(
       chatId: target.chatId,
       content: '',
       clientMessageId: requestId,
-      ip: request.ip,
       artifactId: artifactId || undefined,
       replacesMessageId: messageId,
     })
@@ -1090,7 +1088,6 @@ export async function buildApp(
         chatId,
         content,
         clientMessageId,
-        ip: request.ip,
         artifactId: artifactId || undefined,
         supersedesGenerationId: supersedesGenerationId || undefined,
       })

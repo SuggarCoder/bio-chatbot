@@ -49,8 +49,7 @@ chat:ctx:v2:{policy}:{chatId}:{maxSeq}:{summaryVersion} STRING JSON, 24h
 queue:maintenance                              STREAM
 queue:maintenance:dedupe:{jobId}:{attempt}     STRING, 24h
 maintenance:{jobId}:lease                      STRING
-rl:user:{userId}:generation:{window}           counter
-rl:ip:{ip}:generation:{window}                 counter
+rl:user:{userId}:generation                    sorted set, 60s window
 quota:user:{userId}:{yyyyMM}                   counter
 quota:applied:{generationId}                   idempotency marker
 notify:user:{userId}                           Pub/Sub

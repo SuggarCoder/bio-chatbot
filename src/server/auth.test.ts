@@ -17,7 +17,6 @@ function config(
     host: '127.0.0.1',
     port: 8090,
     serveClient: false,
-    trustedProxyCidrs: false,
     databaseUrl: 'postgres://test',
     pgPoolMax: 4,
     redisUrl: 'redis://test',

@@ -68,7 +68,6 @@ EMBEDDING_MODEL_PATH=/app/models/bge-small-zh-v1.5
 
 GPAS2_AUTH_MODE=upstream
 GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
-TRUSTED_PROXY_CIDRS=<direct-proxy-ip-or-cidr>
 ```
 
 不要配置旧变量 `GENERATION_DISCONNECT_GRACE_SECONDS`。SSE 断开永远不会自动取消后台 Generation。
@@ -118,8 +117,7 @@ docker compose --env-file /secure/path/bio-chatbot.env up -d app worker
 - 关闭代理缓冲与压缩聚合；
 - 设置长 read timeout；
 - 透传 `Last-Event-ID`；
-- 不把浏览器断开转化为 Generation Cancel；
-- 只信任 `TRUSTED_PROXY_CIDRS` 中直接连接 Fastify 的代理。
+- 不把浏览器断开转化为 Generation Cancel。
 
 应用响应已设置 `X-Accel-Buffering: no`，并每 15 秒发送 SSE heartbeat。
 
