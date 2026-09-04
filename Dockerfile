@@ -1,6 +1,8 @@
-FROM node:22-alpine AS build
+FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
+
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 
 COPY package.json package-lock.json ./
 
@@ -10,8 +12,12 @@ COPY . .
 
 RUN npm run build
 
+RUN npm prune --omit=dev \
+    && npm cache clean --force \
+    && node -e "require('onnxruntime-node')"
 
-FROM node:22-alpine AS runtime
+
+FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 
@@ -21,8 +27,10 @@ ENV PORT=8090
 
 COPY package.json package-lock.json ./
 
-RUN npm ci --omit=dev \
-    && npm cache clean --force
+COPY --from=build \
+    --chown=node:node \
+    /app/node_modules \
+    ./node_modules
 
 COPY --from=build \
     --chown=node:node \

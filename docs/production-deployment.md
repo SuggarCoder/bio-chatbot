@@ -88,6 +88,8 @@ GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
 
 当前 BGE INT8 ONNX 文件的 SHA-256 为 `b9837c19ce154ff0726d398ee77abbc03a7faf0476c6f93016c84e531be7ebb5`。部署工作流会在构建前校验模型文件、该摘要以及 tokenizer 的 `chat_template`。
 
+生产镜像使用 Debian slim，以兼容 `onnxruntime-node` 发布的 Linux 原生库。Docker 构建设置 `ONNXRUNTIME_NODE_INSTALL=skip`，只使用 npm 包内自带的 CPU runtime，不下载 CUDA/TensorRT provider；构建阶段会实际加载一次该模块以提前发现原生库不兼容。
+
 ```bash
 npm ci
 npm test
