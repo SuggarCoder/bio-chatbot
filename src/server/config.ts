@@ -126,6 +126,11 @@ export function readObjectStorageConfig(
     'OBJECT_STORAGE_ENABLED',
     false,
   )
+  const allowInsecureHttp = booleanValue(
+    environment,
+    'S3_ALLOW_INSECURE_HTTP',
+    false,
+  )
   const region = environment.S3_REGION?.trim() || 'us-east-1'
   const forcePathStyle = booleanValue(
     environment,
@@ -165,8 +170,18 @@ export function readObjectStorageConfig(
     throw new Error('S3_ENDPOINT must use HTTP or HTTPS')
   }
 
-  if (nodeEnv === 'production' && parsedEndpoint.protocol !== 'https:') {
-    throw new Error('S3_ENDPOINT must use HTTPS in production')
+  if (nodeEnv === 'production' && parsedEndpoint.protocol === 'http:') {
+    if (['localhost', '127.0.0.1', '[::1]'].includes(parsedEndpoint.hostname)) {
+      throw new Error(
+        'S3_ENDPOINT must not use a loopback host in production containers; use host.docker.internal or a Docker network service name',
+      )
+    }
+
+    if (!allowInsecureHttp) {
+      throw new Error(
+        'S3_ENDPOINT must use HTTPS in production unless S3_ALLOW_INSECURE_HTTP=true is explicitly set for a private local network',
+      )
+    }
   }
 
   return {

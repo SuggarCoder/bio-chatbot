@@ -52,9 +52,21 @@ S3_MAX_ATTEMPTS=3
 ```
 
 When the Chatbot runs in a container, `127.0.0.1` points to the Chatbot
-container. Use the S3 Gateway service name or another address reachable from
-the `chatbot-backend` network. Production configuration requires an HTTPS S3
-endpoint.
+container. If the S3 Gateway is another container, attach it to
+`chatbot-backend` and use its service name. If it is a process on the same
+Docker host, make it listen on an address reachable from the Docker bridge and
+use the host-gateway mapping supplied by `compose.yaml`:
+
+```env
+S3_ENDPOINT=http://host.docker.internal:8333
+S3_ALLOW_INSECURE_HTTP=true
+```
+
+Production continues to require HTTPS by default. The HTTP opt-in is only for
+a trusted same-host or private Docker-network connection; do not enable it for
+an endpoint reached over an external network. Production containers reject
+`localhost`, `127.0.0.1`, and `[::1]` because those addresses point back to the
+Chatbot container itself.
 
 `S3_SERVER_SIDE_ENCRYPTION=AES256` may be set only after server-side encryption
 has been configured and verified on SeaweedFS.

@@ -104,6 +104,35 @@ test('enabled storage validates endpoint security and returns credentials', () =
   })
   assert.throws(
     () => readObjectStorageConfig(environment, 'production'),
-    /must use HTTPS in production/,
+    /must not use a loopback host/,
+  )
+
+  const productionEnvironment = {
+    ...environment,
+    S3_ENDPOINT: 'http://host.docker.internal:8333/',
+    S3_ALLOW_INSECURE_HTTP: 'true',
+  }
+
+  assert.deepEqual(
+    readObjectStorageConfig(productionEnvironment, 'production'),
+    {
+      enabled: true,
+      endpoint: 'http://host.docker.internal:8333',
+      region: 'us-east-1',
+      bucket: 'artifact-test',
+      accessKeyId: 'test-key',
+      secretAccessKey: 'test-secret',
+      forcePathStyle: true,
+      maxAttempts: 3,
+      serverSideEncryption: undefined,
+    },
+  )
+
+  assert.throws(
+    () => readObjectStorageConfig({
+      ...productionEnvironment,
+      S3_ALLOW_INSECURE_HTTP: 'false',
+    }, 'production'),
+    /S3_ALLOW_INSECURE_HTTP=true/,
   )
 })

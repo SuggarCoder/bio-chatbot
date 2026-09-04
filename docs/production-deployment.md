@@ -66,6 +66,9 @@ ARTIFACT_CONTEXT_V2_ENABLED=false
 ARTIFACT_PATCH_ENABLED=false
 EMBEDDING_MODEL_PATH=/app/models/bge-small-zh-v1.5
 
+S3_ENDPOINT=http://host.docker.internal:8333
+S3_ALLOW_INSECURE_HTTP=true
+
 GPAS2_AUTH_MODE=upstream
 GPAS2_USER_INFO_URL=https://<gpas-host>/api/gpas2/v1/user/info
 ```
