@@ -6,10 +6,12 @@ is intentionally independent from the future Artifact schema and HTTP API.
 
 ## Provision the bucket and identity
 
-Create a private bucket for each environment. The application identity should
-be limited to that bucket and must not have `Admin` access. A SeaweedFS S3
-identity configuration has this shape (replace every placeholder and keep the
-real file outside this repository):
+Configure a private bucket name for each environment. Deployment runs an
+idempotent initializer that creates the bucket when it is missing. Use separate
+runtime and deployment identities so the long-running application does not
+retain bucket-management permission. A SeaweedFS S3 identity configuration has
+this shape (replace every placeholder and keep the real file outside this
+repository):
 
 ```json
 {
@@ -27,14 +29,29 @@ real file outside this repository):
         "List:bio-chatbot-artifacts-dev",
         "Write:bio-chatbot-artifacts-dev"
       ]
+    },
+    {
+      "name": "bio-chatbot-deployer",
+      "credentials": [
+        {
+          "accessKey": "replace-with-admin-access-key",
+          "secretKey": "replace-with-admin-secret-key"
+        }
+      ],
+      "actions": [
+        "Admin:bio-chatbot-artifacts-dev",
+        "List:bio-chatbot-artifacts-dev"
+      ]
     }
   ]
 }
 ```
 
 Start or restart the S3 Gateway with its IAM configuration enabled. Do not add
-an anonymous identity for the Chatbot bucket. The application never creates or
-deletes buckets and therefore does not need an administrator credential.
+an anonymous identity for the Chatbot bucket. Configure the deployment identity
+as `S3_ADMIN_ACCESS_KEY_ID` and `S3_ADMIN_SECRET_ACCESS_KEY`; those credentials
+are passed only to the one-off initializer. The initializer may create the
+configured bucket but never deletes buckets.
 
 ## Application configuration
 
@@ -72,6 +89,13 @@ Chatbot container itself.
 has been configured and verified on SeaweedFS.
 
 ## Verification
+
+Initialize the configured bucket locally with the same idempotent command used
+by deployment:
+
+```bash
+npm run storage:init
+```
 
 When Artifact Protocol is enabled, this verification is a production rollout
 gate rather than an optional diagnostic. Do not deploy with

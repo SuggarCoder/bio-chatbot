@@ -18,6 +18,7 @@
     "test:storage": "tsx --test src/server/storage/*.integration.ts",
     "test:artifact-integration": "tsx --test src/server/artifacts/*.integration.ts",
     "test:artifact-security": "playwright test tests/artifact-security.spec.ts tests/chat-navigation.spec.ts",
+    "storage:init": "tsx src/server/storageInit.ts",
     "storage:check": "tsx src/server/storageCheck.ts",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
     "build": "npm run check && vite build && tsc -p tsconfig.server.json",

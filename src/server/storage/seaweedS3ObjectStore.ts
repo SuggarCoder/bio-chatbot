@@ -1,4 +1,5 @@
 import {
+  CreateBucketCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
@@ -126,10 +127,13 @@ export class SeaweedS3ObjectStore implements ObjectStore {
   private readonly client: S3Client
   private readonly bucket: string
 
-  constructor(private readonly config: ObjectStorageConfig) {
+  constructor(
+    private readonly config: ObjectStorageConfig,
+    client?: S3Client,
+  ) {
     const enabled = requireEnabledConfig(config)
     this.bucket = enabled.bucket
-    this.client = new S3Client({
+    this.client = client ?? new S3Client({
       endpoint: enabled.endpoint,
       region: config.region,
       forcePathStyle: config.forcePathStyle,
@@ -150,6 +154,41 @@ export class SeaweedS3ObjectStore implements ObjectStore {
     } catch (error) {
       throw mapStorageError(error)
     }
+  }
+
+  async ensureBucket(): Promise<'created' | 'existing'> {
+    let result: 'created' | 'existing' = 'created'
+
+    try {
+      await this.client.send(
+        new HeadBucketCommand({ Bucket: this.bucket }),
+        { abortSignal: AbortSignal.timeout(3_000) },
+      )
+      return 'existing'
+    } catch (error) {
+      if (!isNotFound(error)) {
+        throw mapStorageError(error)
+      }
+    }
+
+    try {
+      await this.client.send(
+        new CreateBucketCommand({ Bucket: this.bucket }),
+        { abortSignal: AbortSignal.timeout(3_000) },
+      )
+    } catch (error) {
+      const candidate = error as S3Error
+      if (![
+        'BucketAlreadyExists',
+        'BucketAlreadyOwnedByYou',
+      ].includes(String(candidate?.name || ''))) {
+        throw mapStorageError(error)
+      }
+      result = 'existing'
+    }
+
+    await this.healthCheck()
+    return result
   }
 
   async putStream(input: PutObjectInput): Promise<PutObjectResult> {
