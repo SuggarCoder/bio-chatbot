@@ -25,7 +25,9 @@ test('project URL preserves the API prefix and handles a trailing slash without 
 
 test('upstream errors identify the failing operation and HTTP status without retaining credentials or response data', async (t) => {
   let count = 0
-  t.mock.method(globalThis, 'fetch', async () => {
+  let requestedUrl = ''
+  t.mock.method(globalThis, 'fetch', async (url: URL) => {
+    requestedUrl = url.href
     count += 1
     return count === 1 ? Response.json({ code: 200, data: true }) : new Response('private upstream details', { status: 404 })
   })
@@ -35,7 +37,25 @@ test('upstream errors identify the failing operation and HTTP status without ret
     assert.match(error.message, /项目进度汇总查询.*HTTP 404/)
     assert.equal(error.diagnostics.operation, 'project_summary')
     assert.equal(error.diagnostics.upstreamStatus, 404)
-    assert.doesNotMatch(JSON.stringify(error), /team-test|session=secret|private upstream/)
+    assert.equal(requestedUrl, 'https://gpas.example.invalid:8058/api/gpas2/v1/summary/submit/info/team-test')
+    assert.equal(error.diagnostics.endpoint, requestedUrl)
+    assert.equal(error.diagnostics.responseContentType, 'text/plain;charset=UTF-8')
+    assert.doesNotMatch(JSON.stringify(error), /%7BteamId%7D|session=secret|private upstream/)
+    return true
+  })
+})
+
+test('diagnostics preserve encoded team IDs while omitting URL credentials and query strings', async (t) => {
+  const credentialConfig = {
+    ...config,
+    gpas2UserInfoUrl: 'https://url-user:url-password@gpas.example.invalid:8058/api/gpas2/v1/user/info?token=query-secret',
+  }
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ private: 'response-secret' }, { status: 404 }))
+  await assert.rejects(new GpasService(credentialConfig).existence({ ...profile, ownteamId: 'team-test/id' }, 'cookie-secret'), (error: unknown) => {
+    assert.ok(error instanceof GpasUpstreamError)
+    assert.equal(error.diagnostics.endpoint, 'https://gpas.example.invalid:8058/api/gpas2/v1/project/exist/team-test%2Fid')
+    assert.equal(error.diagnostics.responseContentType, 'application/json')
+    assert.doesNotMatch(JSON.stringify(error), /url-user|url-password|query-secret|response-secret|cookie-secret/)
     return true
   })
 })

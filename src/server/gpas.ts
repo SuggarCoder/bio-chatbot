@@ -19,6 +19,7 @@ export class GpasUpstreamError extends AuthenticationError {
       operation: GpasOperation
       upstreamStatus?: number
       upstreamCode?: number
+      responseContentType?: string
       method: string
       endpoint: string
     },
@@ -80,8 +81,9 @@ export class GpasService {
     if (!cookie) throw new AuthenticationError('登录已失效，请重新登录。')
     const url = gpasUrl(this.config.gpas2UserInfoUrl, path)
     const method = body === undefined ? 'GET' : 'POST'
+    // Keep the actual request path for diagnosis. Only URL credentials are
+    // removed; cookies and payloads are never included in diagnostics.
     const endpoint = new URL(url)
-    if (body === undefined) endpoint.pathname = `${endpoint.pathname.slice(0, endpoint.pathname.lastIndexOf('/'))}/{teamId}`
     endpoint.username = ''
     endpoint.password = ''
     const diagnostics = { operation, method, endpoint: endpoint.toString() }
@@ -97,7 +99,11 @@ export class GpasService {
     } catch {
       throw new GpasUpstreamError(`${label}连接失败或超时，请稍后重试；若刚提交过表单，请先查询项目进度确认结果。`, 'gpas_unavailable', diagnostics)
     }
-    const responseDiagnostics = { ...diagnostics, upstreamStatus: response.status }
+    const responseDiagnostics = {
+      ...diagnostics,
+      upstreamStatus: response.status,
+      responseContentType: response.headers.get('content-type') ?? undefined,
+    }
     if (response.status === 401 || response.status === 403) throw new GpasUpstreamError(`${label}失败：登录已失效或无权访问项目（上游 HTTP ${response.status}）。`, 'unauthorized', responseDiagnostics, response.status)
     if (!response.ok) throw new GpasUpstreamError(`${label}返回错误（上游 HTTP ${response.status}），请联系管理员检查对应接口。`, 'gpas_upstream_error', responseDiagnostics)
     let payload: z.infer<typeof envelope>

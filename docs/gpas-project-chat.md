@@ -72,8 +72,11 @@ mean pooling 保持兼容。模型缺失时启动失败，运行时推理失败�
 HTTP 成功但业务 `code` 非 200 为 `gpas_business_error`。
 
 按响应的 `requestId` 查 API 日志中的 `GPAS upstream request failed`，查看：
-`gpas.operation`、`gpas.method`、`gpas.endpoint`、`gpas.upstreamStatus`，以及可用时
+`gpas.operation`、`gpas.method`、`gpas.endpoint`、`gpas.upstreamStatus`、
+`gpas.responseContentType`，以及可用时
 的 `gpas.upstreamCode`。操作分别是 `project_exists`、`project_summary` 和
-`project_create`。日志路径用 `{teamId}` 代替团队标识，不记录 Cookie、提交内容
-或原始响应正文。实际状态码、失败阶段和网关日志是定位远端问题的依据；
+`project_create`。`endpoint` 记录实际请求路径（含当前团队 ID），去除 URL 认证信息，
+不记录 Cookie、提交内容或原始响应正文。旧版日志曾将团队 ID 替换为 `{teamId}`，
+在 URL 序列化后显示为 `%7BteamId%7D`；这个占位符只用于日志，不是实际请求参数。
+实际状态码、失败阶段和网关日志是定位远端问题的依据；
 仅凭旧版通用错误无法判断是地址错误、网关拒绝还是上游服务故障。
