@@ -5,6 +5,11 @@ import type { Gpas2UserInfo } from './domain.js'
 import { sampleKeys, sampleLabels, sampleCountsSchema, type GpasPart, type ProjectInput } from './gpasContracts.js'
 
 type GpasOperation = 'project_exists' | 'project_summary' | 'project_create'
+const operationMethods: Record<GpasOperation, 'GET' | 'POST'> = {
+  project_exists: 'GET',
+  project_summary: 'POST',
+  project_create: 'POST',
+}
 const operationLabels: Record<GpasOperation, string> = {
   project_exists: '项目存在性查询',
   project_summary: '项目进度汇总查询',
@@ -80,7 +85,7 @@ export class GpasService {
   private async request(cookie: string | undefined, operation: GpasOperation, path: string, body?: unknown) {
     if (!cookie) throw new AuthenticationError('登录已失效，请重新登录。')
     const url = gpasUrl(this.config.gpas2UserInfoUrl, path)
-    const method = body === undefined ? 'GET' : 'POST'
+    const method = operationMethods[operation]
     // Keep the actual request path for diagnosis. Only URL credentials are
     // removed; cookies and payloads are never included in diagnostics.
     const endpoint = new URL(url)
@@ -92,7 +97,7 @@ export class GpasService {
     try {
       response = await fetch(url, {
         method, redirect: 'error',
-        headers: { accept: 'application/json', cookie, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+        headers: { accept: 'application/json', cookie, ...(method === 'POST' ? { 'content-type': 'application/json' } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
       })

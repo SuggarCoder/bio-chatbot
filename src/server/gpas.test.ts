@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
 import { GpasService, GpasUpstreamError, gpasUrl, profileReply } from './gpas.js'
 import { projectInputSchema } from './gpasContracts.js'
 import type { AppConfig } from './config.js'
@@ -36,6 +38,7 @@ test('upstream errors identify the failing operation and HTTP status without ret
     assert.equal(error.code, 'gpas_upstream_error')
     assert.match(error.message, /项目进度汇总查询.*HTTP 404/)
     assert.equal(error.diagnostics.operation, 'project_summary')
+    assert.equal(error.diagnostics.method, 'POST')
     assert.equal(error.diagnostics.upstreamStatus, 404)
     assert.equal(requestedUrl, 'https://gpas.example.invalid:8058/api/gpas2/v1/summary/submit/info/team-test')
     assert.equal(error.diagnostics.endpoint, requestedUrl)
@@ -67,6 +70,9 @@ test('project query forwards Cookie to fixed endpoints and sums monthly totals w
     assert.equal(url.origin, 'https://gpas.example.invalid:8058')
     assert.equal((options.headers as Record<string, string>).cookie, 'session=test')
     assert.equal(options.redirect, 'error')
+    assert.equal(options.method, paths.length === 1 ? 'GET' : 'POST')
+    assert.equal(new Headers(options.headers).get('content-type'), paths.length === 1 ? null : 'application/json')
+    assert.equal(options.body, undefined)
     return Response.json(paths.length === 1 ? { code: 200, data: true } : {
       code: 200,
       projectPlanInfo: { clinic: 100, media: 0, environment: 10, lab: 0, name: '项目', id: 'project-test' },
@@ -82,6 +88,61 @@ test('project query forwards Cookie to fixed endpoints and sums monthly totals w
   assert.match(reply.content, /环境样本 \| 10 \| 12 \| 0 \| 120.0%/)
   assert.match(reply.content, /虫媒样本 \| 0 \| 0 \| 0 \| 未设置计划/)
   assert.match(reply.content, /实验室样本/)
+})
+
+test('summary uses an empty JSON POST on the wire while existence remains GET', async () => {
+  const received: Array<{
+    path: string | undefined
+    method: string | undefined
+    contentType: string | undefined
+    contentLength: string | undefined
+    cookie: string | undefined
+    bytes: number
+  }> = []
+  const server = createServer(async (request, response) => {
+    let bytes = 0
+    for await (const chunk of request) bytes += Buffer.byteLength(chunk)
+    received.push({
+      path: request.url,
+      method: request.method,
+      contentType: request.headers['content-type'],
+      contentLength: request.headers['content-length'],
+      cookie: request.headers.cookie,
+      bytes,
+    })
+    response.setHeader('content-type', 'application/json')
+    if (request.url === '/api/gpas2/v1/project/exist/team-test' && request.method === 'GET') {
+      response.end(JSON.stringify({ code: 200, data: true }))
+    } else if (request.url === '/api/gpas2/v1/summary/submit/info/team-test' && request.method === 'POST') {
+      response.end(JSON.stringify({
+        code: 200,
+        projectPlanInfo: { clinic: 100, media: 0, environment: 0, lab: 0, name: '测试项目', id: 'project-test' },
+        realSubmitInfo: [{ year: 2026, month: 9, clinic: 25 }],
+      }))
+    } else {
+      response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
+      response.end('<html>Not Found</html>')
+    }
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    await once(server, 'listening')
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    const service = new GpasService({
+      ...config,
+      gpas2UserInfoUrl: `http://127.0.0.1:${address.port}/api/gpas2/v1/user/info`,
+    })
+    const result = await service.progress(profile, 'test-session=fixture')
+    assert.match(result.content, /临床样本 \| 100 \| 25 \| 75 \| 25.0%/)
+    assert.deepEqual(received, [
+      { path: '/api/gpas2/v1/project/exist/team-test', method: 'GET', contentType: undefined, contentLength: undefined, cookie: 'test-session=fixture', bytes: 0 },
+      { path: '/api/gpas2/v1/summary/submit/info/team-test', method: 'POST', contentType: 'application/json', contentLength: '0', cookie: 'test-session=fixture', bytes: 0 },
+    ])
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  }
 })
 
 test('missing project yields persistent form and create sends the documented payload', async (t) => {

@@ -31,8 +31,11 @@ mean pooling 保持兼容。模型缺失时启动失败，运行时推理失败�
 业务地址使用它的同源版本前缀，去除查询参数和片段：
 
 - `GET project/exist/{ownteamId}`
-- `GET summary/submit/info/{ownteamId}`
+- `POST summary/submit/info/{ownteamId}`：`Content-Type: application/json`，请求体为空（不是 `{}`）
 - `POST project/create`
+
+汇总查询虽然读取数据，但旧系统要求 POST。请求方法按操作显式指定，不能根据
+是否携带请求体推断为 GET。旧实现误用 GET，与原始浏览器请求不一致。
 
 远端配置用户信息 URL 后，上述接口自动使用相同主机、端口和版本前缀。
 浏览器始终请求同源 `/ai-chatbot/api/`，网关需保留 Cookie；服务端逐次鉴权，
