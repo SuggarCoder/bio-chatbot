@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { gpasPartSchema, projectInputSchema } from './gpasContracts.js'
 
 const jsonSchema = (schema: z.ZodType) => z.toJSONSchema(schema, {
   target: 'draft-7',
@@ -44,6 +45,7 @@ const chatSummary = z.object({
 })
 
 const messagePart = z.discriminatedUnion('type', [
+  gpasPartSchema,
   z.object({
     type: z.literal('text'),
     order: z.number().int().nonnegative(),
@@ -271,8 +273,13 @@ export const httpSchemas = {
       content: z.string().trim().min(1).max(32_000),
       artifactId: uuid.optional(),
       supersedesGenerationId: uuid.optional(),
+      projectInput: projectInputSchema.optional(),
     })),
-    response: { 201: jsonSchema(generationStart), ...errorResponses },
+    response: { 201: jsonSchema(z.union([generationStart, z.object({
+      kind: z.literal('business'),
+      userMessage: chatMessage,
+      assistantMessage: chatMessage,
+    })])), ...errorResponses },
   },
   messagePageQuery: jsonSchema(z.object({
     beforeSeq: z.string().regex(/^[1-9]\d*$/),

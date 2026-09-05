@@ -14,6 +14,7 @@ import {
 } from 'solid-js'
 import collapseUrl from '../../assets/images/collapse.svg'
 import gpasUrl from '../../assets/images/gpas.svg'
+import { ProjectInitForm } from '../../features/chatbot/ProjectInitForm'
 import { appRoutes, getAppPathname } from '../../routes'
 import {
   cancelGeneration,
@@ -324,6 +325,7 @@ async function runAssistantReply(
       }
     | undefined,
   chatStore: ReturnType<typeof useChatStore>,
+  projectInput?: import('../../features/chatbot/chatApi').ProjectInput,
 ) {
   if (
     startingReplies.has(conversationId) ||
@@ -332,6 +334,7 @@ async function runAssistantReply(
       activeReplyControllers.has(existingGeneration.generationId)
     )
   ) {
+    if (projectInput) throw new Error('请等待当前请求完成后再提交。')
     return
   }
 
@@ -340,6 +343,7 @@ async function runAssistantReply(
 
   if (!generationId || !streamId) {
     startingReplies.add(conversationId)
+    chatStore.setRequestPending(conversationId, true)
 
     try {
       const previousGenerationId =
@@ -348,6 +352,7 @@ async function runAssistantReply(
       const started = await createGeneration(conversationId, {
         content: prompt,
         clientMessageId,
+        projectInput,
         artifactId:
           artifactStore.state.visibleConversationId === conversationId &&
           artifactStore.state.isPanelOpen
@@ -356,7 +361,13 @@ async function runAssistantReply(
         supersedesGenerationId: previousGenerationId,
       })
 
-      if (!started.generation.streamId) {
+      if ('kind' in started && started.kind === 'business') {
+        chatStore.confirmUserMessage(conversationId, started.userMessage)
+        chatStore.appendBusinessReply(conversationId, started.assistantMessage)
+        return
+      }
+
+      if (!('generation' in started) || !started.generation.streamId) {
         throw new Error('Generation stream was not created')
       }
 
@@ -373,11 +384,14 @@ async function runAssistantReply(
         {
           content: prompt,
           clientMessageId,
+          projectInput,
         },
       )
+      if (projectInput) throw error
       return
     } finally {
       startingReplies.delete(conversationId)
+      chatStore.setRequestPending(conversationId, false)
     }
   }
 
@@ -1581,6 +1595,7 @@ function ChatMessageBubble(props: {
   onVisibleProgress: (generationId: string) => void
   onVote: (vote: 'up' | 'down' | null) => Promise<void>
   onRegenerate: () => Promise<void>
+  onProjectSubmit: (input: import('../../features/chatbot/chatApi').ProjectInput) => Promise<void>
 }) {
   const isUser = () => props.message.role === 'user'
   const [visualComplete, setVisualComplete] = createSignal(
@@ -1648,7 +1663,7 @@ function ChatMessageBubble(props: {
             <Show
               when={liveGenerationId()}
               keyed
-              fallback={<StaticMessageParts message={props.message} />}
+              fallback={<StaticMessageParts message={props.message} disabled={props.generationActive} onProjectSubmit={props.onProjectSubmit} />}
             >
               {(generationId) => (
                 <Show
@@ -1676,7 +1691,7 @@ function ChatMessageBubble(props: {
         <Show when={!isUser() && (props.message.content.length > 0 || props.message.parts.length > 0) && props.message.status !== 'streaming' && visualComplete()}>
           <MessageActionToolbar
             message={props.message}
-            canRegenerate={props.latestAssistant && !props.generationActive}
+            canRegenerate={props.latestAssistant && !props.generationActive && !props.message.generationStartRetry?.projectInput && !props.message.parts.some((part) => part.type === 'gpas')}
             onVote={props.onVote}
             onRegenerate={props.onRegenerate}
           />
@@ -1687,7 +1702,11 @@ function ChatMessageBubble(props: {
   )
 }
 
-function StaticMessageParts(props: { message: ChatMessage }) {
+function StaticMessageParts(props: {
+  message: ChatMessage
+  disabled: boolean
+  onProjectSubmit: (input: import('../../features/chatbot/chatApi').ProjectInput) => Promise<void>
+}) {
   const parts = () => props.message.parts.length > 0
     ? props.message.parts
     : [{ type: 'text' as const, order: 0, text: props.message.content }]
@@ -1704,7 +1723,9 @@ function StaticMessageParts(props: { message: ChatMessage }) {
               version={part.version}
             />
           )
-        : <StaticMarkdown text={part.text} />}
+        : part.type === 'gpas'
+          ? <Show when={part.form}>{(form) => <ProjectInitForm form={form()} messageId={props.message.id} disabled={props.disabled} onSubmit={props.onProjectSubmit} />}</Show>
+          : <StaticMarkdown text={part.text} />}
     </For>
   )
 }
@@ -2617,10 +2638,16 @@ function SessionConversationView(props: { conversationId: string }) {
                             message={message}
                             highlighted={highlightedQuestionId() === message.id}
                             latestAssistant={message.id === latestAssistantId()}
-                            generationActive={Boolean(activeConversation().activeGeneration)}
+                            generationActive={Boolean(activeConversation().activeGeneration || activeConversation().requestPending)}
                             onVisibleProgress={followVisibleOutput}
                             onVote={(vote) => updateVote(message, vote)}
                             onRegenerate={() => regenerate(message)}
+                            onProjectSubmit={async (input) => {
+                              if (activeConversation().requestPending || activeConversation().activeGeneration) throw new Error('请等待当前回复完成。')
+                              const question = chatStore.appendUserMessage(props.conversationId, '确认初始化项目')
+                              if (!question?.clientMessageId) throw new Error('会话不可用，请重试。')
+                              await runAssistantReply(props.conversationId, question.content, question.clientMessageId, undefined, chatStore, input)
+                            }}
                           />
                         </div>
                       )}
@@ -2643,13 +2670,16 @@ function SessionConversationView(props: { conversationId: string }) {
                 </Show>
               </div>
 
+              <Show when={activeConversation().requestPending}>
+                <p role="status" class="py-2 text-sm text-slate-500">正在处理请求…</p>
+              </Show>
               <ChatComposer
                 value={activeConversation().draft}
                 onInput={(value) => chatStore.updateConversationDraft(props.conversationId, value)}
                 onSubmit={sendFollowUp}
                 onStop={() => void stopGeneration()}
                 disabled={
-                  Boolean(activeConversation().activeGeneration)
+                  Boolean(activeConversation().activeGeneration || activeConversation().requestPending)
                 }
                 generating={
                   Boolean(activeConversation().activeGeneration)

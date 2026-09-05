@@ -9,7 +9,9 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { AuthenticationError, resolveCurrentUser } from './auth.js'
+import { AuthenticationError, loadProfile, resolveCurrentUser } from './auth.js'
+import { GpasService, gpasIntent, profileReply } from './gpas.js'
+import { projectInputSchema } from './gpasContracts.js'
 import {
   redisKey,
   type RedisClient,
@@ -17,6 +19,8 @@ import {
 import type { AppConfig } from './config.js'
 import {
   createChat,
+  createBusinessExchange,
+  syncUser,
   checkDatabase,
   deleteMessageVote,
   deleteChat,
@@ -231,6 +235,7 @@ export async function buildApp(
     requestTimeout: 120_000,
     bodyLimit: 64 * 1024,
   })
+  const gpas = new GpasService(config)
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AuthenticationError) {
@@ -1029,7 +1034,8 @@ export async function buildApp(
       },
     },
     async (request, reply) => {
-      const user = await authenticate(request)
+      const profile = await loadProfile(request, config)
+      const user = await syncUser(database, profile)
       const chatId = requireUuid(
         request,
         reply,
@@ -1081,6 +1087,21 @@ export async function buildApp(
         !supersedesGenerationId
       ) {
         return
+      }
+
+      const projectInput = body.projectInput === undefined ? undefined : projectInputSchema.parse(body.projectInput)
+      const intent = gpasIntent(content)
+      if (projectInput || intent) {
+        const result = await createBusinessExchange(database, {
+          userId: user.id, chatId, clientMessageId,
+          content: projectInput ? '确认初始化项目' : content,
+          teamId: profile.ownteamId, sourceMessageId: projectInput?.sourceMessageId,
+        }, async (form) => {
+          if (projectInput) return gpas.create(profile, request.headers.cookie, projectInput, form!)
+          if (intent === 'profile') return { content: profileReply(profile), part: { type: 'gpas', order: 1 } }
+          return gpas.progress(profile, request.headers.cookie)
+        })
+        return reply.code(201).send(result)
       }
 
       const started = await generations.create({

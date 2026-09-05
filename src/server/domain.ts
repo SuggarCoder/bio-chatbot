@@ -1,3 +1,5 @@
+import type { GpasPart } from './gpasContracts.js'
+
 export type Gpas2UserInfo = {
   userId: string
   realName?: string
@@ -85,6 +87,7 @@ export type ChatMessageDto = {
   status: MessageStatus
   content: string
   parts: Array<
+    | GpasPart
     | { type: 'text'; order: number; text: string }
     | {
         type: 'artifact_ref'

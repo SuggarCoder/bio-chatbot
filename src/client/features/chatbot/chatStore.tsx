@@ -38,6 +38,7 @@ export type ChatMessageStatus =
 export type GenerationStartRetry = {
   content: string
   clientMessageId: string
+  projectInput?: import('./chatApi').ProjectInput
 }
 
 export type ActiveGeneration = {
@@ -64,6 +65,7 @@ export type ChatMessage = {
 }
 
 export type ChatConversation = {
+  requestPending?: boolean
   id: string
   title: string
   messages: ChatMessage[]
@@ -111,6 +113,8 @@ type ChatStoreContextValue = {
   updateConversationDraft: (id: string, value: string) => void
   appendUserMessage: (id: string, content: string) => ChatMessage | undefined
   confirmUserMessage: (id: string, message: ChatMessageDto) => void
+  setRequestPending: (id: string, pending: boolean) => void
+  appendBusinessReply: (id: string, message: ChatMessageDto) => void
   startAssistantMessage: (id: string, generationId: string) => void
   markAssistantResponding: (id: string, generationId: string) => void
   markGenerationStarted: (id: string, generationId: string) => void
@@ -1016,6 +1020,16 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         updateConversationDraft,
         appendUserMessage,
         confirmUserMessage,
+        setRequestPending: (id, pending) => {
+          if (state.conversations[id]) setState('conversations', id, 'requestPending', pending)
+        },
+        appendBusinessReply: (id, message) => {
+          if (!state.conversations[id]) return
+          setState('conversations', id, produce((conversation: ChatConversation) => {
+            if (!conversation.messages.some((item) => item.id === message.id)) conversation.messages.push(mapMessage(message))
+            conversation.errorMessage = undefined
+          }))
+        },
         startAssistantMessage,
         markAssistantResponding,
         markGenerationStarted,

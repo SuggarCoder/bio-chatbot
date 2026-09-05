@@ -1,3 +1,6 @@
+import type { GpasPart, ProjectInput } from '../../../server/gpasContracts'
+export type { GpasPart, ProjectInput } from '../../../server/gpasContracts'
+
 const API_BASE = `${import.meta.env.BASE_URL}api`
 
 export type CurrentUserDto = {
@@ -25,6 +28,7 @@ export type ChatMessageDto = {
   status: 'pending' | 'streaming' | 'completed' | 'cancelled' | 'failed'
   content: string
   parts: Array<
+    | GpasPart
     | { type: 'text'; order: number; text: string }
     | {
         type: 'artifact_ref'
@@ -279,9 +283,14 @@ export function createGeneration(
     clientMessageId: string
     artifactId?: string
     supersedesGenerationId?: string
+    projectInput?: ProjectInput
   },
 ) {
   return requestJson<{
+    kind: 'business'
+    userMessage: ChatMessageDto
+    assistantMessage: ChatMessageDto
+  } | {
     generation: GenerationDto
     userMessage: ChatMessageDto
     assistantMessageId: string
@@ -295,6 +304,7 @@ export function createGeneration(
         content: input.content,
         artifactId: input.artifactId,
         supersedesGenerationId: input.supersedesGenerationId,
+        projectInput: input.projectInput,
       }),
     },
   )

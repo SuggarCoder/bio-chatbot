@@ -57,6 +57,9 @@ import {
 } from './db/schema.js'
 import type { MessagePart } from './db/schema.js'
 import type { Database } from './db/client.js'
+import { AuthenticationError } from './auth.js'
+import { gpasPartSchema, type GpasPart } from './gpasContracts.js'
+import type { BusinessReply } from './gpas.js'
 
 export {
   checkDatabase,
@@ -275,6 +278,11 @@ export function mapMessage(
   const parts: ChatMessageDto['parts'] = []
   if (Array.isArray(row.parts)) {
     row.parts.forEach((part, index) => {
+        if (part?.type === 'gpas') {
+          const parsed = gpasPartSchema.safeParse(part)
+          if (parsed.success) parts.push(parsed.data)
+          return
+        }
         if (part?.type === 'text' && typeof part.text === 'string') {
           parts.push({
             type: 'text' as const,
@@ -920,6 +928,64 @@ export async function getGenerationStartById(
       ? metadata.summaryCoveredMaxSeq
       : undefined,
   }
+}
+
+export async function createBusinessExchange(
+  database: Database,
+  input: {
+    userId: string
+    chatId: string
+    clientMessageId: string
+    content: string
+    teamId?: string
+    sourceMessageId?: string
+  },
+  execute: (form?: NonNullable<GpasPart['form']>) => Promise<BusinessReply>,
+) {
+  return database.transaction(async (transaction) => {
+    // Serialize project creation across tabs, users in one team, and API replicas.
+    if (input.sourceMessageId && input.teamId) {
+      await transaction.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`gpas-project:${input.teamId}`}, 0))`)
+    }
+    const [chat] = await transaction.select().from(chats).where(and(
+      eq(chats.id, input.chatId), eq(chats.userId, input.userId), isNull(chats.deletedAt),
+    )).for('update')
+    if (!chat) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
+    const [prior] = await transaction.select().from(messages).where(and(
+      eq(messages.chatId, input.chatId), eq(messages.clientMessageId, input.clientMessageId),
+    ))
+    if (prior) {
+      const [answer] = await transaction.select().from(messages).where(and(
+        eq(messages.chatId, input.chatId), eq(messages.seq, prior.seq + 1n),
+      ))
+      if (!answer || !answer.parts.some((part) => part.type === 'gpas')) throw new AuthenticationError('请求标识已使用。', 409, 'request_conflict')
+      return { kind: 'business' as const, userMessage: mapMessage(prior), assistantMessage: mapMessage(answer) }
+    }
+    const [active] = await transaction.select({ id: generations.id }).from(generations).where(and(
+      eq(generations.chatId, input.chatId), inArray(generations.status, ['created', 'queued', 'scheduled', 'running', 'cancelling']),
+    )).limit(1)
+    if (active) throw new AuthenticationError('请等待当前回复完成后再查询项目。', 409, 'generation_active')
+    let form: GpasPart['form']
+    if (input.sourceMessageId) {
+      const [source] = await transaction.select().from(messages).where(and(
+        eq(messages.id, input.sourceMessageId), eq(messages.chatId, input.chatId), eq(messages.role, 'assistant'),
+      ))
+      const parsed = gpasPartSchema.safeParse(source?.parts.find((part) => part.type === 'gpas'))
+      form = parsed.success ? parsed.data.form : undefined
+      if (!form) throw new AuthenticationError('项目表单不存在，请重新查询任务进度。', 400, 'project_form_missing')
+    }
+    const result = await execute(form)
+    const [question, answer] = await transaction.insert(messages).values([
+      { userId: input.userId, chatId: input.chatId, seq: chat.nextMessageSeq, role: 'user',
+        content: input.content, parts: [{ type: 'text', order: 0, text: input.content }], clientMessageId: input.clientMessageId },
+      { userId: input.userId, chatId: input.chatId, seq: chat.nextMessageSeq + 1n, role: 'assistant',
+        content: result.content, parts: [{ type: 'text', order: 0, text: result.content }, result.part] },
+    ]).returning()
+    await transaction.update(chats).set({
+      nextMessageSeq: chat.nextMessageSeq + 2n, contextRevision: sql`${chats.contextRevision} + 1`, updatedAt: new Date(),
+    }).where(eq(chats.id, chat.id))
+    return { kind: 'business' as const, userMessage: mapMessage(question), assistantMessage: mapMessage(answer) }
+  })
 }
 
 export async function createGenerationStart(
