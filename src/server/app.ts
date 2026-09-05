@@ -10,18 +10,21 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { AuthenticationError, loadProfile, resolveCurrentUser } from './auth.js'
-import { GpasService, GpasUpstreamError, profileReply } from './gpas.js'
-import { SemanticIntentRouter } from './gpasIntent.js'
-import { LocalEmbeddingService } from './embedding.js'
+import { GpasUpstreamError } from './gpas.js'
+import { IntentPlanningError, planningContext } from './capabilities/planner.js'
+import { createCapabilityRuntime, type CapabilityRuntime } from './capabilities/runtime.js'
+import type { CapabilityPlan } from './capabilities/registry.js'
 import { projectInputSchema } from './gpasContracts.js'
 import {
   redisKey,
+  consumeGenerationRateLimit,
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
 import {
   createChat,
   createBusinessExchange,
+  findBusinessExchange,
   syncUser,
   checkDatabase,
   deleteMessageVote,
@@ -211,7 +214,7 @@ function createStorageAbortScope(
 }
 
 export type AppDependencies = {
-  intentRouter?: SemanticIntentRouter
+  capabilityRuntime?: CapabilityRuntime
   config: AppConfig
   database: Database
   redis: RedisClient
@@ -238,12 +241,15 @@ export async function buildApp(
     requestTimeout: 120_000,
     bodyLimit: 64 * 1024,
   })
-  const gpas = new GpasService(config)
-  const intentRouter = dependencies.intentRouter ?? new SemanticIntentRouter(new LocalEmbeddingService(config))
+  const { gpas, registry: capabilities, router: intentRouter, planner: semanticPlanner } =
+    dependencies.capabilityRuntime ?? createCapabilityRuntime(config)
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof GpasUpstreamError) {
       request.log.warn({ gpas: error.diagnostics }, 'GPAS upstream request failed')
+    }
+    if (error instanceof IntentPlanningError) {
+      request.log.warn({ planner: error.diagnostics }, 'Semantic planner request failed')
     }
     if (error instanceof AuthenticationError) {
       return reply.code(error.statusCode).send(
@@ -1095,18 +1101,33 @@ export async function buildApp(
       }
 
       const projectInput = body.projectInput === undefined ? undefined : projectInputSchema.parse(body.projectInput)
-      const decision = projectInput ? undefined : await intentRouter.classify(content)
-      const intent = decision?.intent
-      if (decision) request.log.info({ intent: decision.intent, scores: decision.scores, margin: decision.margin }, 'Semantic business intent classified')
-      if (projectInput || intent) {
+      // Completed business replies must replay even if the planner is unavailable.
+      const replay = await findBusinessExchange(database, user.id, chatId, clientMessageId)
+      if (replay) return reply.code(201).send(replay)
+      let plan: CapabilityPlan | undefined
+      if (!projectInput) {
+        // Check ownership before sending even a bounded conversation to a model.
+        const page = await getChatMessagesPage(database, user.id, chatId, Number.MAX_SAFE_INTEGER, 6)
+        if (!page) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
+        if (!redis.isReady) throw new AuthenticationError('语义规划服务暂时不可用。', 503, 'redis_unavailable')
+        const rate = await consumeGenerationRateLimit(redis, config, user.id, 'capability')
+        if (!rate.allowed) throw new GenerationRejectedError('请求过于频繁，请稍后重试。', 429, 'intent_rate_limited', rate.retryAfterMs)
+        const context = planningContext(page.messages)
+        const result = await intentRouter.classify(content, semanticPlanner, context.history, context.contextIds)
+        plan = capabilities.plan(result.decision, result.candidates.map(item => item.capability.id))
+        request.log.info({
+          capabilityId: plan.capabilityId, intent: plan.intent, mode: plan.mode, confidence: plan.confidence,
+          candidates: result.candidates.map(item => ({ id: item.capability.id, score: item.score })),
+        }, 'Semantic capability planned')
+      }
+      if (projectInput || plan?.mode !== 'general') {
         const result = await createBusinessExchange(database, {
           userId: user.id, chatId, clientMessageId,
           content: projectInput ? '确认初始化项目' : content,
           teamId: profile.ownteamId, sourceMessageId: projectInput?.sourceMessageId,
         }, async (form) => {
           if (projectInput) return gpas.create(profile, request.headers.cookie, projectInput, form!)
-          if (intent === 'profile') return { content: profileReply(profile), part: { type: 'gpas', order: 1 } }
-          return gpas.progress(profile, request.headers.cookie)
+          return capabilities.execute(plan!, { profile, cookie: request.headers.cookie })
         })
         return reply.code(201).send(result)
       }

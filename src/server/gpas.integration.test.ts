@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { eq } from 'drizzle-orm'
-import { createBusinessExchange, createChat, createDatabase, closeDatabase, getChatDetail, migrateDatabase } from './db.js'
+import { createBusinessExchange, createChat, createDatabase, closeDatabase, getChatDetail, findBusinessExchange, migrateDatabase } from './db.js'
 import { users } from './db/schema.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -29,6 +29,9 @@ test('business exchanges enforce ownership, persist forms and deduplicate concur
     ])
     assert.equal(first.assistantMessage.id, replay.assistantMessage.id)
     assert.equal(calls, 1)
+    assert.equal((await findBusinessExchange(database, owner.id, chat.id, request.clientMessageId))?.assistantMessage.id, first.assistantMessage.id)
+    assert.equal(await findBusinessExchange(database, crypto.randomUUID(), chat.id, request.clientMessageId), null)
+    assert.equal(await findBusinessExchange(database, owner.id, chat.id, crypto.randomUUID()), null)
     const detail = await getChatDetail(database, owner.id, chat.id)
     assert.equal(detail?.messages.length, 2)
     assert.deepEqual(detail?.messages[1].parts[1], { type: 'gpas', order: 1, form })

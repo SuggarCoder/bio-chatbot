@@ -41,6 +41,9 @@ test('query identity and progress, restore the form, validate and submit project
         }
         created = true
         content = '项目初始化成功。'
+      } else if (body.content === '我不能重新初始化这个项目吗？') {
+        content = '当前系统不支持重新初始化项目。旧系统仅允许首次初始化。'
+        part = { ...part, capability: { id: 'project.reinitialize', intent: 'ask_capability', outcome: 'answer' } }
       } else if (body.content === '我是谁') content = '当前用户：演示用户；团队：演示团队'
       else if (created) content = '临床样本 0/100；虫媒样本 0/200；环境样本 0/300；实验室样本 0/400'
       else {
@@ -82,5 +85,11 @@ test('query identity and progress, restore the form, validate and submit project
   await composer.fill('我的任务进度')
   await composer.press('Enter')
   await expect(page.getByText('临床样本 0/100；虫媒样本 0/200；环境样本 0/300；实验室样本 0/400')).toBeVisible()
+  await composer.fill('我不能重新初始化这个项目吗？')
+  await composer.press('Enter')
+  await expect(page.getByText('当前系统不支持重新初始化项目。旧系统仅允许首次初始化。', { exact: true })).toBeVisible()
+  await expect(page.getByText('临床样本 0/100；虫媒样本 0/200；环境样本 0/300；实验室样本 0/400')).toHaveCount(1)
+  await page.reload()
+  await expect(page.getByText('当前系统不支持重新初始化项目。旧系统仅允许首次初始化。', { exact: true })).toBeVisible()
   expect(createCalls).toBe(2)
 })

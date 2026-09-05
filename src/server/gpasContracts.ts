@@ -23,6 +23,11 @@ export const gpasPartSchema = z.object({
   type: z.literal('gpas'),
   order: z.number().int().nonnegative(),
   form: projectFormSchema.optional(),
+  capability: z.object({
+    id: z.string().nullable(),
+    intent: z.string(),
+    outcome: z.enum(['answer', 'execute', 'clarify']),
+  }).optional(),
 })
 export type ProjectInput = z.infer<typeof projectInputSchema>
 export type GpasPart = z.infer<typeof gpasPartSchema>

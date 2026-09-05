@@ -66,3 +66,13 @@ test('chat context CAS uses one stable per-chat key', async () => {
   assert.equal(advanced, true)
   assert.deepEqual(keys, ['test:chat:ctx:chat-1'])
 })
+
+test('capability planning has a separate authenticated-user rate window', async () => {
+  let keys: string[] = []
+  const redis = { isReady: true, eval: async (_script: string, options: { keys: string[] }) => {
+    keys = options.keys
+    return [1, 0, 9]
+  } } as unknown as RedisClient
+  assert.equal((await consumeGenerationRateLimit(redis, config, 'user-1', 'capability')).allowed, true)
+  assert.deepEqual(keys, ['test:rl:user:user-1:capability'])
+})

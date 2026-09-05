@@ -13,7 +13,7 @@ import { SeaweedS3ObjectStore } from './storage/seaweedS3ObjectStore.js'
 import { ArtifactService } from './artifacts/service.js'
 import { GenerationStreamHub } from './streamStore.js'
 import { LocalEmbeddingService } from './embedding.js'
-import { SemanticIntentRouter } from './gpasIntent.js'
+import { createCapabilityRuntime } from './capabilities/runtime.js'
 import { QwenTokenCounter } from './tokenBudget.js'
 
 const config = readConfig()
@@ -55,8 +55,8 @@ if (
 ) {
   await tokenCounter.initialize()
 }
-const intentRouter = new SemanticIntentRouter(embeddingService)
-await intentRouter.initialize()
+const capabilityRuntime = createCapabilityRuntime(config, embeddingService)
+await capabilityRuntime.router.initialize()
 const generations = new GenerationService(
   config,
   database,
@@ -70,7 +70,7 @@ const generations = new GenerationService(
 const streamHub = new GenerationStreamHub(config, redis)
 if (redis.isReady) await streamHub.start()
 const app = await buildApp({
-  intentRouter,
+  capabilityRuntime,
   config,
   database,
   redis,

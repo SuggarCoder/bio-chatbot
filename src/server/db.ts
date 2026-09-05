@@ -930,6 +930,18 @@ export async function getGenerationStartById(
   }
 }
 
+export async function findBusinessExchange(database: Database, userId: string, chatId: string, clientMessageId: string) {
+  const answer = alias(messages, 'business_answer')
+  const [prior] = await database.select({ question: messages, answer }).from(messages)
+    .innerJoin(chats, eq(chats.id, messages.chatId))
+    .innerJoin(answer, and(eq(answer.chatId, messages.chatId), eq(answer.seq, sql`${messages.seq} + 1`), eq(answer.role, 'assistant')))
+    .where(and(eq(chats.id, chatId), eq(chats.userId, userId), isNull(chats.deletedAt),
+      eq(messages.userId, userId), eq(messages.role, 'user'), eq(messages.clientMessageId, clientMessageId)))
+    .limit(1)
+  if (!prior?.answer.parts.some(part => part.type === 'gpas')) return null
+  return { kind: 'business' as const, userMessage: mapMessage(prior.question), assistantMessage: mapMessage(prior.answer) }
+}
+
 export async function createBusinessExchange(
   database: Database,
   input: {

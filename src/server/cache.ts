@@ -64,6 +64,7 @@ export async function consumeGenerationRateLimit(
   redis: RedisClient,
   config: AppConfig,
   userId: string,
+  bucket: 'generation' | 'capability' = 'generation',
 ): Promise<GenerationRateLimitResult> {
   if (!redis.isReady) {
     throw new Error('Redis is unavailable')
@@ -72,7 +73,7 @@ export async function consumeGenerationRateLimit(
   const now = Date.now()
   const windowMs = 60_000
   const result = await redis.eval(rateLimitScript, {
-    keys: [redisKey(config, `rl:user:${userId}:generation`)],
+    keys: [redisKey(config, `rl:user:${userId}:${bucket}`)],
     arguments: [
       String(now),
       String(windowMs),

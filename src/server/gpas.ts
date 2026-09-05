@@ -135,19 +135,36 @@ export class GpasService {
     return this.parse(existenceSchema, await this.request(cookie, 'project_exists', `project/exist/${encodeURIComponent(team)}`))
   }
 
+  private initializationForm(profile: Gpas2UserInfo, exists: z.infer<typeof existenceSchema>): BusinessReply {
+    const prefix = this.config.gpas2AuthMode === 'mock' ? '（本地演示数据）\n\n' : ''
+    if (!exists.info || exists.info.teamId !== this.team(profile)) throw new AuthenticationError('项目初始化信息缺失或团队不匹配，请联系管理员。', 502, 'gpas_invalid_team')
+    return {
+      content: `${prefix}你的团队尚未初始化项目。请填写下面的基础信息和四类样本计划数量，确认后创建项目。`,
+      part: { type: 'gpas', order: 1, form: {
+        projectCode: exists.info.projectCode, projectName: exists.info.userName,
+        phone: exists.info.phone ?? profile.phone ?? '', teamId: exists.info.teamId,
+      } },
+    }
+  }
+
+  async initializationStatus(profile: Gpas2UserInfo, cookie?: string): Promise<BusinessReply> {
+    const exists = await this.existence(profile, cookie)
+    if (!exists.data) return this.initializationForm(profile, exists)
+    return {
+      content: '当前团队的项目已经初始化。系统仅支持首次初始化，不支持重新初始化项目。如需了解样本提交情况，可以查询“我的任务进度”。',
+      part: { type: 'gpas', order: 1 },
+    }
+  }
+
+  async prepareInitialization(profile: Gpas2UserInfo, cookie?: string): Promise<BusinessReply> {
+    // Preparing a form never calls create. Existing projects do not become progress queries.
+    return this.initializationStatus(profile, cookie)
+  }
+
   async progress(profile: Gpas2UserInfo, cookie?: string): Promise<BusinessReply> {
     const exists = await this.existence(profile, cookie)
+    if (!exists.data) return this.initializationForm(profile, exists)
     const prefix = this.config.gpas2AuthMode === 'mock' ? '（本地演示数据）\n\n' : ''
-    if (!exists.data) {
-      if (!exists.info || exists.info.teamId !== this.team(profile)) throw new AuthenticationError('项目初始化信息缺失或团队不匹配，请联系管理员。', 502, 'gpas_invalid_team')
-      return {
-        content: `${prefix}你的团队尚未初始化项目。请填写下面的基础信息和四类样本计划数量，确认后创建项目。`,
-        part: { type: 'gpas', order: 1, form: {
-          projectCode: exists.info.projectCode, projectName: exists.info.userName,
-          phone: exists.info.phone ?? profile.phone ?? '', teamId: exists.info.teamId,
-        } },
-      }
-    }
     const mock = this.mockProjects.get(this.team(profile))
     const summary = this.config.gpas2AuthMode === 'mock'
       ? { projectPlanInfo: { ...mock!.samples, name: mock!.projectName, id: 'demo-project' }, realSubmitInfo: [] }

@@ -19,6 +19,7 @@
     "test:artifact-integration": "tsx --test src/server/artifacts/*.integration.ts",
     "test:artifact-security": "playwright test tests/artifact-security.spec.ts tests/chat-navigation.spec.ts",
     "test:gpas-ui": "playwright test tests/gpas-chat.spec.ts",
+    "test:capability-model": "cross-env RUN_CAPABILITY_MODEL_EVAL=true tsx --test src/server/capabilityPlanner.model.test.ts",
     "storage:init": "tsx src/server/storageInit.ts",
     "storage:check": "tsx src/server/storageCheck.ts",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
