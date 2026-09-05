@@ -113,7 +113,7 @@ docker compose --env-file /secure/path/bio-chatbot.env up -d app worker
 2. 在宿主机 `/home/lu/models` 放入与线上 Qwen 模型完全匹配的 tokenizer（至少包含 `tokenizer.json`、`tokenizer_config.json` 和 `chat_template`），并确认 BGE INT8 ONNX 文件存在且校验和正确。
 3. 同时部署 API 与 Worker，先保持四个新功能开关为 `false`。
 4. 依次开启 `CONTEXT_MEMORY_ENABLED`、`USER_MEMORY_ENABLED`、`ARTIFACT_CONTEXT_V2_ENABLED`，最后开启 `ARTIFACT_PATCH_ENABLED`。
-5. 每一步都检查 `/ai-chatbot/api/health`：启用相关功能后 `tokenizer`、`embeddings` 和 `worker` 必须为 `ok`。运行时只从宿主机只读挂载读取模型，禁止联网回退。
+5. 每一步都检查 `/ai-chatbot/api/health`：`embeddings` 和 `worker` 必须为 `ok`；启用上下文功能后 `tokenizer` 也必须为 `ok`。BGE 现在还用于 API 的业务语义识别，因此即使所有上下文开关关闭，模型也必须可用。运行时只从宿主机只读挂载读取模型，禁止联网回退。
 
 ## 反向代理
 

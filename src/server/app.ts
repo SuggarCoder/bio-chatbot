@@ -10,7 +10,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { AuthenticationError, loadProfile, resolveCurrentUser } from './auth.js'
-import { GpasService, gpasIntent, profileReply } from './gpas.js'
+import { GpasService, GpasUpstreamError, profileReply } from './gpas.js'
+import { SemanticIntentRouter } from './gpasIntent.js'
+import { LocalEmbeddingService } from './embedding.js'
 import { projectInputSchema } from './gpasContracts.js'
 import {
   redisKey,
@@ -209,6 +211,7 @@ function createStorageAbortScope(
 }
 
 export type AppDependencies = {
+  intentRouter?: SemanticIntentRouter
   config: AppConfig
   database: Database
   redis: RedisClient
@@ -236,8 +239,12 @@ export async function buildApp(
     bodyLimit: 64 * 1024,
   })
   const gpas = new GpasService(config)
+  const intentRouter = dependencies.intentRouter ?? new SemanticIntentRouter(new LocalEmbeddingService(config))
 
   app.setErrorHandler((error, request, reply) => {
+    if (error instanceof GpasUpstreamError) {
+      request.log.warn({ gpas: error.diagnostics }, 'GPAS upstream request failed')
+    }
     if (error instanceof AuthenticationError) {
       return reply.code(error.statusCode).send(
         errorBody(request, error.code, error.message),
@@ -328,9 +335,7 @@ export async function buildApp(
       : existsSync(path.resolve(config.qwenTokenizerPath, 'tokenizer.json'))
         ? 'ok'
         : 'unavailable'
-    const embeddings = !config.artifactContextV2Enabled
-      ? 'disabled'
-      : existsSync(path.resolve(config.embeddingModelPath, 'onnx/model_int8.onnx'))
+    const embeddings = intentRouter.ready
         ? 'ok'
         : 'unavailable'
     const status =
@@ -1090,7 +1095,9 @@ export async function buildApp(
       }
 
       const projectInput = body.projectInput === undefined ? undefined : projectInputSchema.parse(body.projectInput)
-      const intent = gpasIntent(content)
+      const decision = projectInput ? undefined : await intentRouter.classify(content)
+      const intent = decision?.intent
+      if (decision) request.log.info({ intent: decision.intent, scores: decision.scores, margin: decision.margin }, 'Semantic business intent classified')
       if (projectInput || intent) {
         const result = await createBusinessExchange(database, {
           userId: user.id, chatId, clientMessageId,

@@ -94,4 +94,6 @@ npm run build
 
 这些开关默认关闭。启用前先执行 `npm run db:migrate` 并部署 Worker。模型文件不进入 Git 仓库或 Docker 镜像；生产机必须提前准备 `/home/lu/models`，Compose 会将其只读挂载到容器的 `/app/models`。其中 Qwen tokenizer 位于 `/home/lu/models/qwen-tokenizer`，必须与线上模型完全匹配且包含 `chat_template`；BGE INT8 模型位于 `/home/lu/models/bge-small-zh-v1.5/onnx/model_int8.onnx`。服务只读取本地挂载，不会在运行时联网下载模型。
 
+GPAS 用户和项目查询另使用本地 BGE 做语义意图识别，因此即使上述开关全部关闭，API 启动仍要求 `EMBEDDING_MODEL_PATH` 中的模型可用。健康检查的 `embeddings` 必须为 `ok`。接口与排障说明见 [GPAS 项目对话](docs/gpas-project-chat.md)。
+
 Artifact 历史版本不会被覆盖。`POST /api/artifacts/:artifactId/versions/:version/restore` 使用 UUID 格式的 `Idempotency-Key`，把旧快照复制为新的当前版本。

@@ -2,7 +2,18 @@
 
 在输入框发送“我是谁”“我的用户信息”“我的团队信息”可查询当前 Cookie
 对应的用户和团队。发送“我的任务进度”“查看当前项目进度”“初始化项目”
-可检查团队项目。当前使用服务端的短句意图匹配，其他问题继续走原有模型回复。
+可检查团队项目。API 进程使用本地 `bge-small-zh-v1.5` INT8 模型识别语义，
+将用户输入与用户信息、项目进度、普通对话三类参考语句的向量作余弦相似度比较。
+业务类别最高相似度须达到 0.70，且领先另一类别至少 0.04；低置信度及普通对话
+继续走原有模型回复。业务分流不使用正则、关键词或字面匹配；相似度不是概率。
+参考语句和阈值位于 `src/server/gpasIntent.ts`，回归语句位于
+`src/server/gpasIntent.model.test.ts`。语义近似分类不能保证覆盖所有表达。
+
+启动时使用已有 `EMBEDDING_MODEL_PATH` 加载模型并预计算参考向量，复用同一个
+`LocalEmbeddingService`。意图向量采用 CLS pooling 和归一化，已有检索向量的
+mean pooling 保持兼容。模型缺失时启动失败，运行时推理失败返回
+`intent_model_unavailable`，不回退到正则。`/ai-chatbot/api/health` 的 `embeddings`
+现在始终检查语义路由是否就绪，独立于 `ARTIFACT_CONTEXT_V2_ENABLED`。
 
 项目未初始化时，消息中展示基础信息和四类样本计划表单。项目编码只读，
 项目名称默认取存在性接口 `info.userName`，联系方式默认取 `info.phone`。
@@ -16,7 +27,8 @@
 ## 接口与部署
 
 复用 `GPAS2_AUTH_MODE` 和 `GPAS2_USER_INFO_URL`，无需新环境变量、数据库迁移、
-端口或反向代理配置。业务接口地址由用户信息 URL 的 `../` 相对路径解析：
+端口或反向代理配置。用户信息 URL 必须以 `/user/info` 或 `/user/info/` 结尾，
+业务地址使用它的同源版本前缀，去除查询参数和片段：
 
 - `GET project/exist/{ownteamId}`
 - `GET summary/submit/info/{ownteamId}`
@@ -46,7 +58,22 @@
 
 本地运行 `npm run check`、`npm run build`、`npm test`，
 以及 `npm run test:gpas-ui`。数据库集成测试需设置独立的 `TEST_DATABASE_URL`。
+`npm test` 在本地模型存在时运行真实 BGE 语义回归；缺少模型时明确跳过这项测试。
 
 远端需使用真实登录 Cookie 验收：身份与团队显示、已有项目四类进度、未初始化
 团队的表单默认值、提交成功后再查询、双击或跨标签页提交、Cookie 失效、
 上游异常、刷新对话恢复，以及 `/ai-chatbot/api/health`。
+
+## 上游错误定位
+
+`gpas_upstream_error` 表示收到上游非 2xx HTTP 响应（401/403 另作鉴权错误），
+不是网络连接或超时错误。前端错误现在包含操作阶段和实际 HTTP 状态码，例如
+“项目进度汇总查询返回错误（上游 HTTP 404）”。网络错误为 `gpas_unavailable`，
+HTTP 成功但业务 `code` 非 200 为 `gpas_business_error`。
+
+按响应的 `requestId` 查 API 日志中的 `GPAS upstream request failed`，查看：
+`gpas.operation`、`gpas.method`、`gpas.endpoint`、`gpas.upstreamStatus`，以及可用时
+的 `gpas.upstreamCode`。操作分别是 `project_exists`、`project_summary` 和
+`project_create`。日志路径用 `{teamId}` 代替团队标识，不记录 Cookie、提交内容
+或原始响应正文。实际状态码、失败阶段和网关日志是定位远端问题的依据；
+仅凭旧版通用错误无法判断是地址错误、网关拒绝还是上游服务故障。

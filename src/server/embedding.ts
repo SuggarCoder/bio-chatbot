@@ -27,14 +27,17 @@ export class LocalEmbeddingService {
       },
     ).then((extractor) => {
       this.extractor = extractor as unknown as FeatureExtractor
+    }).catch((error: unknown) => {
+      this.initializing = undefined
+      throw error
     })
     return this.initializing
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, pooling: 'mean' | 'cls' = 'mean'): Promise<number[]> {
     await this.initialize()
     const output = await this.extractor!(text, {
-      pooling: 'mean',
+      pooling,
       normalize: true,
       truncation: true,
       max_length: 512,

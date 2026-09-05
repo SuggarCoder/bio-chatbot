@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { GpasService, gpasIntent, profileReply } from './gpas.js'
+import { GpasService, GpasUpstreamError, gpasUrl, profileReply } from './gpas.js'
 import { projectInputSchema } from './gpasContracts.js'
 import type { AppConfig } from './config.js'
 import { mapMessage } from './db.js'
@@ -10,12 +10,34 @@ const seed = { projectCode: '12345', userName: '默认项目', projectName: '不
 const input = { sourceMessageId: 'c9345da6-998b-4462-a539-2d803f184e25', projectName: '项目', projectDesc: '', phone: '13800000000', samples: { clinic: 100, media: 200, environment: 300, lab: 400 } }
 const config = { gpas2AuthMode: 'upstream', gpas2UserInfoUrl: 'https://gpas.example.invalid:8058/api/gpas2/v1/user/info' } as AppConfig
 
-test('business intent recognizes requests while leaving ordinary scientific prompts alone', () => {
-  for (const prompt of ['我是谁？', '请查询我的用户信息', '我的团队信息']) assert.equal(gpasIntent(prompt), 'profile')
-  for (const prompt of ['我的任务进度', '查看当前项目进度', '初始化项目', '我的样本提交情况']) assert.equal(gpasIntent(prompt), 'progress')
-  for (const prompt of ['什么是临床样本？', '帮我设计一份项目计划', '写一个项目创建API']) assert.equal(gpasIntent(prompt), null)
+test('profile replies include user and team information', () => {
   assert.match(profileReply(profile), /演示用户/)
   assert.match(profileReply(profile), /演示团队/)
+})
+
+test('project URL preserves the API prefix and handles a trailing slash without forwarding queries', () => {
+  for (const ending of ['/user/info', '/user/info/', '/user/info?token=private']) {
+    assert.equal(gpasUrl(`https://gpas.example.invalid:8058/api/gpas2/v1${ending}`, 'project/exist/team-test').href,
+      'https://gpas.example.invalid:8058/api/gpas2/v1/project/exist/team-test')
+  }
+  assert.throws(() => gpasUrl('https://gpas.example.invalid/wrong/path', 'project/create'), /应以/)
+})
+
+test('upstream errors identify the failing operation and HTTP status without retaining credentials or response data', async (t) => {
+  let count = 0
+  t.mock.method(globalThis, 'fetch', async () => {
+    count += 1
+    return count === 1 ? Response.json({ code: 200, data: true }) : new Response('private upstream details', { status: 404 })
+  })
+  await assert.rejects(new GpasService(config).progress(profile, 'session=secret'), (error: unknown) => {
+    assert.ok(error instanceof GpasUpstreamError)
+    assert.equal(error.code, 'gpas_upstream_error')
+    assert.match(error.message, /项目进度汇总查询.*HTTP 404/)
+    assert.equal(error.diagnostics.operation, 'project_summary')
+    assert.equal(error.diagnostics.upstreamStatus, 404)
+    assert.doesNotMatch(JSON.stringify(error), /team-test|session=secret|private upstream/)
+    return true
+  })
 })
 
 test('project query forwards Cookie to fixed endpoints and sums monthly totals without studies', async (t) => {
