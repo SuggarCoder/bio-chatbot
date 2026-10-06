@@ -45,6 +45,7 @@ test('switching directly between sessions loads the destination messages', async
   const detailRequests: string[] = []
   await page.route('**/ai-chatbot/api/**', async (route) => {
     const pathname = new URL(route.request().url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
     if (pathname.endsWith('/api/health')) {
       await route.fulfill({ json: {
         status: 'ok',
@@ -119,6 +120,7 @@ test('assistant votes can be selected, switched, cleared, and rolled back', asyn
   await page.route('**/ai-chatbot/api/**', async (route) => {
     const request = route.request()
     const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
     if (pathname.endsWith('/api/health')) {
       await route.fulfill({ json: {
         status: 'ok',
@@ -230,6 +232,7 @@ test('a rejected generation start retries the original request instead of regene
   await page.route('**/ai-chatbot/api/**', async (route) => {
     const request = route.request()
     const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
     if (pathname.endsWith('/api/health')) {
       await route.fulfill({ json: {
         status: 'ok',
@@ -463,6 +466,7 @@ test('long conversations expose question anchors and preserve position while loa
   await page.setViewportSize({ width: 1280, height: 720 })
   await page.route('**/ai-chatbot/api/**', async (route) => {
     const pathname = new URL(route.request().url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
 
     if (pathname.endsWith('/api/health')) {
       await route.fulfill({ json: {

@@ -275,7 +275,7 @@ export const httpSchemas = {
       supersedesGenerationId: uuid.optional(),
       projectInput: projectInputSchema.optional(),
     })),
-    response: { 201: jsonSchema(z.union([generationStart, z.object({
+    response: { 202: jsonSchema(z.object({ id: uuid, chatId: uuid, requestId: uuid, status: z.string(), result: z.unknown().nullable(), error: z.unknown().nullable() })), 201: jsonSchema(z.union([generationStart, z.object({
       kind: z.literal('business'),
       userMessage: chatMessage,
       assistantMessage: chatMessage,

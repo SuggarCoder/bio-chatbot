@@ -97,3 +97,10 @@ npm run build
 GPAS 用户和项目查询另使用本地 BGE 做语义意图识别，因此即使上述开关全部关闭，API 启动仍要求 `EMBEDDING_MODEL_PATH` 中的模型可用。健康检查的 `embeddings` 必须为 `ok`。接口与排障说明见 [GPAS 项目对话](docs/gpas-project-chat.md)。
 
 Artifact 历史版本不会被覆盖。`POST /api/artifacts/:artifactId/versions/:version/restore` 使用 UUID 格式的 `Idempotency-Key`，把旧快照复制为新的当前版本。
+
+
+### 并发安全升级
+
+部署本次修订前执行 `npm run db:migrate`（新增 BusinessOperation、IngressRequest）。普通聊天也强制校验 token 预算，因此 API 与 Worker 均须提供本地 Qwen tokenizer。100 用户入口/SQL 回归测试及容量边界见 [生产部署清单](docs/production-deployment.md#100-人同时在线并发安全修订)。
+
+消息入口现为持久任务：提交成功返回 202，API 重启后继续规划/执行，前端自动查询结果。上线必须配置稳定的 `REQUEST_ENCRYPTION_KEY` 并同步更新前后端。规划并发、共享上游并发/RPM/保守 TPM 和数据库池可独立配置；取消回退改为 Worker 批量检查。详见部署清单“持久入口与扩容配置”。

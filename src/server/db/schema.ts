@@ -1189,3 +1189,54 @@ export const sharedArtifacts = pgView('SharedArtifact').as((query) =>
       )
     `),
 )
+
+// Durable reservation; external HTTP is never executed inside a transaction.
+export const businessOperations = pgTable('BusinessOperation', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('userId').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  chatId: uuid('chatId').notNull().references(() => chats.id, { onDelete: 'cascade' }),
+  requestId: uuid('requestId').notNull(),
+  teamId: text('teamId'),
+  mutation: boolean('mutation').notNull().default(false),
+  status: text('status').notNull().default('running'),
+  token: uuid('token').notNull(),
+  result: jsonb('result').$type<import('../gpas.js').BusinessReply>(),
+  createdAt: timestampTz('createdAt').notNull().defaultNow(),
+  updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
+  expiresAt: timestampTz('expiresAt').notNull(),
+}, table => [
+  unique('uq_business_request').on(table.chatId, table.requestId),
+  uniqueIndex('uq_business_chat_running').on(table.chatId)
+    .where(sql`${table.status} in ('running', 'result_ready')`),
+  uniqueIndex('uq_business_team_mutation').on(table.teamId)
+    .where(sql`${table.mutation} and ${table.status} in ('running', 'result_ready', 'uncertain')`),
+  check('chk_business_status', sql`${table.status} in ('running', 'result_ready', 'completed', 'failed', 'uncertain')`),
+])
+
+// Durable admission before embedding, planning or external business execution.
+export const ingressRequests = pgTable('IngressRequest', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('userId').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  chatId: uuid('chatId').notNull().references(() => chats.id, { onDelete: 'cascade' }),
+  requestId: uuid('requestId').notNull(),
+  payload: jsonb('payload').notNull().$type<import('../ingress.js').IngressPayload>(),
+  payloadHash: text('payloadHash').notNull(),
+  credential: text('credential'),
+  externalUserId: text('externalUserId').notNull(),
+  teamId: text('teamId').notNull(),
+  status: text('status').notNull().default('queued'),
+  plan: jsonb('plan').$type<import('../capabilities/registry.js').CapabilityPlan>(),
+  result: jsonb('result').$type<Record<string, unknown>>(),
+  error: jsonb('error').$type<{ code: string; message: string }>(),
+  attempts: integer('attempts').notNull().default(0),
+  token: uuid('token'),
+  leaseUntil: timestampTz('leaseUntil'),
+  availableAt: timestampTz('availableAt').notNull().defaultNow(),
+  createdAt: timestampTz('createdAt').notNull().defaultNow(),
+  updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
+}, table => [
+  unique('uq_ingress_request').on(table.userId, table.requestId),
+  uniqueIndex('uq_ingress_active_chat').on(table.chatId).where(sql`${table.status} in ('queued', 'running')`),
+  index('idx_ingress_pending').on(table.availableAt).where(sql`${table.status} in ('queued', 'running')`),
+  check('chk_ingress_status', sql`${table.status} in ('queued', 'running', 'succeeded', 'failed')`),
+])

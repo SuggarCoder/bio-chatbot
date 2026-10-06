@@ -1,3 +1,6 @@
+import { DurableIngress } from './ingress.js'
+import { AdmissionQueue } from './admission.js'
+import { findGenerationStart } from './db.js'
 import fastifyStatic from '@fastify/static'
 import Fastify, {
   type FastifyInstance,
@@ -236,13 +239,14 @@ export async function buildApp(
     objectStore,
     artifactService,
   } = dependencies
+  const businessAdmission = new AdmissionQueue(8, 128)
   const app = Fastify({
     logger: true,
     requestTimeout: 120_000,
     bodyLimit: 64 * 1024,
   })
   const { gpas, registry: capabilities, router: intentRouter, planner: semanticPlanner } =
-    dependencies.capabilityRuntime ?? createCapabilityRuntime(config)
+    dependencies.capabilityRuntime ?? createCapabilityRuntime(config, undefined, redis)
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof GpasUpstreamError) {
@@ -332,15 +336,9 @@ export async function buildApp(
     const redisStatus = redis.isReady ? 'ok' : 'unavailable'
     const worker = redis.isReady && await redis.exists(
       redisKey(config, 'worker:heartbeat'),
-    ) > 0 ? 'ok' : 'unavailable'
-    const tokenizerRequired = config.contextMemoryEnabled ||
-      config.userMemoryEnabled ||
-      config.artifactContextV2Enabled
-    const tokenizer = !tokenizerRequired
-      ? 'disabled'
-      : existsSync(path.resolve(config.qwenTokenizerPath, 'tokenizer.json'))
-        ? 'ok'
-        : 'unavailable'
+    ).catch(() => 0) > 0 ? 'ok' : 'unavailable'
+    const tokenizer = config.qwenTokenizerPath && existsSync(path.resolve(config.qwenTokenizerPath, 'tokenizer.json'))
+      ? 'ok' : 'unavailable'
     const embeddings = intentRouter.ready
         ? 'ok'
         : 'unavailable'
@@ -1033,6 +1031,82 @@ export async function buildApp(
     return reply.code(201).send(started)
   })
 
+  const ingress = new DurableIngress(config, database, async (row, cookie, context) => {
+    const profile = await loadProfile({ headers: { cookie } } as FastifyRequest, config)
+    if (profile.userId !== row.externalUserId || (profile.ownteamId ?? '') !== row.teamId) {
+      throw new AuthenticationError('登录身份或团队已变更，请重新提交。', 403, 'request_identity_changed')
+    }
+    const user = await syncUser(database, profile)
+    if (user.id !== row.userId) throw new AuthenticationError('请求身份不匹配。', 403)
+    const { chatId, requestId: clientMessageId } = row
+    const { content, artifactId, supersedesGenerationId, projectInput } = row.payload
+    await context.check()
+    // Completed business replies must replay even if the planner is unavailable.
+    const replay = await findBusinessExchange(database, user.id, chatId, clientMessageId)
+    if (replay) return replay
+    const existingStart = await findGenerationStart(database, user.id, clientMessageId)
+    if (existingStart && existingStart.userMessage) {
+      const existingGeneration = await getGeneration(database, user.id, existingStart.generationId)
+      if (existingGeneration?.chatId !== chatId) throw new AuthenticationError('请求标识已使用。', 409, 'request_conflict')
+      return { generation: existingGeneration, userMessage: existingStart.userMessage,
+        assistantMessageId: existingStart.assistantMessageId, replacesMessageId: existingStart.replacesMessageId ?? null }
+    }
+    let plan: CapabilityPlan | undefined = row.plan ?? undefined
+    if (!projectInput && !plan) {
+      // Check ownership before sending even a bounded conversation to a model.
+      const page = await getChatMessagesPage(database, user.id, chatId, Number.MAX_SAFE_INTEGER, 6)
+      if (!page) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
+      if (!redis.isReady) throw new AuthenticationError('语义规划服务暂时不可用。', 503, 'redis_unavailable')
+      const planning = planningContext(page.messages)
+      const result = await intentRouter.classify(content, semanticPlanner, planning.history, planning.contextIds)
+      plan = capabilities.plan(result.decision, result.candidates.map(item => item.capability.id))
+      await context.savePlan(plan)
+      app.log.info({
+        capabilityId: plan.capabilityId, intent: plan.intent, mode: plan.mode, confidence: plan.confidence,
+        candidates: result.candidates.map(item => ({ id: item.capability.id, score: item.score })),
+      }, 'Semantic capability planned')
+    }
+    await context.check()
+    if (projectInput || plan?.mode !== 'general') {
+      const result = await businessAdmission.run(() => createBusinessExchange(database, {
+        userId: user.id, chatId, clientMessageId,
+        content: projectInput ? '确认初始化项目' : content,
+        teamId: profile.ownteamId, sourceMessageId: projectInput?.sourceMessageId,
+      }, async (form) => {
+        if (projectInput) return gpas.create(profile, cookie, projectInput, form!)
+        return capabilities.execute(plan!, { profile, cookie })
+      }))
+      return result
+    }
+
+    const started = await generations.create({
+      user,
+      chatId,
+      content,
+      clientMessageId,
+      artifactId: artifactId || undefined,
+      supersedesGenerationId: supersedesGenerationId || undefined,
+    })
+
+    return started
+  }, () => app.log.warn('Durable ingress storage temporarily unavailable'))
+  app.addHook('onReady', async () => { ingress.start() })
+  app.addHook('onClose', async () => { await ingress.stop() })
+  app.get<{ Params: { requestId: string } }>(`${API_BASE}/requests/:requestId`, async (request, reply) => {
+    const user = await authenticate(request)
+    const id = requireUuid(request, reply, request.params.requestId, 'requestId')
+    if (!id) return
+    const ticket = await ingress.get(user.id, id)
+    if (!ticket) return reply.code(404).send(errorBody(request, 'request_not_found', 'Request not found'))
+    return ticket
+  })
+  app.get<{ Params: { chatId: string } }>(`${API_BASE}/conversations/:chatId/requests`, async (request, reply) => {
+    const user = await authenticate(request)
+    const id = requireUuid(request, reply, request.params.chatId, 'chatId')
+    if (!id) return
+    return { requests: await ingress.pending(user.id, id) }
+  })
+
   app.post<{
     Params: { chatId: string }
   }>(
@@ -1101,47 +1175,13 @@ export async function buildApp(
       }
 
       const projectInput = body.projectInput === undefined ? undefined : projectInputSchema.parse(body.projectInput)
-      // Completed business replies must replay even if the planner is unavailable.
-      const replay = await findBusinessExchange(database, user.id, chatId, clientMessageId)
-      if (replay) return reply.code(201).send(replay)
-      let plan: CapabilityPlan | undefined
-      if (!projectInput) {
-        // Check ownership before sending even a bounded conversation to a model.
-        const page = await getChatMessagesPage(database, user.id, chatId, Number.MAX_SAFE_INTEGER, 6)
-        if (!page) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
-        if (!redis.isReady) throw new AuthenticationError('语义规划服务暂时不可用。', 503, 'redis_unavailable')
-        const rate = await consumeGenerationRateLimit(redis, config, user.id, 'capability')
-        if (!rate.allowed) throw new GenerationRejectedError('请求过于频繁，请稍后重试。', 429, 'intent_rate_limited', rate.retryAfterMs)
-        const context = planningContext(page.messages)
-        const result = await intentRouter.classify(content, semanticPlanner, context.history, context.contextIds)
-        plan = capabilities.plan(result.decision, result.candidates.map(item => item.capability.id))
-        request.log.info({
-          capabilityId: plan.capabilityId, intent: plan.intent, mode: plan.mode, confidence: plan.confidence,
-          candidates: result.candidates.map(item => ({ id: item.capability.id, score: item.score })),
-        }, 'Semantic capability planned')
-      }
-      if (projectInput || plan?.mode !== 'general') {
-        const result = await createBusinessExchange(database, {
-          userId: user.id, chatId, clientMessageId,
-          content: projectInput ? '确认初始化项目' : content,
-          teamId: profile.ownteamId, sourceMessageId: projectInput?.sourceMessageId,
-        }, async (form) => {
-          if (projectInput) return gpas.create(profile, request.headers.cookie, projectInput, form!)
-          return capabilities.execute(plan!, { profile, cookie: request.headers.cookie })
-        })
-        return reply.code(201).send(result)
-      }
-
-      const started = await generations.create({
-        user,
-        chatId,
-        content,
-        clientMessageId,
-        artifactId: artifactId || undefined,
-        supersedesGenerationId: supersedesGenerationId || undefined,
+      const rate = await consumeGenerationRateLimit(redis, config, user.id, 'capability')
+      if (!rate.allowed) throw new GenerationRejectedError('请求过于频繁，请稍后重试。', 429, 'intent_rate_limited', rate.retryAfterMs)
+      const ticket = await ingress.submit({ userId: user.id, chatId, requestId: clientMessageId,
+        payload: { content, artifactId: artifactId || undefined, supersedesGenerationId: supersedesGenerationId || undefined, projectInput },
+        cookie: request.headers.cookie ?? '', externalUserId: profile.userId, teamId: profile.ownteamId ?? '',
       })
-
-      return reply.code(201).send(started)
+      return reply.code(202).send(ticket)
     },
   )
 

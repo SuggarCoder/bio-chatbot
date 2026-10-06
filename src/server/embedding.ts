@@ -3,6 +3,7 @@ import path from 'node:path'
 import { pipeline } from '@huggingface/transformers'
 
 import type { AppConfig } from './config.js'
+import { AdmissionQueue } from './admission.js'
 
 type FeatureExtractor = (
   text: string,
@@ -10,6 +11,7 @@ type FeatureExtractor = (
 ) => Promise<unknown>
 
 export class LocalEmbeddingService {
+  private readonly admission = new AdmissionQueue(2, 128)
   private extractor?: FeatureExtractor
   private initializing?: Promise<void>
 
@@ -23,6 +25,7 @@ export class LocalEmbeddingService {
       {
         dtype: 'int8',
         device: 'cpu',
+        session_options: { intraOpNumThreads: 2, interOpNumThreads: 1 },
         local_files_only: true,
       },
     ).then((extractor) => {
@@ -35,6 +38,10 @@ export class LocalEmbeddingService {
   }
 
   async embed(text: string, pooling: 'mean' | 'cls' = 'mean'): Promise<number[]> {
+    return this.admission.run(() => this.extract(text, pooling))
+  }
+
+  private async extract(text: string, pooling: 'mean' | 'cls'): Promise<number[]> {
     await this.initialize()
     const output = await this.extractor!(text, {
       pooling,

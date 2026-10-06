@@ -1,3 +1,5 @@
+import { modelBudgetFetch } from './modelBudget.js'
+import type { RedisClient } from './cache.js'
 import OpenAI from 'openai'
 import {
   and,
@@ -67,8 +69,10 @@ export class MemoryProcessor {
     private readonly config: AppConfig,
     private readonly database: Database,
     private readonly tokenCounter: TokenCounter,
+    redis?: RedisClient,
   ) {
     this.qwen = new OpenAI({
+      ...(redis ? { fetch: modelBudgetFetch(config, redis) } : {}),
       apiKey: config.qwenApiKey,
       baseURL: config.qwenBaseUrl,
       timeout: config.backgroundTimeoutMs,

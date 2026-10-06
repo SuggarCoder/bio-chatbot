@@ -9,6 +9,9 @@ export type RedisClient = RedisClientType
 export function createRedisClient(config: AppConfig): RedisClient {
   const client = createClient({
     url: config.redisUrl,
+    disableOfflineQueue: true,
+    commandsQueueMaxLength: 2_048,
+    commandOptions: { timeout: 2_000 },
     socket: {
       connectTimeout: 5_000,
       reconnectStrategy(retries) {
@@ -21,7 +24,35 @@ export function createRedisClient(config: AppConfig): RedisClient {
     // Health reporting and request-level fallbacks handle Redis failures.
   })
 
-  return client
+  return withRedisDeadlines(client)
+}
+
+/** The installed redis client only times out UNSENT commands. Bound the
+ * response wait as well; the underlying queue is independently capped above.
+ * Commands may have executed before a timeout, so callers must be idempotent. */
+export function withRedisDeadlines<T extends object>(client: T, timeoutMs = 2_000): T {
+  const commands = new Set(['get', 'set', 'del', 'exists', 'expire', 'eval', 'publish', 'xAdd', 'xDel', 'xRange', 'subscribe', 'connect', 'close'])
+  return new Proxy(client, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target)
+      if (typeof value !== 'function') return value
+      if (property === 'duplicate') return (...args: unknown[]) => withRedisDeadlines(value.apply(target, args), timeoutMs)
+      if (!commands.has(String(property))) return value.bind(target)
+      return (...args: unknown[]) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          // Startup can report degraded health while reconnect continues in the
+          // background. Shutdown must not wait forever on an unresponsive peer.
+          if (property === 'close') {
+            const destroy = Reflect.get(target, 'destroy', target)
+            if (typeof destroy === 'function') destroy.call(target)
+          }
+          reject(new Error(`Redis ${String(property)} response deadline exceeded`))
+        }, property === 'connect' ? Math.max(timeoutMs, 5_000) : timeoutMs)
+        Promise.resolve().then(() => value.apply(target, args)).then(resolve, reject)
+          .finally(() => clearTimeout(timer))
+      })
+    },
+  })
 }
 
 export function redisKey(config: AppConfig, key: string): string {

@@ -9,6 +9,8 @@ type StreamListener = {
   cursor: string
   closed: boolean
   polling: boolean
+  userId: string
+  generationId: string
   timer?: NodeJS.Timeout
   heartbeatTimer?: NodeJS.Timeout
 }
@@ -114,10 +116,13 @@ export class GenerationStreamHub {
   private readonly subscriber: RedisClient
   private readonly listeners = new Map<string, Set<StreamListener>>()
   private started = false
+  private readonly terminalChecks = new Map<string, { at: number; result: Promise<StreamEvent | null> }>()
 
   constructor(
     private readonly config: AppConfig,
     private readonly redis: RedisClient,
+    private readonly readTerminal?: (userId: string, generationId: string) => Promise<StreamEvent | null>,
+    private readonly terminalPollMs = 5_000,
   ) {
     this.store = new GenerationStreamStore(config, redis)
     this.subscriber = redis.duplicate()
@@ -152,26 +157,38 @@ export class GenerationStreamHub {
     }
   }
 
-  private deliver(key: string, id: string, event: StoredEvent): void {
-    for (const listener of this.listeners.get(key) ?? []) {
-      if (listener.closed || compareStreamIds(id, listener.cursor) <= 0) continue
-      if ((listener.controller.desiredSize ?? 0) <= -128) {
-        listener.closed = true
-        if (listener.timer) clearInterval(listener.timer)
-        if (listener.heartbeatTimer) clearInterval(listener.heartbeatTimer)
-        listener.controller.close()
-        continue
-      }
-      listener.cursor = id
-      listener.controller.enqueue(encodeSse(id, event))
-      if (terminalTypes.has(event.type)) {
-        listener.closed = true
-        if (listener.timer) clearInterval(listener.timer)
-        if (listener.heartbeatTimer) clearInterval(listener.heartbeatTimer)
-        listener.controller.close()
-      }
-    }
+  private finishListener(key: string, listener: StreamListener): void {
+    listener.closed = true
+    if (listener.timer) clearInterval(listener.timer)
+    if (listener.heartbeatTimer) clearInterval(listener.heartbeatTimer)
+    listener.controller.close()
     this.cleanup(key)
+  }
+
+  private deliver(key: string, listener: StreamListener, id: string, event: StoredEvent): void {
+    if (listener.closed || compareStreamIds(id, listener.cursor) <= 0) return
+    if ((listener.controller.desiredSize ?? 0) <= -128) {
+      this.finishListener(key, listener)
+      return
+    }
+    listener.cursor = id
+    listener.controller.enqueue(encodeSse(id, event))
+    if (terminalTypes.has(event.type)) this.finishListener(key, listener)
+  }
+
+  private async checkTerminal(key: string, listener: StreamListener): Promise<void> {
+    if (!this.readTerminal || listener.closed) return
+    let check = this.terminalChecks.get(key)
+    if (!check || Date.now() - check.at >= this.terminalPollMs) {
+      check = { at: Date.now(), result: this.readTerminal(listener.userId, listener.generationId) }
+      this.terminalChecks.set(key, check)
+    }
+    const terminal = await check.result
+    if (!terminal || listener.closed) return
+    // The full durable message repairs missing/trimmed deltas and terminal events.
+    // Reuse the cursor: a synthetic terminal must not invent a Redis stream ID.
+    listener.controller.enqueue(encodeSse(listener.cursor, terminal))
+    this.finishListener(key, listener)
   }
 
   private cleanup(key: string): void {
@@ -180,7 +197,10 @@ export class GenerationStreamHub {
     for (const listener of listeners) {
       if (listener.closed) listeners.delete(listener)
     }
-    if (listeners.size === 0) this.listeners.delete(key)
+    if (listeners.size === 0) {
+      this.listeners.delete(key)
+      this.terminalChecks.delete(key)
+    }
   }
 
   private async catchUp(key: string, listener: StreamListener): Promise<void> {
@@ -191,12 +211,15 @@ export class GenerationStreamHub {
         const entries = await this.store.readAfter(key, listener.cursor)
         for (const entry of entries) {
           if (listener.closed) break
-          this.deliver(key, entry.id, entry.event)
+          this.deliver(key, listener, entry.id, entry.event)
         }
         if (entries.length < 500) break
       }
+    } catch {
+      // Redis is only a replay cache. Always check the authoritative terminal.
     } finally {
-      listener.polling = false
+      try { await this.checkTerminal(key, listener) }
+      finally { listener.polling = false }
     }
   }
 
@@ -210,7 +233,7 @@ export class GenerationStreamHub {
 
     return new ReadableStream<string>({
       start: (controller) => {
-        listener = { controller, cursor, closed: false, polling: false }
+        listener = { controller, cursor, closed: false, polling: false, userId, generationId }
         const listeners = this.listeners.get(key) ?? new Set<StreamListener>()
         listeners.add(listener)
         this.listeners.set(key, listeners)
@@ -254,6 +277,7 @@ export class GenerationStreamHub {
       }
     }
     this.listeners.clear()
+    this.terminalChecks.clear()
     if (this.subscriber.isOpen) await this.subscriber.close()
     this.started = false
   }

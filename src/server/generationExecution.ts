@@ -1,3 +1,5 @@
+import { abortable } from './admission.js'
+
 export class GenerationCancellationError extends Error {
   constructor() {
     super('Generation stopped')
@@ -35,7 +37,11 @@ export class GenerationExecutionContext {
     this.cancellationPoll = poll
     this.lastCancellationPollAt = now
     try {
-      if (await poll) throw new GenerationCancellationError()
+      if (await abortable(poll, this.signal)) throw new GenerationCancellationError()
+      if (this.signal.aborted) throw new GenerationCancellationError()
+    } catch (error) {
+      if (this.signal.aborted) throw new GenerationCancellationError()
+      throw error
     } finally {
       if (this.cancellationPoll === poll) this.cancellationPoll = undefined
     }

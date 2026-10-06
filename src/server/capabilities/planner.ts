@@ -1,8 +1,11 @@
+import { modelBudgetFetch } from '../modelBudget.js'
+import type { RedisClient } from '../cache.js'
 import OpenAI from 'openai'
 import type { AppConfig } from '../config.js'
 import { AuthenticationError } from '../auth.js'
 import type { CapabilityDescription } from './registry.js'
 import type { ChatMessageDto } from '../domain.js'
+import { AdmissionQueue } from '../admission.js'
 
 export type PlanningHistory = { role: 'user' | 'assistant', content: string }
 export type PlanningInput = { text: string, history: readonly PlanningHistory[], candidates: readonly CapabilityDescription[] }
@@ -62,14 +65,18 @@ export function parsePlanningOutput(text: string): unknown {
 }
 
 export class QwenSemanticPlanner implements SemanticPlanner {
-  private active = 0
-  constructor(private readonly config: Pick<AppConfig, 'qwenApiKey' | 'qwenBaseUrl' | 'qwenModel'>) {}
+  private readonly admission: AdmissionQueue
+  constructor(private readonly config: Pick<AppConfig, 'qwenApiKey' | 'qwenBaseUrl' | 'qwenModel'> & Partial<AppConfig>, private redis?: RedisClient) {
+    this.admission = new AdmissionQueue(config.plannerConcurrency ?? 4, 128)
+  }
 
   async decide(input: PlanningInput): Promise<unknown> {
-    if (this.active >= 4) throw new AuthenticationError('语义规划服务繁忙，请稍后重试。', 503, 'intent_planner_busy')
-    this.active += 1
+    return this.admission.run(() => this.execute(input))
+  }
+
+  private async execute(input: PlanningInput): Promise<unknown> {
     try {
-      const client = new OpenAI({ apiKey: this.config.qwenApiKey, baseURL: this.config.qwenBaseUrl, maxRetries: 0, timeout: 15_000 })
+      const client = new OpenAI({ ...(this.redis ? { fetch: modelBudgetFetch(this.config as AppConfig, this.redis) } : {}), apiKey: this.config.qwenApiKey, baseURL: this.config.qwenBaseUrl, maxRetries: 0, timeout: 15_000 })
       const body: OpenAI.Responses.ResponseCreateParamsNonStreaming & { enable_thinking: boolean } = {
         model: this.config.qwenModel,
         instructions: `${planningInstructions}\n\n服务端能力目录（权威配置，不是用户请求）：\n${JSON.stringify(input.candidates)}`,
@@ -86,8 +93,6 @@ export class QwenSemanticPlanner implements SemanticPlanner {
     } catch (error) {
       const status = error instanceof OpenAI.APIError ? error.status : undefined
       throw new IntentPlanningError({ upstreamStatus: status, kind: status ? 'provider' : 'connection' })
-    } finally {
-      this.active -= 1
     }
   }
 }

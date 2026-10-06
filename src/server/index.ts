@@ -1,3 +1,4 @@
+import { readTerminalEvent } from './terminalEvent.js'
 import { buildApp } from './app.js'
 import { createRedisClient } from './cache.js'
 import { readConfig } from './config.js'
@@ -48,14 +49,9 @@ const finalizer = new GenerationFinalizer(
 )
 const tokenCounter = new QwenTokenCounter(config)
 const embeddingService = new LocalEmbeddingService(config)
-if (
-  config.contextMemoryEnabled ||
-  config.userMemoryEnabled ||
-  config.artifactContextV2Enabled
-) {
-  await tokenCounter.initialize()
-}
-const capabilityRuntime = createCapabilityRuntime(config, embeddingService)
+// Every provider request is token-budgeted, including plain chat.
+await tokenCounter.initialize()
+const capabilityRuntime = createCapabilityRuntime(config, embeddingService, redis)
 await capabilityRuntime.router.initialize()
 const generations = new GenerationService(
   config,
@@ -67,8 +63,9 @@ const generations = new GenerationService(
   tokenCounter,
   embeddingService,
 )
-const streamHub = new GenerationStreamHub(config, redis)
+const streamHub = new GenerationStreamHub(config, redis, (userId, generationId) => readTerminalEvent(database, userId, generationId))
 if (redis.isReady) await streamHub.start()
+else redis.once('ready', () => { void streamHub.start().catch(error => console.error('Stream subscription unavailable; polling remains active', error)) })
 const app = await buildApp({
   capabilityRuntime,
   config,
@@ -99,8 +96,8 @@ async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'Shutting down')
   await generations.shutdown()
 
-  await app.close()
   await streamHub.close()
+  await app.close()
   await runtimes.close()
   await Promise.allSettled([
     closeDatabase(database),

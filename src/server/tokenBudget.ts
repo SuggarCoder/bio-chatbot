@@ -114,3 +114,35 @@ export class CharacterTokenCounter implements TokenCounter {
       messages.reduce((total, message) => total + this.countText(message.content) + 4, 3)
   }
 }
+
+/** Keep the newest user turn; evict oldest turns before invoking the provider. */
+export async function fitInputBudget<T extends BudgetMessage>(
+  counter: TokenCounter,
+  messages: T[],
+  instructions: string,
+  config: Pick<AppConfig, 'qwenMaxInputTokens' | 'qwenContextWindowTokens' | 'qwenMaxOutputTokens' |
+    'chatHistoryTokenBudget' | 'chatSummaryTokenBudget' | 'instructionsTokenBudget'>,
+): Promise<T[]> {
+  await counter.initialize()
+  if (counter.countText(instructions) > config.instructionsTokenBudget) {
+    throw new Error('ASSEMBLED_INSTRUCTIONS_TOKEN_BUDGET_EXCEEDED')
+  }
+  const budget = Math.min(config.qwenMaxInputTokens,
+    config.qwenContextWindowTokens - config.qwenMaxOutputTokens,
+    config.chatHistoryTokenBudget + config.chatSummaryTokenBudget + counter.countText(instructions))
+  const starts = messages.flatMap((message, index) => message.role === 'user' ? [index] : [])
+  if (!starts.length) throw new Error('CONTEXT_REQUIRES_USER_MESSAGE')
+  let low = 0
+  let high = starts.length - 1
+  const fits = (index: number) => counter.countMessages(messages.slice(starts[index]), instructions) <= budget
+  if (!fits(high)) throw new Error('LATEST_MESSAGE_TOKEN_BUDGET_EXCEEDED')
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2)
+    if (fits(mid)) high = mid
+    else low = mid + 1
+  }
+  const selected = messages.slice(starts[low])
+  // Final exact check is mandatory, including when instructions is empty.
+  if (counter.countMessages(selected, instructions) > budget) throw new Error('ASSEMBLED_CONTEXT_TOKEN_BUDGET_EXCEEDED')
+  return selected
+}

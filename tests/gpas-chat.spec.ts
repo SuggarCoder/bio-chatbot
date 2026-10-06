@@ -19,6 +19,7 @@ test('query identity and progress, restore the form, validate and submit project
   await page.route('**/ai-chatbot/api/**', async (route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname
+    if (path.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
     if (path.endsWith('/me')) return route.fulfill({ json: { id: 'test-user', name: '演示用户', realName: '演示用户', externalUserId: 'test-user' } })
     if (path.endsWith('/health')) return route.fulfill({ json: { status: 'ok' } })
     if (path.endsWith('/conversations')) return route.fulfill({ json: { conversations: [summary] } })
@@ -37,7 +38,7 @@ test('query identity and progress, restore the form, validate and submit project
         expect(body.projectInput.sourceMessageId).toBe(messages[3].id)
         if (failNextCreate) {
           failNextCreate = false
-          return route.fulfill({ status: 502, json: { error: { code: 'gpas_unavailable', message: '项目服务暂时不可用，请重试。' } } })
+          return route.fulfill({ status: 202, json: { id: 'failed-ticket', status: 'failed', result: null, error: { code: 'gpas_unavailable', message: '项目服务暂时不可用，请重试。' } } })
         }
         created = true
         content = '项目初始化成功。'
@@ -53,7 +54,7 @@ test('query identity and progress, restore the form, validate and submit project
       const userMessage = message('user', body.content)
       const assistantMessage = message('assistant', content, part)
       messages.push(userMessage, assistantMessage)
-      return route.fulfill({ status: 201, json: { kind: 'business', userMessage, assistantMessage } })
+      return route.fulfill({ status: 202, json: { id: `ticket-${seq}`, status: 'succeeded', result: { kind: 'business', userMessage, assistantMessage }, error: null } })
     }
     return route.fulfill({ status: 404, json: {} })
   })

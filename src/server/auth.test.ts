@@ -13,6 +13,7 @@ function config(
   overrides: Partial<AppConfig> = {},
 ): AppConfig {
   return {
+    requestEncryptionKey: Buffer.alloc(32).toString('base64'), ingressConcurrency: 8, plannerConcurrency: 4, upstreamConcurrency: 8, upstreamRequestsPerMinute: 0, upstreamTokensPerMinute: 0,
     nodeEnv: 'development',
     host: '127.0.0.1',
     port: 8090,

@@ -1,7 +1,7 @@
 import type { GpasPart, ProjectInput } from '../../../server/gpasContracts'
 export type { GpasPart, ProjectInput } from '../../../server/gpasContracts'
 
-const API_BASE = `${import.meta.env.BASE_URL}api`
+const API_BASE = `${import.meta.env?.BASE_URL ?? '/ai-chatbot/'}api`
 
 export type CurrentUserDto = {
   id: string
@@ -222,7 +222,9 @@ export function createChat(title: string) {
   })
 }
 
-export function fetchChat(chatId: string) {
+export async function fetchChat(chatId: string) {
+  const pending = await retryRequest(() => requestJson<{ requests: RequestTicket<unknown>[] }>(`/conversations/${encodeURIComponent(chatId)}/requests`))
+  await Promise.all(pending.requests.map(ticket => waitForRequest(ticket)))
   return requestJson<ChatDetailDto>(
     `/conversations/${encodeURIComponent(chatId)}`,
   )
@@ -276,7 +278,27 @@ export function generationUrl(chatId: string) {
   return `${API_BASE}/conversations/${encodeURIComponent(chatId)}/messages`
 }
 
-export function createGeneration(
+type RequestTicket<T> = { id: string; status: string; result: T | null; error: { code: string; message: string } | null }
+async function retryRequest<T>(operation: () => Promise<T>): Promise<T> {
+  // Includes a lost acceptance response: the same idempotency key is always reused.
+  for (let attempt = 0; ; attempt++) {
+    try { return await operation() } catch (error) {
+      if (attempt >= 30 || (error instanceof ChatApiError && error.status < 500)) throw error
+      await new Promise(resolve => setTimeout(resolve, Math.min(5000, 500 * (attempt + 1))))
+    }
+  }
+}
+async function waitForRequest<T>(ticket: RequestTicket<T>): Promise<T> {
+  const deadline = Date.now() + 30 * 60_000
+  while (ticket.status === 'queued' || ticket.status === 'running') {
+    if (Date.now() > deadline) throw new Error('请求仍在后台排队，请稍后重新打开会话查看结果。')
+    await new Promise(resolve => setTimeout(resolve, 2000))
+    ticket = await retryRequest(() => requestJson<RequestTicket<T>>(`/requests/${encodeURIComponent(ticket.id)}`, { signal: AbortSignal.timeout(15_000) }))
+  }
+  if (ticket.status !== 'succeeded' || !ticket.result) throw new Error(ticket.error?.message ?? '请求处理失败')
+  return ticket.result
+}
+export async function createGeneration(
   chatId: string,
   input: {
     content: string
@@ -286,7 +308,7 @@ export function createGeneration(
     projectInput?: ProjectInput
   },
 ) {
-  return requestJson<{
+  type Result = {
     kind: 'business'
     userMessage: ChatMessageDto
     assistantMessage: ChatMessageDto
@@ -295,10 +317,12 @@ export function createGeneration(
     userMessage: ChatMessageDto
     assistantMessageId: string
     replacesMessageId: string | null
-  }>(
+  }
+  const accepted = await retryRequest(() => requestJson<Result | RequestTicket<Result>>(
     `/conversations/${encodeURIComponent(chatId)}/messages`,
     {
       method: 'POST',
+      signal: AbortSignal.timeout(15_000),
       headers: { 'Idempotency-Key': input.clientMessageId },
       body: JSON.stringify({
         content: input.content,
@@ -307,7 +331,8 @@ export function createGeneration(
         projectInput: input.projectInput,
       }),
     },
-  )
+  ))
+  return 'status' in accepted ? waitForRequest(accepted) : accepted
 }
 
 export function regenerateMessage(

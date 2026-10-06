@@ -182,3 +182,60 @@ test('SSE JSON round trip preserves real newlines in deltas', async () => {
   await reader.cancel()
   await hub.close()
 })
+
+test('independent catch-up cursors never advance another subscriber', async () => {
+  const redis = new FakeRedis()
+  const pending: Array<(entries: Entry[]) => void> = []
+  redis.xRange = async () => new Promise<Entry[]>(resolve => pending.push(resolve))
+  const hub = new GenerationStreamHub(config, redis as unknown as RedisClient)
+  const a = hub.subscribe('u', 'g', '1002-0').getReader()
+  const b = hub.subscribe('u', 'g', '0-0').getReader()
+  const entry = (n: number): Entry => ({ id: `${1000 + n}-0`, message: { event: JSON.stringify(deltaEvent(n, String(n))) } })
+  try {
+    pending[0]([entry(3)])
+    await new Promise(resolve => setImmediate(resolve))
+    pending[1]([entry(1), entry(2), entry(3)])
+    await new Promise(resolve => setImmediate(resolve))
+    assert.match((await a.read()).value ?? '', /^id: 1003-0/)
+    for (const n of [1, 2, 3]) assert.match((await b.read()).value ?? '', new RegExp(`^id: ${1000 + n}-0`))
+  } finally { await a.cancel(); await b.cancel(); await hub.close() }
+})
+
+test('100 SSE subscribers discover a durable terminal with no finish in Redis', async () => {
+  const redis = new FakeRedis()
+  let terminal = false
+  let reads = 0
+  const hub = new GenerationStreamHub(config, redis as unknown as RedisClient, async (_user, generationId) => {
+    reads += 1
+    return terminal ? {
+      type: 'message.finish', generationId, streamId: 's', messageId: 'm', eventId: 0,
+      finishReason: 'error', assistantMessage: null,
+      error: { code: 'generation_interrupted', message: 'Worker interrupted' },
+    } : null
+  }, 1)
+  const readers = Array.from({ length: 100 }, (_, n) => hub.subscribe(`u${n}`, `g${n}`).getReader())
+  try {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    terminal = true
+    // Redis is unavailable too; periodic SQL reconciliation must still work.
+    redis.xRange = async () => { throw new Error('offline') }
+    // Hub timers are deliberately unref'ed; keep this isolated test alive.
+    await new Promise(resolve => setTimeout(resolve, 2_100))
+    const results = await Promise.all(readers.map(reader => reader.read()))
+    assert.equal(results.length, 100)
+    for (const result of results) assert.match(result.value ?? '', /generation_interrupted/)
+    for (const reader of readers) assert.equal((await reader.read()).done, true)
+    assert.ok(reads >= 200)
+  } finally { await hub.close() }
+})
+
+test('terminal database checks are coalesced for multiple tabs of one generation', async () => {
+  const redis = new FakeRedis()
+  let reads = 0
+  const hub = new GenerationStreamHub(config, redis as unknown as RedisClient, async () => { reads += 1; return null })
+  const readers = Array.from({ length: 10 }, () => hub.subscribe('u', 'g').getReader())
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(reads, 1)
+  await Promise.all(readers.map(reader => reader.cancel()))
+  await hub.close()
+})

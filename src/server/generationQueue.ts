@@ -603,6 +603,15 @@ export async function claimGeneration(
       eq(generations.id, item.generationId),
       eq(generations.userId, item.user.id),
       eq(generations.status, 'queued'),
+      // Redis controls mutual exclusion; PostgreSQL controls conversation FIFO.
+      // Include created jobs: their outbox may not have been dispatched yet.
+      sql`not exists (
+        select 1 from "Generation" earlier
+        join "Message" earlier_message on earlier_message.id = earlier."assistantMessageId"
+        where earlier."chatId" = ${item.conversationId}
+          and earlier.status in ('created', 'queued', 'scheduled', 'running', 'cancelling')
+          and earlier_message.seq < (select seq from "Message" where id = ${item.assistantMessageId})
+      )`,
     ))
     .returning({ id: generations.id })
   return rows.length > 0

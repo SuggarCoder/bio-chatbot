@@ -58,18 +58,13 @@ const artifactService = objectStore
 await verifyCoreSchema(database)
 await redis.connect()
 
-const runtimes = new GenerationRuntimeRegistry(config, redis)
+const runtimes = new GenerationRuntimeRegistry(config, redis, database)
 await runtimes.start()
 const finalizer = new GenerationFinalizer(config, database, redis, runtimes)
 const tokenCounter = new QwenTokenCounter(config)
 const embeddingService = new LocalEmbeddingService(config)
-if (
-  config.contextMemoryEnabled ||
-  config.userMemoryEnabled ||
-  config.artifactContextV2Enabled
-) {
-  await tokenCounter.initialize()
-}
+// Every provider request is token-budgeted, including plain chat.
+await tokenCounter.initialize()
 if (config.artifactContextV2Enabled) {
   await embeddingService.initialize()
 }
@@ -85,7 +80,7 @@ const generations = new GenerationService(
 )
 const queue = new GenerationQueue(config, redis)
 const backgroundQueue = new BackgroundQueue(config, redis)
-const memoryProcessor = new MemoryProcessor(config, database, tokenCounter)
+const memoryProcessor = new MemoryProcessor(config, database, tokenCounter, redis)
 const artifactIndexer = objectStore
   ? new ArtifactIndexer(database, objectStore, embeddingService)
   : null
@@ -218,12 +213,15 @@ async function runGeneration(
   item: GenerationWorkItem,
   lease: QueueLease,
 ): Promise<void> {
+  let renewing = false
   const renewTimer = setInterval(() => {
+    if (renewing) return
+    renewing = true
     void queue.renew(lease).then((renewed) => {
       if (!renewed) runtimes.abort(item.generationId, 'lease_lost')
     }).catch(() => {
       runtimes.abort(item.generationId, 'lease_lost')
-    })
+    }).finally(() => { renewing = false })
   }, config.generationLockRenewIntervalMs)
   renewTimer.unref()
   const timeout = setTimeout(() => {
@@ -261,10 +259,11 @@ async function scheduleOne(): Promise<boolean> {
   )
   if (!acquired) {
     await queue.defer(job, item.user.schedulingWeight)
-    return false
+    return true
   }
   if (!await claimGeneration(database, item, queue.workerId)) {
     await queue.release(lease)
+    await queue.defer(job, item.user.schedulingWeight)
     return true
   }
   const running = runGeneration(item, lease)
@@ -355,10 +354,10 @@ async function mainLoop(): Promise<void> {
       nextReconcileAt = Date.now() + reconcileIntervalMs
     }
 
-    let scheduled = false
-    do {
-      scheduled = await scheduleOne()
-    } while (scheduled && active.size < config.globalGenerationConcurrency)
+    // Keep looking past blocked tenants, but bound scans when all are blocked.
+    for (let scanned = 0; scanned < 16 && active.size < config.globalGenerationConcurrency; scanned += 1) {
+      if (!await scheduleOne()) break
+    }
 
     let backgroundScheduled = false
     do {

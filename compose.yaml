@@ -8,6 +8,11 @@ services:
     container_name: ai-chatbot
 
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     init: true
 
@@ -21,6 +26,12 @@ services:
       PG_POOL_MAX: "${API_PG_POOL_MAX:-4}"
       REDIS_URL: "${REDIS_URL}"
       REDIS_KEY_PREFIX: "${REDIS_KEY_PREFIX:-gpas2cb:prod:v3:}"
+      REQUEST_ENCRYPTION_KEY: "${REQUEST_ENCRYPTION_KEY:?set a stable base64 32-byte key}"
+      INGRESS_CONCURRENCY: "${INGRESS_CONCURRENCY:-8}"
+      PLANNER_CONCURRENCY: "${PLANNER_CONCURRENCY:-4}"
+      UPSTREAM_CONCURRENCY: "${UPSTREAM_CONCURRENCY:-8}"
+      UPSTREAM_TOKENS_PER_MINUTE: "${UPSTREAM_TOKENS_PER_MINUTE:-0}"
+      UPSTREAM_REQUESTS_PER_MINUTE: "${UPSTREAM_REQUESTS_PER_MINUTE:-0}"
       QWEN_API_KEY: "${QWEN_API_KEY}"
       QWEN_BASE_URL: "${QWEN_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
       QWEN_MODEL: "${QWEN_MODEL:-qwen3.6-flash}"
@@ -54,7 +65,7 @@ services:
       GENERATION_TIMEOUT_MS: "${GENERATION_TIMEOUT_MS:-180000}"
       GENERATION_LOCK_LEASE_MS: "${GENERATION_LOCK_LEASE_MS:-30000}"
       GENERATION_LOCK_RENEW_INTERVAL_MS: "${GENERATION_LOCK_RENEW_INTERVAL_MS:-10000}"
-      GENERATION_CANCEL_POLL_INTERVAL_MS: "${GENERATION_CANCEL_POLL_INTERVAL_MS:-300}"
+      GENERATION_CANCEL_POLL_INTERVAL_MS: "${GENERATION_CANCEL_POLL_INTERVAL_MS:-5000}"
       GENERATION_SNAPSHOT_INTERVAL_MS: "${GENERATION_SNAPSHOT_INTERVAL_MS:-1000}"
       OBJECT_STORAGE_ENABLED: "${OBJECT_STORAGE_ENABLED:-false}"
       ARTIFACT_PROTOCOL_ENABLED: "${ARTIFACT_PROTOCOL_ENABLED:-false}"
@@ -103,6 +114,11 @@ services:
     image: ai-chatbot:latest
     container_name: ai-chatbot-worker
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     init: true
     command: ["node", "dist/server/worker.js"]
     environment:
@@ -114,6 +130,12 @@ services:
       PG_POOL_MAX: "${WORKER_PG_POOL_MAX:-4}"
       REDIS_URL: "${REDIS_URL}"
       REDIS_KEY_PREFIX: "${REDIS_KEY_PREFIX:-gpas2cb:prod:v3:}"
+      REQUEST_ENCRYPTION_KEY: "${REQUEST_ENCRYPTION_KEY:?set a stable base64 32-byte key}"
+      INGRESS_CONCURRENCY: "${INGRESS_CONCURRENCY:-8}"
+      PLANNER_CONCURRENCY: "${PLANNER_CONCURRENCY:-4}"
+      UPSTREAM_CONCURRENCY: "${UPSTREAM_CONCURRENCY:-8}"
+      UPSTREAM_TOKENS_PER_MINUTE: "${UPSTREAM_TOKENS_PER_MINUTE:-0}"
+      UPSTREAM_REQUESTS_PER_MINUTE: "${UPSTREAM_REQUESTS_PER_MINUTE:-0}"
       QWEN_API_KEY: "${QWEN_API_KEY}"
       QWEN_BASE_URL: "${QWEN_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
       QWEN_MODEL: "${QWEN_MODEL:-qwen3.6-flash}"
@@ -147,7 +169,7 @@ services:
       GENERATION_TIMEOUT_MS: "${GENERATION_TIMEOUT_MS:-180000}"
       GENERATION_LOCK_LEASE_MS: "${GENERATION_LOCK_LEASE_MS:-30000}"
       GENERATION_LOCK_RENEW_INTERVAL_MS: "${GENERATION_LOCK_RENEW_INTERVAL_MS:-10000}"
-      GENERATION_CANCEL_POLL_INTERVAL_MS: "${GENERATION_CANCEL_POLL_INTERVAL_MS:-300}"
+      GENERATION_CANCEL_POLL_INTERVAL_MS: "${GENERATION_CANCEL_POLL_INTERVAL_MS:-5000}"
       GENERATION_SNAPSHOT_INTERVAL_MS: "${GENERATION_SNAPSHOT_INTERVAL_MS:-1000}"
       OBJECT_STORAGE_ENABLED: "${OBJECT_STORAGE_ENABLED:-false}"
       ARTIFACT_PROTOCOL_ENABLED: "${ARTIFACT_PROTOCOL_ENABLED:-false}"

@@ -44,6 +44,7 @@ import {
   settleExecutionSteps,
 } from './executionTrace.js'
 import {
+  businessOperations,
   chats,
   chatSummaries,
   artifacts,
@@ -954,50 +955,120 @@ export async function createBusinessExchange(
   },
   execute: (form?: NonNullable<GpasPart['form']>) => Promise<BusinessReply>,
 ) {
-  return database.transaction(async (transaction) => {
-    // Serialize project creation across tabs, users in one team, and API replicas.
-    if (input.sourceMessageId && input.teamId) {
-      await transaction.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`gpas-project:${input.teamId}`}, 0))`)
-    }
-    const [chat] = await transaction.select().from(chats).where(and(
-      eq(chats.id, input.chatId), eq(chats.userId, input.userId), isNull(chats.deletedAt),
-    )).for('update')
-    if (!chat) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
-    const [prior] = await transaction.select().from(messages).where(and(
-      eq(messages.chatId, input.chatId), eq(messages.clientMessageId, input.clientMessageId),
-    ))
-    if (prior) {
-      const [answer] = await transaction.select().from(messages).where(and(
-        eq(messages.chatId, input.chatId), eq(messages.seq, prior.seq + 1n),
+  // Same-key callers join the operation without retaining a pool connection.
+  const deadline = Date.now() + 30_000
+  while (true) {
+    const replay = await findBusinessExchange(database, input.userId, input.chatId, input.clientMessageId)
+    if (replay) return replay
+    const token = crypto.randomUUID()
+    const reserved = await database.transaction(async transaction => {
+      const [chat] = await transaction.select().from(chats).where(and(
+        eq(chats.id, input.chatId), eq(chats.userId, input.userId), isNull(chats.deletedAt),
+      )).for('update')
+      if (!chat) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
+      const [priorMessage] = await transaction.select({ id: messages.id }).from(messages).where(and(
+        eq(messages.chatId, input.chatId), eq(messages.clientMessageId, input.clientMessageId),
       ))
-      if (!answer || !answer.parts.some((part) => part.type === 'gpas')) throw new AuthenticationError('请求标识已使用。', 409, 'request_conflict')
-      return { kind: 'business' as const, userMessage: mapMessage(prior), assistantMessage: mapMessage(answer) }
-    }
-    const [active] = await transaction.select({ id: generations.id }).from(generations).where(and(
-      eq(generations.chatId, input.chatId), inArray(generations.status, ['created', 'queued', 'scheduled', 'running', 'cancelling']),
-    )).limit(1)
-    if (active) throw new AuthenticationError('请等待当前回复完成后再查询项目。', 409, 'generation_active')
-    let form: GpasPart['form']
-    if (input.sourceMessageId) {
-      const [source] = await transaction.select().from(messages).where(and(
-        eq(messages.id, input.sourceMessageId), eq(messages.chatId, input.chatId), eq(messages.role, 'assistant'),
+      if (priorMessage) return { kind: 'replay' as const }
+      const [prior] = await transaction.select().from(businessOperations).where(and(
+        eq(businessOperations.chatId, input.chatId), eq(businessOperations.requestId, input.clientMessageId),
+      )).for('update')
+      if (prior?.status === 'result_ready' && prior.result) {
+        return { kind: 'ready' as const, operation: prior, result: prior.result }
+      }
+      if (prior?.status === 'uncertain' || (prior?.mutation && prior.status === 'running' && prior.expiresAt <= new Date())) {
+        throw new AuthenticationError('项目操作结果待核对，请查询项目状态并联系管理员核对，不能自动重复提交。', 409, 'business_outcome_unknown')
+      }
+      if (prior?.status === 'running' && prior.expiresAt > new Date()) return { kind: 'wait' as const }
+      const [active] = await transaction.select({ id: generations.id }).from(generations).where(and(
+        eq(generations.chatId, input.chatId), inArray(generations.status, ['created', 'queued', 'scheduled', 'running', 'cancelling']),
+      )).limit(1)
+      if (active) throw new AuthenticationError('请等待当前回复完成。', 409, 'generation_active')
+      // An abandoned read can be retried; an ambiguous mutation must never be replayed automatically.
+      await transaction.update(businessOperations).set({ status: 'failed', updatedAt: new Date() }).where(and(
+        eq(businessOperations.chatId, input.chatId), eq(businessOperations.mutation, false),
+        eq(businessOperations.status, 'running'), lte(businessOperations.expiresAt, sql`now()`),
       ))
-      const parsed = gpasPartSchema.safeParse(source?.parts.find((part) => part.type === 'gpas'))
-      form = parsed.success ? parsed.data.form : undefined
-      if (!form) throw new AuthenticationError('项目表单不存在，请重新查询任务进度。', 400, 'project_form_missing')
+      let form: GpasPart['form']
+      if (input.sourceMessageId) {
+        if (!input.teamId) throw new AuthenticationError('团队不存在。', 422, 'team_missing')
+        const [source] = await transaction.select().from(messages).where(and(
+          eq(messages.id, input.sourceMessageId), eq(messages.chatId, input.chatId), eq(messages.role, 'assistant'),
+        ))
+        const parsed = gpasPartSchema.safeParse(source?.parts.find(part => part.type === 'gpas'))
+        form = parsed.success ? parsed.data.form : undefined
+        if (!form) throw new AuthenticationError('项目表单不存在，请重新查询任务进度。', 400, 'project_form_missing')
+      }
+      if (prior) await transaction.delete(businessOperations).where(eq(businessOperations.id, prior.id))
+      const [operation] = await transaction.insert(businessOperations).values({
+        userId: input.userId, chatId: input.chatId, requestId: input.clientMessageId,
+        mutation: Boolean(input.sourceMessageId), teamId: input.sourceMessageId ? input.teamId : null,
+        token, expiresAt: new Date(Date.now() + 60_000),
+      }).onConflictDoNothing().returning()
+      if (!operation) throw new AuthenticationError('此会话或团队已有业务操作，请使用原请求标识稍后重试；结果不明的创建须先核对。', 409, 'business_operation_active')
+      return { kind: 'execute' as const, operation, form }
+    })
+    if (reserved.kind === 'replay') {
+      const replay = await findBusinessExchange(database, input.userId, input.chatId, input.clientMessageId)
+      if (replay) return replay
+      throw new AuthenticationError('请求标识已使用。', 409, 'request_conflict')
     }
-    const result = await execute(form)
-    const [question, answer] = await transaction.insert(messages).values([
-      { userId: input.userId, chatId: input.chatId, seq: chat.nextMessageSeq, role: 'user',
-        content: input.content, parts: [{ type: 'text', order: 0, text: input.content }], clientMessageId: input.clientMessageId },
-      { userId: input.userId, chatId: input.chatId, seq: chat.nextMessageSeq + 1n, role: 'assistant',
-        content: result.content, parts: [{ type: 'text', order: 0, text: result.content }, result.part] },
-    ]).returning()
-    await transaction.update(chats).set({
-      nextMessageSeq: chat.nextMessageSeq + 2n, contextRevision: sql`${chats.contextRevision} + 1`, updatedAt: new Date(),
-    }).where(eq(chats.id, chat.id))
-    return { kind: 'business' as const, userMessage: mapMessage(question), assistantMessage: mapMessage(answer) }
-  })
+    if (reserved.kind === 'wait') {
+      if (Date.now() >= deadline) throw new AuthenticationError('此会话或团队已有业务操作，请使用原请求标识稍后重试；结果不明的创建须先核对。', 409, 'business_operation_active')
+      await new Promise(resolve => setTimeout(resolve, 100))
+      continue
+    }
+    const operation = reserved.operation
+    let result: BusinessReply
+    if (reserved.kind === 'ready') result = reserved.result
+    else {
+      try {
+        result = await execute(reserved.form)
+        // Persist the upstream result before message materialization. A retry can
+        // finish the commit without repeating the external side effect.
+        const saved = await database.update(businessOperations).set({
+          status: 'result_ready', result, updatedAt: new Date(),
+        }).where(and(eq(businessOperations.id, operation.id), eq(businessOperations.token, operation.token),
+          eq(businessOperations.status, 'running'))).returning({ id: businessOperations.id })
+        if (!saved.length) throw new Error('Business operation reservation lost')
+      } catch (error) {
+        await database.update(businessOperations).set({
+          status: operation.mutation ? 'uncertain' : 'failed', updatedAt: new Date(),
+        }).where(and(eq(businessOperations.id, operation.id), eq(businessOperations.token, operation.token),
+          eq(businessOperations.status, 'running'))).catch(() => undefined)
+        throw error
+      }
+    }
+    return database.transaction(async transaction => {
+      const [chat] = await transaction.select().from(chats).where(and(
+        eq(chats.id, input.chatId), eq(chats.userId, input.userId), isNull(chats.deletedAt),
+      )).for('update')
+      if (!chat) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
+      const [op] = await transaction.select().from(businessOperations).where(eq(businessOperations.id, operation.id)).for('update')
+      if (op?.status === 'completed') {
+        const [question] = await transaction.select().from(messages).where(and(
+          eq(messages.chatId, input.chatId), eq(messages.clientMessageId, input.clientMessageId),
+        )).limit(1)
+        const [answer] = await transaction.select().from(messages).where(and(
+          eq(messages.chatId, input.chatId), eq(messages.seq, (question?.seq ?? -2n) + 1n),
+        )).limit(1)
+        if (!question || !answer) throw new Error('Business result missing')
+        return { kind: 'business' as const, userMessage: mapMessage(question), assistantMessage: mapMessage(answer) }
+      }
+      if (!op || op.token !== operation.token || op.status !== 'result_ready') throw new Error('Business operation reservation lost')
+      const [question, answer] = await transaction.insert(messages).values([
+        { userId: input.userId, chatId: input.chatId, seq: chat.nextMessageSeq, role: 'user',
+          content: input.content, parts: [{ type: 'text', order: 0, text: input.content }], clientMessageId: input.clientMessageId },
+        { userId: input.userId, chatId: input.chatId, seq: chat.nextMessageSeq + 1n, role: 'assistant',
+          content: result.content, parts: [{ type: 'text', order: 0, text: result.content }, result.part] },
+      ]).returning()
+      await transaction.update(chats).set({ nextMessageSeq: chat.nextMessageSeq + 2n,
+        contextRevision: sql`${chats.contextRevision} + 1`, updatedAt: new Date(),
+      }).where(eq(chats.id, chat.id))
+      await transaction.update(businessOperations).set({ status: 'completed', updatedAt: new Date() }).where(eq(businessOperations.id, op.id))
+      return { kind: 'business' as const, userMessage: mapMessage(question), assistantMessage: mapMessage(answer) }
+    })
+  }
 }
 
 export async function createGenerationStart(
@@ -1057,6 +1128,12 @@ export async function createGenerationStart(
     if (!sequence) {
       throw new Error('CHAT_NOT_FOUND')
     }
+    const [business] = await transaction.select({ id: businessOperations.id }).from(businessOperations).where(and(
+      eq(businessOperations.chatId, input.chatId),
+      or(eq(businessOperations.status, 'result_ready'), and(eq(businessOperations.status, 'running'),
+        or(eq(businessOperations.mutation, true), sql`${businessOperations.expiresAt} > now()`))),
+    )).limit(1)
+    if (business) throw new AuthenticationError('此会话或团队已有业务操作，请使用原请求标识稍后重试；结果不明的创建须先核对。', 409, 'business_operation_active')
 
     const [messageRow] = await transaction
       .insert(messages)
@@ -1283,6 +1360,12 @@ export async function createRegenerationStart(
         seq: sql`${chats.nextMessageSeq} - 1`.mapWith(chats.nextMessageSeq),
       })
     if (!sequence) throw new Error('CHAT_NOT_FOUND')
+    const [business] = await transaction.select({ id: businessOperations.id }).from(businessOperations).where(and(
+      eq(businessOperations.chatId, input.chatId),
+      or(eq(businessOperations.status, 'result_ready'), and(eq(businessOperations.status, 'running'),
+        or(eq(businessOperations.mutation, true), sql`${businessOperations.expiresAt} > now()`))),
+    )).limit(1)
+    if (business) throw new AuthenticationError('此会话或团队已有业务操作，请使用原请求标识稍后重试；结果不明的创建须先核对。', 409, 'business_operation_active')
     const assistantMessageId = crypto.randomUUID()
     const summary = input.contextMemoryEnabled
       ? await latestSummarySnapshot(

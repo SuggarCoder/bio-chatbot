@@ -1,6 +1,6 @@
 # 生产部署清单
 
-本版本采用 `Fastify API × 1 + Scheduler/Worker × 1`。PostgreSQL 和 Redis 均按总连接数约 10 的环境设计。
+本版本默认采用 `Fastify API × 1 + Scheduler/Worker × 1`，连接池保持保守预算，可按真实数据库容量独立调整；模型并发数不等于数据库连接数。
 
 ## 破坏性数据库基线变更
 
@@ -39,7 +39,7 @@ MODEL_GENERATION_CONCURRENCY=4
 GENERATION_TIMEOUT_MS=180000
 GENERATION_LOCK_LEASE_MS=30000
 GENERATION_LOCK_RENEW_INTERVAL_MS=10000
-GENERATION_CANCEL_POLL_INTERVAL_MS=300
+GENERATION_CANCEL_POLL_INTERVAL_MS=5000
 GENERATION_SNAPSHOT_INTERVAL_MS=1000
 
 QWEN_API_KEY=<secret>
@@ -113,7 +113,7 @@ docker compose --env-file /secure/path/bio-chatbot.env up -d app worker
 2. 在宿主机 `/home/lu/models` 放入与线上 Qwen 模型完全匹配的 tokenizer（至少包含 `tokenizer.json`、`tokenizer_config.json` 和 `chat_template`），并确认 BGE INT8 ONNX 文件存在且校验和正确。
 3. 同时部署 API 与 Worker，先保持四个新功能开关为 `false`。
 4. 依次开启 `CONTEXT_MEMORY_ENABLED`、`USER_MEMORY_ENABLED`、`ARTIFACT_CONTEXT_V2_ENABLED`，最后开启 `ARTIFACT_PATCH_ENABLED`。
-5. 每一步都检查 `/ai-chatbot/api/health`：`embeddings` 和 `worker` 必须为 `ok`；启用上下文功能后 `tokenizer` 也必须为 `ok`。BGE 现在还用于 API 的业务语义识别，因此即使所有上下文开关关闭，模型也必须可用。运行时只从宿主机只读挂载读取模型，禁止联网回退。
+5. 每一步都检查 `/ai-chatbot/api/health`：`embeddings` 和 `worker` 必须为 `ok`；普通聊天也强制做 token 预算检查，`tokenizer` 必须为 `ok`。BGE 现在还用于 API 的业务语义识别，因此即使所有上下文开关关闭，模型也必须可用。运行时只从宿主机只读挂载读取模型，禁止联网回退。
 
 ## 反向代理
 
@@ -140,3 +140,115 @@ docker compose --env-file /secure/path/bio-chatbot.env up -d app worker
 10. 分享链接只有已认证用户可读取，撤销立即生效，读取产生审计记录。
 
 若启用 Artifact Protocol，还必须按 [object-storage.md](object-storage.md) 完成私有 S3/SeaweedFS 校验。
+
+
+## 100 人同时在线：并发安全修订
+
+本次目标是 **100 个已认证用户在线，突发提交可排队**，不是 100 路 LLM 同时生成或指定首字延迟 SLA。
+
+### 必须执行的升级步骤
+
+1. 备份数据库，执行 `npm run db:migrate`，新增 `0003_concurrency_safety` / `BusinessOperation`；不要重新执行 `db:init`。
+2. API 和 Worker 都必须准备匹配模型的本地 Qwen tokenizer。普通聊天即使关闭记忆功能，也会加载 tokenizer 并裁剪旧上下文；最新用户消息本身超限会明确失败，不会被静默丢弃。
+3. 更新 API 与 Worker。Compose 为这两个容器设置了每个 3 × 10 MiB 的日志上限；这不代替数据库、Redis、镜像缓存的容量管理。
+
+### 当前边界
+
+- 每个 API 进程的语义规划执行并发默认 4（`PLANNER_CONCURRENCY` 可调）、内部 FIFO 等待上限 128；本地 embedding 并发 2、等待上限 128，ONNX intra-op 线程 2 / inter-op 线程 1。
+- 业务 HTTP 执行并发 8、等待上限 128。等待者不持有数据库连接。队列满返回 429，而不是在第 5 个规划请求时返回 503。
+- 消息入口先提交 `IngressRequest` 再返回 HTTP 202；规划和业务执行由 API 内的持久任务处理器执行（默认 8 路）。内存队列仅作为执行资源限流，不再是用户请求唯一的保存位置。API 重启后恢复排队请求，租约过期后恢复执行中请求。
+- Generation 的全局 / Provider / Model 并发仍分别默认 4；新增 `UPSTREAM_CONCURRENCY`（默认 8）是所有 API/Worker 规划、生成和后台模型请求共享的 Redis 上限。另可配置共享 RPM 和保守 TPM 预留。
+- 数据库池仍为 API 4 + Worker 4。短事务设置 statement timeout 5 秒、lock timeout 2 秒；是否扩大连接池必须结合真实 SQL 延迟与数据库总连接预算评估。
+- Redis 离线快速失败，底层命令队列上限 2048，命令响应等待 2 秒。已发送命令超时并不表示未执行，所以队列/状态操作仍必须幂等。流事件最多积压 256 个，终态写流最多额外等待 2.5 秒，数据库最终内容是兜底。
+- 每个活跃 Generation 的 SSE 数据库终态检查按约 5 秒节流，同一进程内多个标签页合并检查；正常依赖条件下通常下一轮轮询即可收尾。无需为每条 SSE 创建数据库或 Redis 专属连接。
+
+### 业务创建的未知结果处理
+
+`BusinessOperation` 使用短事务登记、事务外调用 GPAS、先保存返回结果、再短事务落消息：
+
+- `running`：业务调用进行中；同一请求可等待/重试，同一会话禁止并发生成。
+- `result_ready`：已保存上游结果。使用原请求标识重试可补齐消息，不再次调用 GPAS。
+- `uncertain`：创建可能已在 GPAS 成功，但本地没有可靠结果。相同团队的新创建被拒绝，不能自动重放副作用。
+- 进程崩溃留下的超时 `running` 写操作同样按未知结果处理，不因租约到期就再次创建。
+
+管理员必须先在 GPAS 核对实际项目状态；必要时从新会话查询，以避开旧会话未完成的预留。只有确认旧调用已停止且结果明确后，才可通过受控运维流程把对应记录补为带结果的 `result_ready`（随后重试原请求），或确认未执行后标为 `failed`。不要盲目删除未知操作或重试创建。上游若提供正式幂等键，应进一步贯通该键，不能把本地事务误当成跨服务事务。
+
+### 可重复的本地验证
+
+```bash
+npm test
+npm run check
+npm run db:check
+npm run build
+
+# 可选：只安装到忽略目录，不加入生产依赖；不连接生产数据库
+npm install --prefix node_modules/.review-db --ignore-scripts --no-audit --no-fund @electric-sql/pglite@0.3.16
+npm run test:concurrency-sql
+```
+
+SQL 测试使用 PostgreSQL/WASM + pgvector 执行真实迁移和查询，验证业务幂等、事务外 HTTP、未知结果保护、崩溃后结果恢复及 FIFO。HTTP 测试使用 100 个不同身份，分别同时提交 100 条普通聊天和 100 条业务查询，要求全部 202 且最终处理成功；模型、认证、GPAS 与 Redis 使用测试替身。这不是真实网络/磁盘/连接池性能压测。
+
+另有 `src/server/concurrency.integration.test.ts`，配置专用 `TEST_DATABASE_URL` 后可运行真实 PostgreSQL 连接池测试。应预先迁移测试库，并用 `node --import tsx --test --test-concurrency=1 src/server/concurrency.integration.test.ts` 运行；禁止指向生产数据库。
+
+### 生产容量验收仍需完成
+
+在目标 8 核 16G 环境做 100 用户混合工作负载的持续测试，记录入口成功率、排队时间、首字时间、SQL/连接等待、事件循环延迟、RSS、Redis 内存与实际模型 RPM/TPM/429。分别覆盖慢 GPAS、Redis 中断、Worker 重启、SSE 重连、多标签页和长上下文。
+
+40G 本地盘必须监控数据库/WAL、Redis 持久化、Docker 镜像与构建缓存。100T NFS 不等于无限 IOPS，也不会自动承接这些本地数据。持久历史数据仍需按业务保留政策归档；不能在不了解业务要求时自动删除。
+
+结论：修订消除了本次审查的七项直接缺陷，并通过本地 100 用户接纳路径验证；是否达到生产延迟/吞吐目标，必须以真实依赖和磁盘布局的压测为准。
+
+
+## 持久入口与扩容配置（2026-10）
+
+### 上线顺序与密钥
+
+1. 备份数据库，执行 `npm run db:migrate`，包含 `0003_concurrency_safety` 和 `0004_durable_ingress`；**已有本项目基线的数据库不要重建**。
+2. 生成一次 `REQUEST_ENCRYPTION_KEY` 并放入部署环境文件，所有 API 实例保持相同，重启不得重新生成：
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+   ```
+3. 先部署迁移，再同步部署 API/Worker/前端（发送消息接口现在返回 202 请求凭据，而非等待规划后的 201）。
+4. 密钥独立于数据库备份保管。Cookie 使用 AES-256-GCM 加密，绑定用户和请求 ID，任务终结时清除密文；恢复执行前重新验证登录身份和团队。登录失效会令任务失败，绝不绕过认证。轮换前排空待处理请求，不能直接替换仍有待处理请求使用的密钥。
+
+### 接纳与恢复语义
+
+- 仅在数据库提交成功后返回 202。此前网络断开不能宣称已接纳；前端对临时错误用**同一 Idempotency-Key**重试。相同 key 不同正文/会话返回 409。
+- 规划结果先持久化再执行业务；已生成 Generation、已完成业务回复可重放。进行中的任务每 20 秒续租，90 秒未续租可被其他处理器接管；旧处理器不能覆盖新处理器结果。
+- 每用户最多 10 个待处理入口请求，每会话同时 1 个。已创建的 Generation 仍按原来的持久队列/FIFO 调度。
+- 临时错误最多执行 8 次并退避，排队请求超过 24 小时失败；无效登录、未知业务副作用等不盲目重试。它是至少一次任务调度 + 幂等提交，不是外部 GPAS 副作用的 exactly-once 保证。
+- `GET /ai-chatbot/api/requests/:id` 只允许所属用户查看状态；重载会话通过 `/conversations/:chatId/requests` 找回待处理任务。浏览器等待最长 30 分钟，超时不取消后台任务。
+- 请求记录保留用于去重，增加数据库容量占用；需纳入历史归档策略。不要直接删除幂等记录再重放旧 key。数据库持久化/WAL 和备份可靠性仍是前提。
+
+### 并发与数据库连接分开配置
+
+默认值不直接放大到 100，防止未知上游配额/SQL 容量下过载：
+
+```env
+API_PG_POOL_MAX=4
+WORKER_PG_POOL_MAX=4
+INGRESS_CONCURRENCY=8
+PLANNER_CONCURRENCY=4
+UPSTREAM_CONCURRENCY=8
+UPSTREAM_REQUESTS_PER_MINUTE=0
+UPSTREAM_TOKENS_PER_MINUTE=0
+GENERATION_CANCEL_POLL_INTERVAL_MS=5000
+```
+
+- `PG_POOL_MAX` 已解除固定 4 限制，单进程接受 1–64。必须保证 `API实例数×API池 + Worker实例数×Worker池 + 运维预留 + 其他应用连接` 不超过数据库实际预算。若数据库仍只有 10 个连接，不要照抄 8+8。
+- 取消优先 Redis Pub/Sub；Worker 默认每 5 秒对全部本地活动任务做一次批量数据库查询，正常流式增量不再每路每 300ms 查询。关键副作用/提交边界仍单独检查数据库。Redis 失效时取消可延迟约一个轮询周期加 SQL 时间。
+- 所有模型调用共享并发/RPM/TPM 门控，流式调用占用许可直到流结束。不同进程必须连接同一 Redis 并使用相同 prefix 和限额；共享同一上游账号的其他应用也必须计入预算，否则此项目无法替它们限流。Redis 不可用时不绕过限制。
+- RPM/TPM 为 0 表示该项不限制，不表示上游无限额。TPM 是滚动 60 秒的**请求 JSON UTF-8 字节数 + 输出 token 上限 + 1024**保守预留，不是精确计费；可能明显低于实际可用吞吐，且上游窗口规则未必相同，应留余量。单请求预留超过限额会被拒绝，不应只增加并发解决。
+- 若要测试 **100 路生成同时执行**，三项 `*_GENERATION_CONCURRENCY` 都必须允许 100；上游共享限额还需给规划/后台留空间，例如至少 `100 + 规划预留 + 后台预留`。这只是配置关系，不代表本机或上游已能承载。单用户/会话原有并发约束仍有效。
+
+### 分级验证
+
+```bash
+npm run test:concurrency-stages
+# 可选：专用测试 Redis，运行真实 Lua 预算用例（不要指向生产）
+TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
+```
+
+本地 stages 使用 16/32/64/100 个独立用户，分别接纳聊天及业务请求，并检查重启前落盘、过期租约接管、旧持有者隔离、已保存规划复用与凭证清除。使用 PGlite 和假上游，不会访问生产；前提是按前文安装本地 PGlite 测试依赖。
+
+生产验收必须由可访问目标主机的人员执行同样的 16→32→64→100 阶梯，并覆盖持续生成而非仅排队接纳。观察 RSS/事件循环延迟、数据库连接等待和慢查询、NFS 延迟、模型 RPM/TPM/429、排队与首字 P95、任务恢复和取消延迟；任一阶段恶化停止升级。8 核/16G/40G/100T 的容量描述本身不能证明性能 SLA。

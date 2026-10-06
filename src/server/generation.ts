@@ -1,3 +1,4 @@
+import { modelBudgetFetch } from './modelBudget.js'
 import OpenAI from 'openai'
 
 import {
@@ -77,7 +78,7 @@ import {
   type GenerationWorkItem,
 } from './generationQueue.js'
 import { GenerationStreamStore } from './streamStore.js'
-import { QwenTokenCounter, type TokenCounter } from './tokenBudget.js'
+import { fitInputBudget, QwenTokenCounter, type TokenCounter } from './tokenBudget.js'
 
 type StartGenerationInput = {
   user: CurrentUser
@@ -217,6 +218,7 @@ export class GenerationService {
     embeddings?: LocalEmbeddingService,
   ) {
     this.qwen = new OpenAI({
+      fetch: modelBudgetFetch(config, redis),
       apiKey: config.qwenApiKey,
       baseURL: config.qwenBaseUrl,
       timeout: 5 * 60 * 1000,
@@ -518,16 +520,10 @@ export class GenerationService {
     const execution = runtime.execution ?? new GenerationExecutionContext(
       runtime.generationId,
       runtime.controller.signal,
-      async () => (
-        await this.queue.cancellationRequested(
-          runtime.userId,
-          runtime.generationId,
-        ) || await isGenerationCancellationRequested(
-          this.database,
-          runtime.generationId,
-        )
-      ),
-      this.config.generationCancelPollIntervalMs,
+      () => isGenerationCancellationRequested(this.database, runtime.generationId),
+      // Pub/Sub + one batched worker poll cover streaming. Individual DB checks
+      // only at forced side-effect/finalization boundaries (and the first call).
+      Number.POSITIVE_INFINITY,
     )
     runtime.execution = execution
 
@@ -560,7 +556,12 @@ export class GenerationService {
     const acceptedArtifactIds = new Set<string>()
     let preparedArtifacts: PreparedArtifactVersion[] = []
     let eventWrites = Promise.resolve()
+    let pendingEventWrites = 0
+    let streamWritesStopped = false
+    let snapshotPending = false
     const snapshotTimer = setInterval(() => {
+      if (snapshotPending) return
+      snapshotPending = true
       void this.queue.saveSnapshot(
         input.user.id,
         start.generationId,
@@ -571,13 +572,16 @@ export class GenerationService {
           executionSteps: runtime.executionSteps,
           updatedAt: new Date().toISOString(),
         },
-      ).catch(() => undefined)
+      ).catch(() => undefined).finally(() => { snapshotPending = false })
     }, this.config.generationSnapshotIntervalMs)
     snapshotTimer.unref()
 
     const emit = (
       event: StreamEventPayload,
     ) => {
+      // Bound buffered deltas when Redis is slow; final content is durable.
+      if (pendingEventWrites >= 256 && event.type !== 'message.finish') return
+      pendingEventWrites += 1
       eventId += 1
       const streamEvent = {
         ...event,
@@ -586,11 +590,12 @@ export class GenerationService {
         messageId,
         eventId,
       } as StreamEvent
-      eventWrites = eventWrites.then(() => this.streams.append(
+      eventWrites = eventWrites.then(() => streamWritesStopped ? undefined : this.streams.append(
         input.user.id,
         start.generationId,
         streamEvent,
       )).then(() => undefined).catch(() => undefined)
+        .finally(() => { pendingEventWrites -= 1 })
     }
 
     const updateStep = (step: MessageExecutionStep) => {
@@ -1004,30 +1009,9 @@ export class GenerationService {
         artifactEnabled ? artifactInstructions : '',
         userMemoryInstructions,
       ].filter(Boolean).join('\n\n')
-      if (combinedInstructions && (
-        this.config.contextMemoryEnabled ||
-        this.config.userMemoryEnabled ||
-        this.config.artifactContextV2Enabled
-      )) {
-        await this.tokenCounter.initialize()
-        if (
-          this.tokenCounter.countText(combinedInstructions) >
-            this.config.instructionsTokenBudget
-        ) {
-          throw new Error('ASSEMBLED_INSTRUCTIONS_TOKEN_BUDGET_EXCEEDED')
-        }
-        const inputTokens = this.tokenCounter.countMessages(
-          context.messages,
-          combinedInstructions,
-        )
-        if (
-          inputTokens > this.config.qwenMaxInputTokens ||
-          inputTokens + this.config.qwenMaxOutputTokens >
-            this.config.qwenContextWindowTokens
-        ) {
-          throw new Error('ASSEMBLED_CONTEXT_TOKEN_BUDGET_EXCEEDED')
-        }
-      }
+      context = { ...context, messages: await fitInputBudget(
+        this.tokenCounter, context.messages, combinedInstructions, this.config,
+      ) }
       const patchMode = Boolean(
         this.config.artifactPatchEnabled &&
         selectedArtifact &&
@@ -1398,7 +1382,14 @@ export class GenerationService {
           : 'stop',
         assistantMessage: result.assistantMessage,
       })
-      await eventWrites
+      await Promise.race([
+        eventWrites,
+        new Promise<void>(resolve => {
+          const timer = setTimeout(() => { streamWritesStopped = true; resolve() }, 2_500)
+          timer.unref()
+          void eventWrites.finally(() => clearTimeout(timer))
+        }),
+      ])
     } catch (error) {
       const timedOut = runtime.abortReason === 'timeout'
       const interrupted = ['lease_lost', 'shutdown'].includes(
@@ -1481,7 +1472,14 @@ export class GenerationService {
               message: result.generation.errorMessage ?? message,
         },
       })
-      await eventWrites
+      await Promise.race([
+        eventWrites,
+        new Promise<void>(resolve => {
+          const timer = setTimeout(() => { streamWritesStopped = true; resolve() }, 2_500)
+          timer.unref()
+          void eventWrites.finally(() => clearTimeout(timer))
+        }),
+      ])
     } finally {
       clearInterval(snapshotTimer)
       this.runtimes.delete(start.generationId)

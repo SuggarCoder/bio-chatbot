@@ -6,6 +6,12 @@ export type AppConfig = {
   port: number
   serveClient: boolean
   databaseUrl: string
+  requestEncryptionKey: string
+  ingressConcurrency: number
+  plannerConcurrency: number
+  upstreamConcurrency: number
+  upstreamTokensPerMinute: number
+  upstreamRequestsPerMinute: number
   pgPoolMax: number
   redisUrl: string
   redisPrefix: string
@@ -226,8 +232,10 @@ export function readConfig(): AppConfig {
 
   const environmentName = nodeEnv === 'production' ? 'prod' : 'dev'
   const pgPoolMax = positiveInteger('PG_POOL_MAX', 4)
-  if (pgPoolMax > 4) {
-    throw new Error('PG_POOL_MAX must not exceed 4 in the 10-connection deployment')
+  if (pgPoolMax > 64) throw new Error('PG_POOL_MAX must not exceed 64 per process')
+  const requestEncryptionKey = required('REQUEST_ENCRYPTION_KEY')
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(requestEncryptionKey) || Buffer.from(requestEncryptionKey, 'base64').length !== 32) {
+    throw new Error('REQUEST_ENCRYPTION_KEY must be a base64-encoded 32-byte key')
   }
   const generationLockLeaseMs = positiveInteger(
     'GENERATION_LOCK_LEASE_MS',
@@ -306,6 +314,12 @@ export function readConfig(): AppConfig {
     serveClient: process.env.SERVE_CLIENT !== 'false',
     databaseUrl: required('DATABASE_URL'),
     pgPoolMax,
+    requestEncryptionKey,
+    ingressConcurrency: positiveInteger('INGRESS_CONCURRENCY', 8),
+    plannerConcurrency: positiveInteger('PLANNER_CONCURRENCY', 4),
+    upstreamConcurrency: positiveInteger('UPSTREAM_CONCURRENCY', 8),
+    upstreamTokensPerMinute: positiveInteger('UPSTREAM_TOKENS_PER_MINUTE', 0, true),
+    upstreamRequestsPerMinute: positiveInteger('UPSTREAM_REQUESTS_PER_MINUTE', 0, true),
     redisUrl: required('REDIS_URL'),
     redisPrefix:
       process.env.REDIS_KEY_PREFIX?.trim() ||
@@ -367,7 +381,7 @@ export function readConfig(): AppConfig {
     generationLockRenewIntervalMs,
     generationCancelPollIntervalMs: positiveInteger(
       'GENERATION_CANCEL_POLL_INTERVAL_MS',
-      300,
+      5_000,
     ),
     generationSnapshotIntervalMs: positiveInteger(
       'GENERATION_SNAPSHOT_INTERVAL_MS',

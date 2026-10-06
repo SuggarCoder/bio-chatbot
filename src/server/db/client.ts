@@ -6,6 +6,8 @@ import pg from 'pg'
 
 import * as schema from './schema.js'
 import {
+  businessOperations,
+  ingressRequests,
   chats,
   chatSummaries,
   backgroundJobs,
@@ -30,6 +32,9 @@ export function createDatabase(databaseUrl: string, maxConnections = 4): Databas
     max: maxConnections,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
+    statement_timeout: 5_000,
+    lock_timeout: 2_000,
+    idle_in_transaction_session_timeout: 10_000,
   })
 
   return drizzle(pool, { schema })
@@ -57,6 +62,8 @@ export async function checkDatabase(database: Database): Promise<void> {
 export async function verifyCoreSchema(database: Database): Promise<void> {
   try {
     await Promise.all([
+      database.select({ id: ingressRequests.id }).from(ingressRequests).limit(1),
+      database.select({ id: businessOperations.id }).from(businessOperations).limit(1),
       database.select({ id: users.id }).from(users).limit(1),
       database.select({ id: chats.id }).from(chats).limit(1),
       database.select({ id: messages.id }).from(messages).limit(1),
