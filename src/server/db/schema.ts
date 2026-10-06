@@ -71,7 +71,7 @@ export const users = pgTable(
     schedulingWeight: integer('schedulingWeight').notNull().default(1),
     generationConcurrencyLimit: integer('generationConcurrencyLimit')
       .notNull()
-      .default(1),
+      .default(3),
     maxQueuedGenerations: integer('maxQueuedGenerations')
       .notNull()
       .default(5),

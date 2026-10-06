@@ -253,13 +253,16 @@ async function scheduleOne(): Promise<boolean> {
     workerId: queue.workerId,
     token: `${item.generationId}:${queue.workerId}:${crypto.randomUUID()}`,
   }
-  const acquired = await queue.acquire(
+  const acquired = await queue.tryAcquire(
     lease,
     item.user.generationConcurrencyLimit,
   )
-  if (!acquired) {
+  if (acquired !== 'acquired') {
     await queue.defer(job, item.user.schedulingWeight)
-    return true
+    // Shared slots are full for everyone: stop scanning until a generation
+    // finishes (wakeScheduler) or the next periodic tick, instead of popping,
+    // loading and deferring up to 16 jobs per tick against PostgreSQL.
+    return acquired === 'tenant_blocked'
   }
   if (!await claimGeneration(database, item, queue.workerId)) {
     await queue.release(lease)

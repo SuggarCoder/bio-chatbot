@@ -16,26 +16,43 @@ npm run db:init
 
 | 进程 | PostgreSQL max | Redis 连接 |
 |---|---:|---:|
-| API | 4 | 2 |
-| Worker | 4 | 2 |
-| 迁移/运维预留 | 2 | 6 |
+| API | 20 | 2 |
+| Worker | 16 | 2 |
+| 迁移/运维预留 | 4 | 6 |
 
-不要在增加实例数量时继续为每个实例配置 `PG_POOL_MAX=4`，必须重新计算数据库总连接预算。
+合计约 40，PostgreSQL `max_connections` 至少 50（默认 100 足够）。增加实例时必须重新计算数据库总连接预算。
+
+## 容量设计（100 用户 × 每人 3 路 chat，上游 LLM 100 并发，8 核 16G）
+
+峰值需求 300 路生成，上游只有 100 并发，因此**超出部分排队，不是全部同时执行**。上游 100 个许可静态切分：
+
+| 类别 | 限额 | 闸门 |
+|---|---:|---|
+| 生成 | 80 | `GLOBAL/PROVIDER/MODEL_GENERATION_CONCURRENCY`（Redis 全局租约） |
+| 规划（每条消息一次） | 16 | `PLANNER_CONCURRENCY`（每 API 进程） |
+| 后台（摘要/记忆） | 2 | `BACKGROUND_CONCURRENCY`（每 Worker 进程） |
+| 余量 | 2 | — |
+
+- 三类闸门都在共享上游许可之前生效，只要 `生成 + 规划×API数 + 后台×Worker数 ≤ UPSTREAM_CONCURRENCY`，任何调用都不会在共享许可上等待或 60 秒超时；违反时启动日志会告警。增加 API/Worker 实例时要按实例数重算。
+- 每用户并发来自 `"User"."generationConcurrencyLimit"`，默认 3（迁移 `0005` 把仍为旧默认 1 的用户改为 3）。同一会话仍严格串行；用户第 4 路起排队（`maxQueuedGenerations` 默认 5）。
+- 排队按用户加权轮转，单用户占满 3 路不会饿死其他用户。全局满载时 Worker 停止扫描，等有生成结束再调度。
+- 身份解析按会话 Cookie 哈希在 Redis 缓存 `AUTH_CACHE_TTL_SECONDS`（默认 30 秒），避免每次轮询/SSE 都请求 GPAS 并 UPSERT `User`。代价：GPAS 侧注销后最多 30 秒内仍可访问；持久 ingress 执行前仍会用保存的 Cookie 重新校验身份。
+- 本地合成压测（mock LLM 15 秒/条、真实 PG/Redis/API/Worker/SSE、2 秒轮询、300 条在 1 秒内提交）：300/300 正确完成，生成峰值 80、单用户峰值 3、上游合计峰值 84、无 429；首 token P50 28.8 秒 / P95 56.7 秒，全部完成 73.8 秒（理论下限 300×15/80≈56 秒）。真实输出越长，排队越久：排队时间约 `(排在前面的条数 / 80) × 平均生成时长`。
 
 ## 关键环境变量
 
 ```env
 NODE_ENV=production
 DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<database>
-API_PG_POOL_MAX=4
-WORKER_PG_POOL_MAX=4
+API_PG_POOL_MAX=20
+WORKER_PG_POOL_MAX=16
 
 REDIS_URL=redis://<host>:6379/0
 REDIS_KEY_PREFIX=gpas2cb:prod:v3:
 
-GLOBAL_GENERATION_CONCURRENCY=4
-PROVIDER_GENERATION_CONCURRENCY=4
-MODEL_GENERATION_CONCURRENCY=4
+GLOBAL_GENERATION_CONCURRENCY=80
+PROVIDER_GENERATION_CONCURRENCY=80
+MODEL_GENERATION_CONCURRENCY=80
 GENERATION_TIMEOUT_MS=180000
 GENERATION_LOCK_LEASE_MS=30000
 GENERATION_LOCK_RENEW_INTERVAL_MS=10000
@@ -59,7 +76,7 @@ USER_MEMORY_ENABLED=false
 
 BACKGROUND_MODEL=qwen3.6-flash
 BACKGROUND_MAX_OUTPUT_TOKENS=4096
-BACKGROUND_CONCURRENCY=1
+BACKGROUND_CONCURRENCY=2
 BACKGROUND_TIMEOUT_MS=120000
 
 ARTIFACT_CONTEXT_V2_ENABLED=false
@@ -154,11 +171,11 @@ docker compose --env-file /secure/path/bio-chatbot.env up -d app worker
 
 ### 当前边界
 
-- 每个 API 进程的语义规划执行并发默认 4（`PLANNER_CONCURRENCY` 可调）、内部 FIFO 等待上限 128；本地 embedding 并发 2、等待上限 128，ONNX intra-op 线程 2 / inter-op 线程 1。
+- 每个 API 进程的语义规划执行并发默认 16（`PLANNER_CONCURRENCY` 可调）、内部 FIFO 等待上限 128；本地 embedding 并发 2、等待上限 128，ONNX intra-op 线程 2 / inter-op 线程 1。
 - 业务 HTTP 执行并发 8、等待上限 128。等待者不持有数据库连接。队列满返回 429，而不是在第 5 个规划请求时返回 503。
-- 消息入口先提交 `IngressRequest` 再返回 HTTP 202；规划和业务执行由 API 内的持久任务处理器执行（默认 8 路）。内存队列仅作为执行资源限流，不再是用户请求唯一的保存位置。API 重启后恢复排队请求，租约过期后恢复执行中请求。
-- Generation 的全局 / Provider / Model 并发仍分别默认 4；新增 `UPSTREAM_CONCURRENCY`（默认 8）是所有 API/Worker 规划、生成和后台模型请求共享的 Redis 上限。另可配置共享 RPM 和保守 TPM 预留。
-- 数据库池仍为 API 4 + Worker 4。短事务设置 statement timeout 5 秒、lock timeout 2 秒；是否扩大连接池必须结合真实 SQL 延迟与数据库总连接预算评估。
+- 消息入口先提交 `IngressRequest` 再返回 HTTP 202；规划和业务执行由 API 内的持久任务处理器执行（默认 24 路）。内存队列仅作为执行资源限流，不再是用户请求唯一的保存位置。API 重启后恢复排队请求，租约过期后恢复执行中请求。
+- Generation 的全局 / Provider / Model 并发默认 80；`UPSTREAM_CONCURRENCY`（默认 100）是所有 API/Worker 规划、生成和后台模型请求共享的 Redis 上限。另可配置共享 RPM 和保守 TPM 预留。
+- 数据库池默认 API 20 + Worker 16（Compose）。短事务设置 statement timeout 5 秒、lock timeout 2 秒；是否扩大连接池必须结合真实 SQL 延迟与数据库总连接预算评估。
 - Redis 离线快速失败，底层命令队列上限 2048，命令响应等待 2 秒。已发送命令超时并不表示未执行，所以队列/状态操作仍必须幂等。流事件最多积压 256 个，终态写流最多额外等待 2.5 秒，数据库最终内容是兜底。
 - 每个活跃 Generation 的 SSE 数据库终态检查按约 5 秒节流，同一进程内多个标签页合并检查；正常依赖条件下通常下一轮轮询即可收尾。无需为每条 SSE 创建数据库或 Redis 专属连接。
 
@@ -222,14 +239,15 @@ SQL 测试使用 PostgreSQL/WASM + pgvector 执行真实迁移和查询，验证
 
 ### 并发与数据库连接分开配置
 
-默认值不直接放大到 100，防止未知上游配额/SQL 容量下过载：
+默认值按上面的容量设计（上游 100 并发）设定；上游配额不同时按比例调整：
 
 ```env
-API_PG_POOL_MAX=4
-WORKER_PG_POOL_MAX=4
-INGRESS_CONCURRENCY=8
-PLANNER_CONCURRENCY=4
-UPSTREAM_CONCURRENCY=8
+API_PG_POOL_MAX=20
+WORKER_PG_POOL_MAX=16
+AUTH_CACHE_TTL_SECONDS=30
+INGRESS_CONCURRENCY=24
+PLANNER_CONCURRENCY=16
+UPSTREAM_CONCURRENCY=100
 UPSTREAM_REQUESTS_PER_MINUTE=0
 UPSTREAM_TOKENS_PER_MINUTE=0
 GENERATION_CANCEL_POLL_INTERVAL_MS=5000
@@ -239,7 +257,9 @@ GENERATION_CANCEL_POLL_INTERVAL_MS=5000
 - 取消优先 Redis Pub/Sub；Worker 默认每 5 秒对全部本地活动任务做一次批量数据库查询，正常流式增量不再每路每 300ms 查询。关键副作用/提交边界仍单独检查数据库。Redis 失效时取消可延迟约一个轮询周期加 SQL 时间。
 - 所有模型调用共享并发/RPM/TPM 门控，流式调用占用许可直到流结束。不同进程必须连接同一 Redis 并使用相同 prefix 和限额；共享同一上游账号的其他应用也必须计入预算，否则此项目无法替它们限流。Redis 不可用时不绕过限制。
 - RPM/TPM 为 0 表示该项不限制，不表示上游无限额。TPM 是滚动 60 秒的**请求 JSON UTF-8 字节数 + 输出 token 上限 + 1024**保守预留，不是精确计费；可能明显低于实际可用吞吐，且上游窗口规则未必相同，应留余量。单请求预留超过限额会被拒绝，不应只增加并发解决。
-- 若要测试 **100 路生成同时执行**，三项 `*_GENERATION_CONCURRENCY` 都必须允许 100；上游共享限额还需给规划/后台留空间，例如至少 `100 + 规划预留 + 后台预留`。这只是配置关系，不代表本机或上游已能承载。单用户/会话原有并发约束仍有效。
+- 三项 `*_GENERATION_CONCURRENCY` 必须一起调整，只调一项无效；生成 + 规划 + 后台之和不得超过 `UPSTREAM_CONCURRENCY`。
+- 服务器上已有的 `.env` 若显式写了旧值（如 `GLOBAL_GENERATION_CONCURRENCY=4`、`UPSTREAM_CONCURRENCY=8`），会覆盖 Compose 新默认值，上线前要删除或改掉。
+- 复现容量压测：`LOAD_SCENARIOS=target LOAD_CHATS_PER_USER=3 LOAD_POLL_MS=2000 LOAD_RAMP_MS=1000 LOAD_GENERATION_MS=15000 LOAD_API_PG_POOL=20 LOAD_WORKER_PG_POOL=16 node --import tsx tests/chat-load.mjs --run`（只创建并删除自己的临时库和 Redis 前缀）。
 
 ### 分级验证
 

@@ -272,6 +272,45 @@ test('GenerationQueue Lua scripts preserve queue and lease invariants', {
       })
     }
 
+    await context.test('allows three chats per user and reports why acquisition failed', async () => {
+      const prefix = `${rootPrefix}per-user-three:`
+      const config = queueConfig(prefix, {
+        globalGenerationConcurrency: 4,
+        providerGenerationConcurrency: 4,
+        modelGenerationConcurrency: 4,
+      })
+      const queue = new GenerationQueue(config, client)
+      const leases = ['a', 'b', 'c', 'd'].map((suffix) => queueLease(queue, {
+        userId: 'user-three',
+        generationId: `generation-${suffix}`,
+        conversationId: `conversation-${suffix}`,
+      }))
+
+      for (const lease of leases.slice(0, 3)) {
+        assert.equal(await queue.tryAcquire(lease, 3), 'acquired')
+      }
+      // The fourth chat of the same user waits; other users are unaffected.
+      assert.equal(await queue.tryAcquire(leases[3], 3), 'tenant_blocked')
+      const sameConversation = queueLease(queue, {
+        userId: 'user-other',
+        generationId: 'generation-e',
+        conversationId: 'conversation-e',
+      })
+      assert.equal(await queue.tryAcquire(sameConversation, 3), 'acquired')
+      // Shared capacity (4) is now full for everyone.
+      const blocked = queueLease(queue, {
+        userId: 'user-third',
+        generationId: 'generation-f',
+        conversationId: 'conversation-f',
+      })
+      assert.equal(await queue.tryAcquire(blocked, 3), 'capacity_full')
+
+      for (const lease of [...leases.slice(0, 3), sameConversation]) {
+        await queue.release(lease)
+      }
+      assert.equal(await redis.zCard(`${prefix}running:global`), 0)
+    })
+
     await context.test('stale release cannot remove a newer lease', async () => {
       const prefix = `${rootPrefix}lease-ownership:`
       const config = queueConfig(prefix, { generationLockLeaseMs: 200 })

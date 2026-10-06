@@ -313,6 +313,7 @@ export async function buildApp(
       request,
       config,
       database,
+      redis,
     )
     return user
   }

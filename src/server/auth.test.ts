@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import type { FastifyRequest } from 'fastify'
 
@@ -6,7 +7,11 @@ import {
   AuthenticationError,
   loadProfile,
   mockUserInfoResponse,
+  resolveCurrentUser,
 } from './auth.js'
+import type { RedisClient } from './cache.js'
+import type { Database } from './db.js'
+import type { CurrentUser } from './domain.js'
 import type { AppConfig } from './config.js'
 
 function config(
@@ -20,6 +25,7 @@ function config(
     serveClient: false,
     databaseUrl: 'postgres://test',
     pgPoolMax: 4,
+    authCacheTtlSeconds: 0,
     redisUrl: 'redis://test',
     redisPrefix: 'gpas2cb:test:v3:',
     qwenApiKey: 'test',
@@ -169,6 +175,63 @@ test('upstream identity rejects an inactive GPAS2 account', async () => {
         error.statusCode === 403 &&
         error.code === 'account_inactive',
     )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+function memoryRedis(ready = true) {
+  const values = new Map<string, string>()
+  const redis = {
+    isReady: ready,
+    async get(key: string) { return values.get(key) ?? null },
+    async set(key: string, value: string) { values.set(key, value); return 'OK' },
+  } as unknown as RedisClient
+  return { redis, values }
+}
+
+const cachedUser = {
+  id: '00000000-0000-4000-8000-000000000001',
+  externalUserId: 'cached-user',
+  generationConcurrencyLimit: 3,
+} as CurrentUser
+
+test('cached identity skips the GPAS round trip and the user upsert', async () => {
+  const { redis, values } = memoryRedis()
+  const upstream = config({
+    gpas2AuthMode: 'upstream',
+    gpas2UserInfoUrl: 'https://gpas.example.test/api/gpas2/v1/user/info',
+    authCacheTtlSeconds: 30,
+  })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('GPAS must not be called on a cache hit') }
+  try {
+    const key = `gpas2cb:test:v3:auth:user:${createHash('sha256')
+      .update('gpas_session=a').digest('hex')}`
+    values.set(key, JSON.stringify(cachedUser))
+    const user = await resolveCurrentUser(
+      request('gpas_session=a'),
+      upstream,
+      {} as Database,
+      redis,
+    )
+    assert.deepEqual(user, cachedUser)
+
+    // A different session must never reuse another cookie's cached identity.
+    await assert.rejects(resolveCurrentUser(
+      request('gpas_session=b'),
+      upstream,
+      {} as Database,
+      redis,
+    ), (error: unknown) => error instanceof AuthenticationError && error.statusCode === 502)
+
+    // Redis unavailable: fall back to the authoritative path instead of the cache.
+    await assert.rejects(resolveCurrentUser(
+      request('gpas_session=a'),
+      upstream,
+      {} as Database,
+      memoryRedis(false).redis,
+    ), (error: unknown) => error instanceof AuthenticationError && error.statusCode === 502)
   } finally {
     globalThis.fetch = originalFetch
   }

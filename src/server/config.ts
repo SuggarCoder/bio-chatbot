@@ -13,6 +13,7 @@ export type AppConfig = {
   upstreamTokensPerMinute: number
   upstreamRequestsPerMinute: number
   pgPoolMax: number
+  authCacheTtlSeconds: number
   redisUrl: string
   redisPrefix: string
   qwenApiKey: string
@@ -203,6 +204,23 @@ export function readObjectStorageConfig(
   }
 }
 
+/**
+ * Generation leases and planner/background gates run before the shared upstream
+ * permit. If their sum fits UPSTREAM_CONCURRENCY no caller ever waits (or times
+ * out) on the shared permit. Instance counts are unknown here, so only warn.
+ */
+function warnUpstreamPartition(): void {
+  const generation = positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 80)
+  const planner = positiveInteger('PLANNER_CONCURRENCY', 16)
+  const background = positiveInteger('BACKGROUND_CONCURRENCY', 2)
+  const upstream = positiveInteger('UPSTREAM_CONCURRENCY', 100)
+  if (generation + planner + background > upstream) {
+    console.warn(
+      `GLOBAL_GENERATION_CONCURRENCY (${generation}) + PLANNER_CONCURRENCY (${planner}) + BACKGROUND_CONCURRENCY (${background}) exceeds UPSTREAM_CONCURRENCY (${upstream}); model calls may wait on the shared permit and fail after 60 seconds`,
+    )
+  }
+}
+
 export function readConfig(): AppConfig {
   const nodeEnv = process.env.NODE_ENV?.trim() || 'development'
   const defaultAuthMode = nodeEnv === 'production' ? 'upstream' : 'mock'
@@ -307,6 +325,8 @@ export function readConfig(): AppConfig {
     )
   }
 
+  warnUpstreamPartition()
+
   return {
     nodeEnv,
     host: process.env.HOST?.trim() || '0.0.0.0',
@@ -314,10 +334,11 @@ export function readConfig(): AppConfig {
     serveClient: process.env.SERVE_CLIENT !== 'false',
     databaseUrl: required('DATABASE_URL'),
     pgPoolMax,
+    authCacheTtlSeconds: positiveInteger('AUTH_CACHE_TTL_SECONDS', 30, true),
     requestEncryptionKey,
-    ingressConcurrency: positiveInteger('INGRESS_CONCURRENCY', 8),
-    plannerConcurrency: positiveInteger('PLANNER_CONCURRENCY', 4),
-    upstreamConcurrency: positiveInteger('UPSTREAM_CONCURRENCY', 8),
+    ingressConcurrency: positiveInteger('INGRESS_CONCURRENCY', 24),
+    plannerConcurrency: positiveInteger('PLANNER_CONCURRENCY', 16),
+    upstreamConcurrency: positiveInteger('UPSTREAM_CONCURRENCY', 100),
     upstreamTokensPerMinute: positiveInteger('UPSTREAM_TOKENS_PER_MINUTE', 0, true),
     upstreamRequestsPerMinute: positiveInteger('UPSTREAM_REQUESTS_PER_MINUTE', 0, true),
     redisUrl: required('REDIS_URL'),
@@ -365,7 +386,7 @@ export function readConfig(): AppConfig {
       'BACKGROUND_MAX_OUTPUT_TOKENS',
       4_096,
     ),
-    backgroundConcurrency: positiveInteger('BACKGROUND_CONCURRENCY', 1),
+    backgroundConcurrency: positiveInteger('BACKGROUND_CONCURRENCY', 2),
     backgroundTimeoutMs: positiveInteger('BACKGROUND_TIMEOUT_MS', 120_000),
     embeddingModelPath:
       process.env.EMBEDDING_MODEL_PATH?.trim() || 'models/bge-small-zh-v1.5',
@@ -373,9 +394,9 @@ export function readConfig(): AppConfig {
     gpas2UserInfoUrl,
     chatRateLimitPerMinute: positiveInteger('CHAT_RATE_LIMIT_PER_MINUTE', 10),
     monthlyTokenLimit: positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true),
-    globalGenerationConcurrency: positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 4),
-    providerGenerationConcurrency: positiveInteger('PROVIDER_GENERATION_CONCURRENCY', 4),
-    modelGenerationConcurrency: positiveInteger('MODEL_GENERATION_CONCURRENCY', 4),
+    globalGenerationConcurrency: positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 80),
+    providerGenerationConcurrency: positiveInteger('PROVIDER_GENERATION_CONCURRENCY', 80),
+    modelGenerationConcurrency: positiveInteger('MODEL_GENERATION_CONCURRENCY', 80),
     generationTimeoutMs: positiveInteger('GENERATION_TIMEOUT_MS', 180_000),
     generationLockLeaseMs,
     generationLockRenewIntervalMs,

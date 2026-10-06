@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import type { FastifyRequest } from 'fastify'
 
+import { redisKey, type RedisClient } from './cache.js'
 import type { AppConfig } from './config.js'
 import { syncUser, type Database } from './db.js'
 import type { CurrentUser, Gpas2UserInfo } from './domain.js'
@@ -127,11 +129,46 @@ export async function loadProfile(
   return payload.data
 }
 
+function authCacheKey(request: FastifyRequest, config: AppConfig): string {
+  const credential = config.gpas2AuthMode === 'mock'
+    ? 'mock'
+    : request.headers.cookie ?? ''
+  const digest = createHash('sha256').update(credential).digest('hex')
+  return redisKey(config, `auth:user:${digest}`)
+}
+
+/**
+ * Ticket polling, SSE and page loads all authenticate. Without a cache each one
+ * costs a GPAS round trip plus a `User` UPSERT, which dominated the PostgreSQL
+ * pool under load. A revoked session may stay valid for AUTH_CACHE_TTL_SECONDS;
+ * durable ingress always re-validates the stored cookie before side effects.
+ */
 export async function resolveCurrentUser(
   request: FastifyRequest,
   config: AppConfig,
   database: Database,
+  redis?: RedisClient,
 ): Promise<CurrentUser> {
+  const ttl = config.authCacheTtlSeconds ?? 0
+  const cacheable = Boolean(redis?.isReady) && ttl > 0 &&
+    (config.gpas2AuthMode === 'mock' || Boolean(request.headers.cookie))
+  const key = cacheable ? authCacheKey(request, config) : ''
+
+  if (cacheable) {
+    const cached = await redis!.get(key).catch(() => null)
+    if (cached) {
+      try {
+        return JSON.parse(cached) as CurrentUser
+      } catch {
+        // Fall through to the authoritative path.
+      }
+    }
+  }
+
   const profile = await loadProfile(request, config)
-  return syncUser(database, profile)
+  const user = await syncUser(database, profile)
+  if (cacheable) {
+    await redis!.set(key, JSON.stringify(user), { EX: ttl }).catch(() => undefined)
+  }
+  return user
 }

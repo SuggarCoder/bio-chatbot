@@ -130,6 +130,7 @@ end
 return {userId, generationId, attempt, tostring(nextScore)}
 `
 
+// 1 = acquired, 0 = shared capacity full, 2 = only this tenant/conversation is blocked.
 const acquireScript = `
 local now = tonumber(ARGV[1])
 local expires = tonumber(ARGV[2])
@@ -139,11 +140,11 @@ end
 if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return 0 end
 if redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[5]) then return 0 end
-if redis.call('ZCARD', KEYS[4]) >= tonumber(ARGV[6]) then return 0 end
-if redis.call('SET', KEYS[5], ARGV[7], 'NX', 'PX', ARGV[8]) == false then return 0 end
+if redis.call('ZCARD', KEYS[4]) >= tonumber(ARGV[6]) then return 2 end
+if redis.call('SET', KEYS[5], ARGV[7], 'NX', 'PX', ARGV[8]) == false then return 2 end
 if redis.call('SET', KEYS[6], ARGV[7], 'NX', 'PX', ARGV[8]) == false then
   if redis.call('GET', KEYS[5]) == ARGV[7] then redis.call('DEL', KEYS[5]) end
-  return 0
+  return 2
 end
 redis.call('ZADD', KEYS[1], expires, ARGV[7])
 redis.call('ZADD', KEYS[2], expires, ARGV[7])
@@ -279,6 +280,13 @@ export class GenerationQueue {
   }
 
   async acquire(lease: QueueLease, userLimit: number): Promise<boolean> {
+    return await this.tryAcquire(lease, userLimit) === 'acquired'
+  }
+
+  async tryAcquire(
+    lease: QueueLease,
+    userLimit: number,
+  ): Promise<'acquired' | 'capacity_full' | 'tenant_blocked'> {
     const now = Date.now()
     const result = await this.redis.eval(acquireScript, {
       keys: this.leaseKeys(lease),
@@ -293,7 +301,9 @@ export class GenerationQueue {
         String(this.config.generationLockLeaseMs),
       ],
     })
-    return Number(result) === 1
+    const code = Number(result)
+    if (code === 1) return 'acquired'
+    return code === 0 ? 'capacity_full' : 'tenant_blocked'
   }
 
   async renew(lease: QueueLease): Promise<boolean> {
