@@ -4,13 +4,12 @@ import type { Database } from './db.js'
 import { chats, ingressRequests, users } from './db/schema.js'
 import { AuthenticationError } from './auth.js'
 import type { AppConfig } from './config.js'
-import type { CapabilityPlan } from './capabilities/registry.js'
 import type { projectInputSchema } from './gpasContracts.js'
 import type { z } from 'zod'
 
 export type IngressPayload = { content: string; artifactId?: string; supersedesGenerationId?: string; projectInput?: z.infer<typeof projectInputSchema> }
 export type IngressRow = typeof ingressRequests.$inferSelect
-export type IngressContext = { check(): Promise<void>; savePlan(plan: CapabilityPlan): Promise<void> }
+export type IngressContext = { check(): Promise<void> }
 export function sealCredential(cookie: string, key: string, aad: string): string {
   const iv = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', Buffer.from(key, 'base64'), iv)
@@ -121,11 +120,7 @@ export class DurableIngress {
     try {
       if (Date.now() - row.createdAt.getTime() > 24 * 60 * 60 * 1000 || row.attempts > 8) throw new AuthenticationError('请求已过期，请重新提交。', 410, 'request_expired')
       const cookie = openCredential(row.credential!, this.config.requestEncryptionKey, `${row.userId}:${row.requestId}`)
-      const result = await this.execute(row, cookie, { check, savePlan: async plan => {
-        await check()
-        const saved = await this.db.update(ingressRequests).set({ plan }).where(owned).returning({ id: ingressRequests.id })
-        if (!saved.length) throw new Error('Ingress lease lost')
-      } })
+      const result = await this.execute(row, cookie, { check })
       await this.db.update(ingressRequests).set({ status: 'succeeded', result, credential: null, leaseUntil: null, updatedAt: new Date() }).where(owned)
     } catch (error) {
       const status = typeof error === 'object' && error && 'statusCode' in error ? Number(error.statusCode) : 500

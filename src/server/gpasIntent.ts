@@ -1,6 +1,5 @@
 import { AuthenticationError } from './auth.js'
 import type { CapabilityDescription } from './capabilities/registry.js'
-import type { PlanningHistory, SemanticPlanner } from './capabilities/planner.js'
 
 type Embedder = { embed: (text: string, pooling: 'cls') => Promise<number[]> }
 export type CapabilityCandidate = { capability: CapabilityDescription, score: number }
@@ -13,7 +12,7 @@ function normalized(vector: number[]): number[] {
   return vector.map(value => value / norm)
 }
 
-// BGE retrieves capabilities; it does not infer permission, negation or actions.
+// BGE narrows the agent's tool list; it does not infer permission, negation or actions.
 // Adding capabilities only changes the registry, not this routing algorithm.
 export class SemanticIntentRouter {
   private references: Array<{ id: string, vector: number[] }> = []
@@ -62,11 +61,5 @@ export class SemanticIntentRouter {
     } catch {
       throw new AuthenticationError('本地语义识别模型暂时不可用，请稍后重试。', 503, 'intent_model_unavailable')
     }
-  }
-
-  async classify(text: string, planner: SemanticPlanner, history: readonly PlanningHistory[] = [], contextIds: readonly string[] = []) {
-    const candidates = await this.retrieve(text, contextIds)
-    const decision = await planner.decide({ text, history: history.slice(-6), candidates: candidates.map(item => item.capability) })
-    return { decision, candidates }
   }
 }

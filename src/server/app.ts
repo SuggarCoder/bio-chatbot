@@ -14,9 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 import { AuthenticationError, loadProfile, resolveCurrentUser } from './auth.js'
 import { GpasUpstreamError } from './gpas.js'
-import { IntentPlanningError, planningContext } from './capabilities/planner.js'
 import { createCapabilityRuntime, type CapabilityRuntime } from './capabilities/runtime.js'
-import type { CapabilityPlan } from './capabilities/registry.js'
 import { projectInputSchema } from './gpasContracts.js'
 import {
   redisKey,
@@ -245,15 +243,12 @@ export async function buildApp(
     requestTimeout: 120_000,
     bodyLimit: 64 * 1024,
   })
-  const { gpas, registry: capabilities, router: intentRouter, planner: semanticPlanner } =
-    dependencies.capabilityRuntime ?? createCapabilityRuntime(config, undefined, redis)
+  const { gpas, router: intentRouter, toolIds: agentToolCatalog, routerRequired } =
+    dependencies.capabilityRuntime ?? createCapabilityRuntime(config)
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof GpasUpstreamError) {
       request.log.warn({ gpas: error.diagnostics }, 'GPAS upstream request failed')
-    }
-    if (error instanceof IntentPlanningError) {
-      request.log.warn({ planner: error.diagnostics }, 'Semantic planner request failed')
     }
     if (error instanceof AuthenticationError) {
       return reply.code(error.statusCode).send(
@@ -340,7 +335,10 @@ export async function buildApp(
     ).catch(() => 0) > 0 ? 'ok' : 'unavailable'
     const tokenizer = config.qwenTokenizerPath && existsSync(path.resolve(config.qwenTokenizerPath, 'tokenizer.json'))
       ? 'ok' : 'unavailable'
-    const embeddings = intentRouter.ready
+    // The local embedding model only narrows large tool catalogs.
+    const embeddings = !routerRequired
+      ? 'not_required'
+      : intentRouter.ready
         ? 'ok'
         : 'unavailable'
     const status =
@@ -1027,11 +1025,23 @@ export async function buildApp(
       clientMessageId: requestId,
       artifactId: artifactId || undefined,
       replacesMessageId: messageId,
+      agentToolIds: await selectAgentToolIds(target.userContent),
+      cookie: request.headers.cookie ?? '',
     })
 
     return reply.code(201).send(started)
   })
 
+  // Small catalogs are offered whole; larger ones are narrowed with the local
+  // embedding router so prompts stay bounded as GPAS APIs are added.
+  const selectAgentToolIds = async (content: string) => {
+    if (!routerRequired) return agentToolCatalog
+    const candidates = await intentRouter.retrieve(content)
+    return candidates
+      .map((item) => item.capability.id)
+      .filter((id) => agentToolCatalog.includes(id))
+      .slice(0, config.agentToolLimit)
+  }
   const ingress = new DurableIngress(config, database, async (row, cookie, context) => {
     const profile = await loadProfile({ headers: { cookie } } as FastifyRequest, config)
     if (profile.userId !== row.externalUserId || (profile.ownteamId ?? '') !== row.teamId) {
@@ -1042,7 +1052,7 @@ export async function buildApp(
     const { chatId, requestId: clientMessageId } = row
     const { content, artifactId, supersedesGenerationId, projectInput } = row.payload
     await context.check()
-    // Completed business replies must replay even if the planner is unavailable.
+    // Completed business replies (form confirmations) replay idempotently.
     const replay = await findBusinessExchange(database, user.id, chatId, clientMessageId)
     if (replay) return replay
     const existingStart = await findGenerationStart(database, user.id, clientMessageId)
@@ -1052,44 +1062,28 @@ export async function buildApp(
       return { generation: existingGeneration, userMessage: existingStart.userMessage,
         assistantMessageId: existingStart.assistantMessageId, replacesMessageId: existingStart.replacesMessageId ?? null }
     }
-    let plan: CapabilityPlan | undefined = row.plan ?? undefined
-    if (!projectInput && !plan) {
-      // Check ownership before sending even a bounded conversation to a model.
-      const page = await getChatMessagesPage(database, user.id, chatId, Number.MAX_SAFE_INTEGER, 6)
-      if (!page) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
-      if (!redis.isReady) throw new AuthenticationError('语义规划服务暂时不可用。', 503, 'redis_unavailable')
-      const planning = planningContext(page.messages)
-      const result = await intentRouter.classify(content, semanticPlanner, planning.history, planning.contextIds)
-      plan = capabilities.plan(result.decision, result.candidates.map(item => item.capability.id))
-      await context.savePlan(plan)
-      app.log.info({
-        capabilityId: plan.capabilityId, intent: plan.intent, mode: plan.mode, confidence: plan.confidence,
-        candidates: result.candidates.map(item => ({ id: item.capability.id, score: item.score })),
-      }, 'Semantic capability planned')
-    }
     await context.check()
-    if (projectInput || plan?.mode !== 'general') {
-      const result = await businessAdmission.run(() => createBusinessExchange(database, {
+    if (projectInput) {
+      // Confirming a prepared form is the only path that mutates GPAS; it is
+      // idempotent per request and never chosen by the model.
+      return businessAdmission.run(() => createBusinessExchange(database, {
         userId: user.id, chatId, clientMessageId,
-        content: projectInput ? '确认初始化项目' : content,
-        teamId: profile.ownteamId, sourceMessageId: projectInput?.sourceMessageId,
-      }, async (form) => {
-        if (projectInput) return gpas.create(profile, cookie, projectInput, form!)
-        return capabilities.execute(plan!, { profile, cookie })
-      }))
-      return result
+        content: '确认初始化项目',
+        teamId: profile.ownteamId, sourceMessageId: projectInput.sourceMessageId,
+      }, async (form) => gpas.create(profile, cookie, projectInput, form!)))
     }
-
-    const started = await generations.create({
+    // Everything else is an agent run: the worker's model chooses among the
+    // tools selected here (server-side), using this request's own session.
+    return generations.create({
       user,
       chatId,
       content,
       clientMessageId,
       artifactId: artifactId || undefined,
       supersedesGenerationId: supersedesGenerationId || undefined,
+      agentToolIds: await selectAgentToolIds(content),
+      cookie,
     })
-
-    return started
   }, () => app.log.warn('Durable ingress storage temporarily unavailable'))
   app.addHook('onReady', async () => { ingress.start() })
   app.addHook('onClose', async () => { await ingress.stop() })

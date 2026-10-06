@@ -18,7 +18,7 @@ function config(
   overrides: Partial<AppConfig> = {},
 ): AppConfig {
   return {
-    requestEncryptionKey: Buffer.alloc(32).toString('base64'), ingressConcurrency: 8, plannerConcurrency: 4, upstreamConcurrency: 8, upstreamRequestsPerMinute: 0, upstreamTokensPerMinute: 0,
+    requestEncryptionKey: Buffer.alloc(32).toString('base64'), ingressConcurrency: 8, upstreamConcurrency: 8, upstreamRequestsPerMinute: 0, upstreamTokensPerMinute: 0,
     nodeEnv: 'development',
     host: '127.0.0.1',
     port: 8090,
@@ -26,6 +26,8 @@ function config(
     databaseUrl: 'postgres://test',
     pgPoolMax: 4,
     authCacheTtlSeconds: 0,
+    agentMaxToolCalls: 4,
+    agentToolLimit: 8,
     redisUrl: 'redis://test',
     redisPrefix: 'gpas2cb:test:v3:',
     qwenApiKey: 'test',

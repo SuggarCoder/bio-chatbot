@@ -103,4 +103,4 @@ Artifact 历史版本不会被覆盖。`POST /api/artifacts/:artifactId/versions
 
 部署本次修订前执行 `npm run db:migrate`（新增 BusinessOperation、IngressRequest）。普通聊天也强制校验 token 预算，因此 API 与 Worker 均须提供本地 Qwen tokenizer。100 用户入口/SQL 回归测试及容量边界见 [生产部署清单](docs/production-deployment.md#100-人同时在线并发安全修订)。
 
-消息入口现为持久任务：提交成功返回 202，API 重启后继续规划/执行，前端自动查询结果。上线必须配置稳定的 `REQUEST_ENCRYPTION_KEY` 并同步更新前后端。规划并发、共享上游并发/RPM/保守 TPM 和数据库池可独立配置；取消回退改为 Worker 批量检查。详见部署清单“持久入口与扩容配置”。
+消息入口现为持久任务：提交成功返回 202，API 重启后继续执行，前端自动查询结果。所有消息都是智能体运行，详见 [docs/agent.md](docs/agent.md)。上线必须配置稳定的 `REQUEST_ENCRYPTION_KEY` 并同步更新前后端。共享上游并发/RPM/保守 TPM 和数据库池可独立配置；取消回退改为 Worker 批量检查。详见部署清单“持久入口与扩容配置”。

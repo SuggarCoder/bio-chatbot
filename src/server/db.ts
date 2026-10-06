@@ -52,6 +52,7 @@ import {
   generations,
   messages,
   outboxEvents,
+  toolRuns,
   usageEvents,
   users,
   votes,
@@ -639,9 +640,18 @@ export async function getRegenerationTarget(
   database: Database,
   userId: string,
   messageId: string,
-): Promise<{ chatId: string } | null> {
+): Promise<{ chatId: string; userContent: string } | null> {
   const [row] = await database
-    .select({ chatId: messages.chatId })
+    .select({
+      chatId: messages.chatId,
+      // The question being answered again; used to narrow agent tools.
+      userContent: sql<string>`coalesce((
+        select question.content from "Generation" g
+        join "Message" question on question.id = g."userMessageId"
+        where g."assistantMessageId" = ${messages.id}
+        order by g."createdAt" desc limit 1
+      ), '')`,
+    })
     .from(messages)
     .innerJoin(chats, eq(chats.id, messages.chatId))
     .where(
@@ -1086,6 +1096,10 @@ export async function createGenerationStart(
     supersedesGenerationId?: string
     artifactId?: string
     contextMemoryEnabled?: boolean
+    /** Agent mode: tool ids the model may call in this run. */
+    agentToolIds?: string[]
+    /** Agent mode: sealed GPAS session (see sealCredential). */
+    credential?: string
   },
 ): Promise<GenerationStart> {
   return database.transaction(async (transaction) => {
@@ -1188,6 +1202,7 @@ export async function createGenerationStart(
       streamId: input.streamId,
       requestId: input.requestId,
       status: 'created',
+      credential: input.credential ?? null,
       metadata: {
         contextMaxSeq: toSafeNumber(sequence.userSeq, 'Message.seq'),
         ...(summary ? {
@@ -1198,6 +1213,7 @@ export async function createGenerationStart(
           ),
         } : {}),
         ...(input.artifactId ? { artifactId: input.artifactId } : {}),
+        ...(input.agentToolIds ? { agentToolIds: input.agentToolIds } : {}),
       },
     })
     await transaction.insert(outboxEvents).values({
@@ -1241,6 +1257,8 @@ export async function createRegenerationStart(
     model: string
     artifactId?: string
     contextMemoryEnabled?: boolean
+    agentToolIds?: string[]
+    credential?: string
   },
 ): Promise<GenerationStart> {
   return database.transaction(async (transaction) => {
@@ -1398,8 +1416,10 @@ export async function createRegenerationStart(
       streamId: input.streamId,
       requestId: input.requestId,
       status: 'created',
+      credential: input.credential ?? null,
       metadata: {
         replacesMessageId: input.replacesMessageId,
+        ...(input.agentToolIds ? { agentToolIds: input.agentToolIds } : {}),
         contextMaxSeq: toSafeNumber(target.seq, 'Message.seq'),
         ...(summary ? {
           summaryVersion: summary.version,
@@ -1726,6 +1746,7 @@ export type FinalizeGenerationInput = {
   messageParts?: Array<
     | { type: 'text'; text: string }
     | { type: 'artifact_draft_ref'; streamArtifactId: string }
+    | { type: 'gpas'; part: GpasPart }
   >
   preparedArtifacts?: PreparedArtifactVersion[]
   providerRequestId?: string
@@ -1759,6 +1780,35 @@ export function decideGenerationTerminalStatus(
   }
 
   return cancelRequestedAt ? 'cancelled' : desiredStatus
+}
+
+/** Audit row for one agent tool call; idempotent per (generation, call id). */
+export async function recordToolRun(
+  database: Database,
+  input: {
+    userId: string
+    generationId: string
+    toolCallId: string
+    toolName: string
+    ok: boolean
+    args?: Record<string, unknown>
+    outputBytes: number
+    error?: string
+    startedAt: Date
+  },
+): Promise<void> {
+  await database.insert(toolRuns).values({
+    userId: input.userId,
+    generationId: input.generationId,
+    toolCallId: input.toolCallId.slice(0, 256),
+    toolName: input.toolName.slice(0, 128),
+    status: input.ok ? 'completed' : 'failed',
+    input: input.args ?? null,
+    outputSummary: { bytes: input.outputBytes },
+    error: input.error ?? null,
+    startedAt: input.startedAt,
+    finishedAt: sql`now()`,
+  }).onConflictDoNothing()
 }
 
 export async function finalizeGeneration(
@@ -1946,6 +1996,7 @@ export async function finalizeGeneration(
             ? 'Generation stopped'
             : input.errorMessage || null,
         metadata: metadataWithExecutionSteps(row.metadata, finalExecutionSteps),
+        credential: null,
         updatedAt: sql`now()`,
         finishedAt: sql`now()`,
       })

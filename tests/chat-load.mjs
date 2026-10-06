@@ -35,6 +35,8 @@ const pollMs = Number(process.env.LOAD_POLL_MS ?? 500);
 const apiPool = Number(process.env.LOAD_API_PG_POOL ?? 4);
 const workerPool = Number(process.env.LOAD_WORKER_PG_POOL ?? 4);
 const totalChats = users * chatsPerUser;
+// Every chat is an agent run: round 1 calls the GPAS progress tool, round 2 answers from it.
+const clinicFor = name => 1000 + Number(/_([0-9]+)$/.exec(name)?.[1] ?? -1);
 // Spread submissions over this window; 300 same-instant connects overflow the Windows loopback backlog.
 const rampMs = Number(process.env.LOAD_RAMP_MS ?? 0);
 const plannerMs = 100;
@@ -90,10 +92,25 @@ try {
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ code: 200, data: profile(name) })); return;
       }
+      const gpas = /^\/(project\/exist|summary\/submit\/info)\/(.+)$/.exec(req.url);
+      if (gpas) {
+        // GPAS must only ever be asked about the caller's own team.
+        const cookieUser = /u=([^;]+)/.exec(req.headers.cookie ?? '')?.[1];
+        const team = decodeURIComponent(gpas[2]);
+        phase.gpasCalls++;
+        if (team !== `team-${cookieUser}`) { phase.gpasCrossTenant++; res.writeHead(403); res.end(); return; }
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify(gpas[1] === 'project/exist'
+          ? { code: 200, data: true }
+          : { code: 200, projectPlanInfo: { name: 'p', id: 'p', clinic: 5000, media: 0, environment: 0, lab: 0 },
+              realSubmitInfo: [{ year: 2026, month: 1, clinic: clinicFor(cookieUser) }] }));
+        return;
+      }
       if (req.url !== '/v1/responses') { res.writeHead(404); res.end(); return; }
       let raw = ''; for await (const part of req) raw += part;
       const body = JSON.parse(raw), state = phase;
       state.active++; state.peakCombined = Math.max(state.peakCombined, state.active);
+      // Non-streaming calls would mean the removed LLM planner came back.
       const kind = body.stream ? 'generation' : 'planner';
       state[kind]++; state[`peak_${kind}`] = Math.max(state[`peak_${kind}`], state[kind]);
       state[`${kind}Calls`]++;
@@ -113,10 +130,21 @@ try {
       state.perUser[owner] = (state.perUser[owner] ?? 0) + 1;
       state.peakPerUser = Math.max(state.peakPerUser, state.perUser[owner]);
       res.on('close', () => { state.perUser[owner]--; });
-      const id = crypto.randomUUID(), delta = `Reply:${marker};`;
+      const toolOutput = (Array.isArray(body.input) ? body.input : []).find(item => item?.type === 'function_call_output');
+      const id = crypto.randomUUID();
+      const delta = `Reply:${marker};clinic=${JSON.parse(toolOutput?.output ?? '{}').samples?.[0]?.submitted};`;
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
       const send = event => res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       send({ type: 'response.created', response: response(id, '', 'in_progress') });
+      if (Array.isArray(body.tools) && body.tools.length && !toolOutput && body.tool_choice !== 'none') {
+        state.toolRounds++;
+        const call = { type: 'function_call', id: `fc_${id}`, call_id: `call_${id}`, name: 'project__progress', arguments: '{}', status: 'completed' };
+        await delay(100);
+        send({ type: 'response.output_item.added', output_index: 0, item: { ...call, arguments: '' } });
+        send({ type: 'response.output_item.done', output_index: 0, item: call });
+        send({ type: 'response.completed', response: { ...response(id, ''), output: [call] } });
+        res.end(); release(); return;
+      }
       // Capacity-only mode: hold initial streams open until all users have a
       // live provider stream. Its latency is artificial, not a performance SLA.
       if (saturationBarrier) {
@@ -142,19 +170,17 @@ try {
   const mockUrl = `http://127.0.0.1:${mock.address().port}`;
   Object.assign(process.env, { QWEN_BASE_URL: `${mockUrl}/v1`, GPAS2_USER_INFO_URL: `${mockUrl}/user/info` });
   const scenarios = [
-    { name: 'defaults', generation: 4, upstream: 8, ingress: 8, planner: 4 },
-    { name: 'generation100_upstream8', generation: 100, upstream: 8, ingress: 100, planner: 100 },
-    { name: 'all100', generation: 100, upstream: 100, ingress: 100, planner: 100 },
+    { name: 'all100', generation: 100, upstream: 100, ingress: 100 },
     // Production defaults for 100 users x 3 chats on a 100-concurrency provider.
-    { name: 'target', generation: 80, upstream: 100, ingress: 24, planner: 16 },
+    { name: 'target', generation: 96, upstream: 100, ingress: 24 },
   ].filter(s => !process.env.LOAD_SCENARIOS || process.env.LOAD_SCENARIOS.split(',').includes(s.name));
   for (const scenario of scenarios) {
     assert.ok(!saturationBarrier || (scenario.generation>=users && scenario.upstream>=users), 'Barrier requires sufficient concurrency limits');
     console.log('SCENARIO_START', scenario.name);
-    phase = { perUser: {}, peakPerUser: 0, active: 0, peakCombined: 0, generation: 0, planner: 0, peak_generation: 0, peak_planner: 0, generationCalls: 0, plannerCalls: 0, provider429: 0 };
+    phase = { perUser: {}, peakPerUser: 0, gpasCalls: 0, gpasCrossTenant: 0, toolRounds: 0, active: 0, peakCombined: 0, generation: 0, planner: 0, peak_generation: 0, peak_planner: 0, generationCalls: 0, plannerCalls: 0, provider429: 0 };
     Object.assign(process.env, { REDIS_KEY_PREFIX: `${rootPrefix}${scenario.name}:`,
       GLOBAL_GENERATION_CONCURRENCY: String(scenario.generation), PROVIDER_GENERATION_CONCURRENCY: String(scenario.generation), MODEL_GENERATION_CONCURRENCY: String(scenario.generation),
-      UPSTREAM_CONCURRENCY: String(scenario.upstream), INGRESS_CONCURRENCY: String(scenario.ingress), PLANNER_CONCURRENCY: String(scenario.planner) });
+      UPSTREAM_CONCURRENCY: String(scenario.upstream), INGRESS_CONCURRENCY: String(scenario.ingress) });
     const config = readConfig();
     const redis = createRedisClient(config); await redis.connect();
     const runtimes = new GenerationRuntimeRegistry(config, redis);
@@ -189,7 +215,7 @@ try {
         const name = `${scenario.name}_${i}`;
         const u = await syncUser(db, profile(name));
         for (let c=0; c<chatsPerUser; c++) {
-          identities.push({name: chatsPerUser > 1 ? `${name}_c${c}` : name, cookieName: name, userId:u.id, chat:await createChat(db,u.id,'load test')});
+          identities.push({name: chatsPerUser > 1 ? `${name}_c${c}` : name, cookieName: name, clinic: clinicFor(name), userId:u.id, chat:await createChat(db,u.id,'load test')});
         }
       }
       let sseActive = 0, peakSse = 0, peakPoolWaiting = 0;
@@ -233,7 +259,7 @@ try {
             }
           } finally { sseActive--; }
           assert.equal(terminal?.finishReason,'stop',JSON.stringify(terminal?.error));
-          const expected=`Reply:load:${identity.name};`.repeat(chunks);
+          const expected=`Reply:load:${identity.name};clinic=${identity.clinic};`.repeat(chunks);
           // The application intentionally allows a durable terminal event to
           // repair missing tail deltas. Record that separately, not as lost data.
           assert.ok(expected.startsWith(text),'Stream must contain only this user\'s ordered response');
@@ -255,7 +281,17 @@ try {
       await writeFile(`${outputDir}/results.json`, JSON.stringify({runId, scope:`Real PG/Redis/API/worker/HTTP/SSE; mock LLM/auth; ${realEmbedding ? 'real' : 'mock'} embedding; memory/artifacts disabled`,results},null,2));
       console.log('SCENARIO_RESULT',JSON.stringify(result));
       assert.equal(result.success,totalChats,'Every user must get a correct, durable, isolated streamed response');
-      assert.equal(phase.generationCalls,totalChats,'No lost or duplicated model generations');
+      assert.equal(phase.generationCalls,totalChats*2,'No lost or duplicated model generations');
+      {
+        assert.equal(phase.plannerCalls,0,'No LLM planner calls');
+        assert.equal(phase.toolRounds,totalChats,'Each chat makes exactly one tool round');
+        assert.equal(phase.gpasCrossTenant,0,'GPAS must only be queried for the caller team');
+        const audit = await db.execute(sql`select
+          (select count(*)::int from "ToolRun" where status = 'completed') as "toolRuns",
+          (select count(*)::int from "Generation" where credential is not null) as "credentials"`);
+        assert.ok(audit.rows[0].toolRuns >= totalChats, 'Every agent tool call is audited');
+        assert.equal(audit.rows[0].credentials, 0, 'Sealed sessions are cleared after finalization');
+      }
       assert.equal(phase.provider429,0);
       assert.ok(phase.peakCombined<=scenario.upstream);
       assert.ok(phase.peak_generation<=Math.min(scenario.generation,scenario.upstream));

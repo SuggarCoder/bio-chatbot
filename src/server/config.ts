@@ -8,7 +8,6 @@ export type AppConfig = {
   databaseUrl: string
   requestEncryptionKey: string
   ingressConcurrency: number
-  plannerConcurrency: number
   upstreamConcurrency: number
   upstreamTokensPerMinute: number
   upstreamRequestsPerMinute: number
@@ -52,6 +51,8 @@ export type AppConfig = {
   generationCancelPollIntervalMs: number
   generationSnapshotIntervalMs: number
   artifactProtocolEnabled: boolean
+  agentMaxToolCalls: number
+  agentToolLimit: number
   objectStorage: ObjectStorageConfig
 }
 
@@ -205,18 +206,18 @@ export function readObjectStorageConfig(
 }
 
 /**
- * Generation leases and planner/background gates run before the shared upstream
- * permit. If their sum fits UPSTREAM_CONCURRENCY no caller ever waits (or times
- * out) on the shared permit. Instance counts are unknown here, so only warn.
+ * Generation leases (one model call in flight per agent run) and background
+ * gates run before the shared upstream permit. If their sum fits
+ * UPSTREAM_CONCURRENCY no caller ever waits (or times out) on the shared
+ * permit. Worker instance counts are unknown here, so only warn.
  */
 function warnUpstreamPartition(): void {
-  const generation = positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 80)
-  const planner = positiveInteger('PLANNER_CONCURRENCY', 16)
+  const generation = positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 96)
   const background = positiveInteger('BACKGROUND_CONCURRENCY', 2)
   const upstream = positiveInteger('UPSTREAM_CONCURRENCY', 100)
-  if (generation + planner + background > upstream) {
+  if (generation + background > upstream) {
     console.warn(
-      `GLOBAL_GENERATION_CONCURRENCY (${generation}) + PLANNER_CONCURRENCY (${planner}) + BACKGROUND_CONCURRENCY (${background}) exceeds UPSTREAM_CONCURRENCY (${upstream}); model calls may wait on the shared permit and fail after 60 seconds`,
+      `GLOBAL_GENERATION_CONCURRENCY (${generation}) + BACKGROUND_CONCURRENCY (${background}) exceeds UPSTREAM_CONCURRENCY (${upstream}); model calls may wait on the shared permit and fail after 60 seconds`,
     )
   }
 }
@@ -337,7 +338,6 @@ export function readConfig(): AppConfig {
     authCacheTtlSeconds: positiveInteger('AUTH_CACHE_TTL_SECONDS', 30, true),
     requestEncryptionKey,
     ingressConcurrency: positiveInteger('INGRESS_CONCURRENCY', 24),
-    plannerConcurrency: positiveInteger('PLANNER_CONCURRENCY', 16),
     upstreamConcurrency: positiveInteger('UPSTREAM_CONCURRENCY', 100),
     upstreamTokensPerMinute: positiveInteger('UPSTREAM_TOKENS_PER_MINUTE', 0, true),
     upstreamRequestsPerMinute: positiveInteger('UPSTREAM_REQUESTS_PER_MINUTE', 0, true),
@@ -394,9 +394,9 @@ export function readConfig(): AppConfig {
     gpas2UserInfoUrl,
     chatRateLimitPerMinute: positiveInteger('CHAT_RATE_LIMIT_PER_MINUTE', 10),
     monthlyTokenLimit: positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true),
-    globalGenerationConcurrency: positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 80),
-    providerGenerationConcurrency: positiveInteger('PROVIDER_GENERATION_CONCURRENCY', 80),
-    modelGenerationConcurrency: positiveInteger('MODEL_GENERATION_CONCURRENCY', 80),
+    globalGenerationConcurrency: positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 96),
+    providerGenerationConcurrency: positiveInteger('PROVIDER_GENERATION_CONCURRENCY', 96),
+    modelGenerationConcurrency: positiveInteger('MODEL_GENERATION_CONCURRENCY', 96),
     generationTimeoutMs: positiveInteger('GENERATION_TIMEOUT_MS', 180_000),
     generationLockLeaseMs,
     generationLockRenewIntervalMs,
@@ -413,6 +413,10 @@ export function readConfig(): AppConfig {
       'ARTIFACT_PROTOCOL_ENABLED',
       false,
     ),
+    // The model calls GPAS tools in a bounded loop inside the generation
+    // lease (one model call in flight per run, see capacity notes).
+    agentMaxToolCalls: positiveInteger('AGENT_MAX_TOOL_CALLS', 4),
+    agentToolLimit: positiveInteger('AGENT_TOOL_LIMIT', 8),
     objectStorage: readObjectStorageConfig(process.env, nodeEnv),
   }
 }

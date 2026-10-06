@@ -22,6 +22,7 @@ import type {
   ArtifactProtocolMetadata,
 } from './protocol.js'
 import { artifactMimeTypes } from './protocol.js'
+import type { GpasPart } from '../gpasContracts.js'
 
 export type DatabaseTransaction = Parameters<
   Parameters<Database['transaction']>[0]
@@ -267,6 +268,7 @@ export function materializeMessageParts(
   parts: Array<
     | { type: 'text'; text: string }
     | { type: 'artifact_draft_ref'; streamArtifactId: string }
+    | { type: 'gpas'; part: GpasPart }
   >,
   committed: CommittedArtifactVersion[],
 ): MessagePart[] {
@@ -280,6 +282,13 @@ export function materializeMessageParts(
       if (part.text) {
         output.push({ type: 'text', order: output.length, text: part.text })
       }
+      continue
+    }
+
+    if (part.type === 'gpas') {
+      // Business parts from agent tools (e.g. a confirmation form) keep the
+      // existing GPAS rendering and confirmation path.
+      output.push({ ...part.part, order: output.length })
       continue
     }
 

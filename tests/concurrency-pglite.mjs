@@ -90,13 +90,13 @@ try {
  const [completed]=await db.select().from(schema.ingressRequests).where(eq(schema.ingressRequests.id,accepted.id));
  assert.equal(completed.credential,null);
  console.log('PASS: accepted ingress survives processor restart, ciphertext-only credential purged on completion, owner scope, payload conflict and same-key replay');
- // A crash after the plan is committed does not re-plan or lose that decision.
+ // A crash mid-execution is reclaimed after the lease expires.
  const again=await oldInbox.submit({...durableInput,requestId:crypto.randomUUID()});
- await db.update(schema.ingressRequests).set({status:'running',token:crypto.randomUUID(),leaseUntil:new Date(0),plan:{mode:'general'}}).where(eq(schema.ingressRequests.id,again.id));
- const recoveredRunning=new DurableIngress(icfg,db,async(row)=>{assert.equal(row.plan.mode,'general');return {recovered:true}});
+ await db.update(schema.ingressRequests).set({status:'running',token:crypto.randomUUID(),leaseUntil:new Date(0)}).where(eq(schema.ingressRequests.id,again.id));
+ const recoveredRunning=new DurableIngress(icfg,db,async(row)=>{assert.equal(row.id,again.id);return {recovered:true}});
  await recoveredRunning.tick();await recoveredRunning.stop();
  assert.equal((await recoveredRunning.get(owner.id,again.id)).status,'succeeded');
- console.log('PASS: expired running lease reclaimed, saved plan retained');
+ console.log('PASS: expired running lease reclaimed');
  // A stale process cannot overwrite the recovered owner's result.
  const fencing=await oldInbox.submit({...durableInput,requestId:crypto.randomUUID()});
  let unblock,ingressEntered; const barrier=new Promise(r=>unblock=r), started=new Promise(r=>ingressEntered=r);
@@ -111,14 +111,15 @@ try {
  const { GenerationService }=await import('../src/server/generation.ts');
  const { createCapabilityRuntime }=await import('../src/server/capabilities/runtime.ts');
  const concurrency=Number(process.env.REVIEW_CONCURRENCY ?? 100);
- const cfg={requestEncryptionKey:Buffer.alloc(32,7).toString('base64'),ingressConcurrency:8,plannerConcurrency:4,nodeEnv:'test',serveClient:false,gpas2AuthMode:'upstream',gpas2UserInfoUrl:'https://mock.invalid/user/info',
+ const cfg={requestEncryptionKey:Buffer.alloc(32,7).toString('base64'),ingressConcurrency:8,agentToolLimit:8,nodeEnv:'test',serveClient:false,gpas2AuthMode:'upstream',gpas2UserInfoUrl:'https://mock.invalid/user/info',
   qwenApiKey:'mock',qwenBaseUrl:'https://mock.invalid/v1',qwenModel:'mock',redisPrefix:'review:',
   chatRateLimitPerMinute:10,monthlyTokenLimit:0,contextMemoryEnabled:false,userMemoryEnabled:false,
   artifactContextV2Enabled:false,artifactProtocolEnabled:false,qwenTokenizerPath:'models/qwen-tokenizer'};
  const redis={isReady:true,eval:async()=>[1,0,9],get:async()=>null,set:async()=> 'OK'};
  const runtime=createCapabilityRuntime(cfg,{embed:async()=>Array.from({length:512},(_,i)=>i===0?1:0)});
  const oldFetch=globalThis.fetch;
- let planning=0,peakPlanning=0;
+ // Ingress must never call a model: tool choice happens in the worker's agent loop.
+ let modelCalls=0;
  globalThis.fetch=async(input,options)=>{
   const url=new URL(input instanceof Request?input.url:String(input));
   if(url.pathname==='/user/info') {
@@ -131,12 +132,8 @@ try {
    await new Promise(r=>setTimeout(r,2));
    return Response.json({code:200,data:false,info:{projectCode:'p',userName:'p',teamId}});
   }
-  planning++;peakPlanning=Math.max(peakPlanning,planning);
-  const body=JSON.parse(options.body);
-  const text=JSON.parse(body.input).text;
-  await new Promise(r=>setTimeout(r,2));planning--;
-  const decision=text==='business'?{intent:'query',scope:'self',capabilityId:'project.progress',confidence:1}:{intent:'general',scope:'unspecified',capabilityId:null,confidence:1};
-  return Response.json({id:'mock',object:'response',status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:JSON.stringify(decision)}]}]});
+  modelCalls++;
+  throw new Error(`unexpected upstream call ${url.pathname}`);
  };
  const app=await buildApp({config:cfg,database:db,redis,generations:new GenerationService(cfg,db,redis,{},{}),
   streamHub:{},objectStore:null,artifactService:null,capabilityRuntime:runtime});
@@ -160,9 +157,9 @@ try {
     if(mine.every(row=>row.status==='succeeded')) break;
     await new Promise(r=>setTimeout(r,50));
    }
-   console.log(`PASS: ${concurrency} distinct authenticated users submit ${mode}; all return durable 202 and complete (mock upstream, PGlite)`);
+   console.log(`PASS: ${concurrency} distinct authenticated users submit ${mode}; all return durable 202 and start agent generations (PGlite)`);
   }
-  assert.equal(peakPlanning,4);
+  assert.equal(modelCalls,0);
  } finally { await app.close(); globalThis.fetch=oldFetch; }
 
 } finally { await client.close(); clearTimeout(watchdog); }

@@ -51,8 +51,9 @@ const tokenCounter = new QwenTokenCounter(config)
 const embeddingService = new LocalEmbeddingService(config)
 // Every provider request is token-budgeted, including plain chat.
 await tokenCounter.initialize()
-const capabilityRuntime = createCapabilityRuntime(config, embeddingService, redis)
-await capabilityRuntime.router.initialize()
+const capabilityRuntime = createCapabilityRuntime(config, embeddingService)
+// Small tool catalogs are offered whole; load the local model only when needed.
+if (capabilityRuntime.routerRequired) await capabilityRuntime.router.initialize()
 const generations = new GenerationService(
   config,
   database,

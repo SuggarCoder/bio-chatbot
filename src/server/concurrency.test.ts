@@ -1,30 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AdmissionQueue } from './admission.js'
-import { QwenSemanticPlanner } from './capabilities/planner.js'
 import { withRedisDeadlines } from './cache.js'
 import { GenerationExecutionContext, GenerationCancellationError } from './generationExecution.js'
 
 const tick = () => new Promise<void>(resolve => setImmediate(resolve))
-
-test('100 simultaneous planning requests queue instead of receiving busy 503', async context => {
-  let active = 0
-  let peak = 0
-  let completed = 0
-  context.mock.method(globalThis, 'fetch', async () => {
-    active += 1
-    peak = Math.max(peak, active)
-    await tick()
-    active -= 1
-    completed += 1
-    return new Response(JSON.stringify({ id: 'mock', object: 'response', status: 'completed', output: [] }),
-      { headers: { 'content-type': 'application/json' } })
-  })
-  const planner = new QwenSemanticPlanner({ qwenApiKey: 'mock', qwenBaseUrl: 'https://mock.invalid/v1', qwenModel: 'mock' })
-  await Promise.all(Array.from({ length: 100 }, () => planner.decide({ text: 'hello', history: [], candidates: [] })))
-  assert.equal(completed, 100)
-  assert.equal(peak, 4)
-})
 
 test('admission is FIFO and bounded, rejected work cannot leak permits', async () => {
   const queue = new AdmissionQueue(1, 2)

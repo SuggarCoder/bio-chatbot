@@ -45,6 +45,7 @@ import {
   isGenerationCancellationRequested,
   markGenerationStreaming,
   rebuildChatContext,
+  recordToolRun,
   requestGenerationCancellation,
   type Database,
   type ChatContext,
@@ -79,6 +80,13 @@ import {
 } from './generationQueue.js'
 import { GenerationStreamStore } from './streamStore.js'
 import { fitInputBudget, QwenTokenCounter, type TokenCounter } from './tokenBudget.js'
+import {
+  AgentSession,
+  type AgentFunctionCall,
+  type AgentToolbox,
+} from './agent/tools.js'
+import type { GpasPart } from './gpasContracts.js'
+import { openCredential, sealCredential } from './ingress.js'
 
 type StartGenerationInput = {
   user: CurrentUser
@@ -89,6 +97,16 @@ type StartGenerationInput = {
   artifactId?: string
   supersedesGenerationId?: string
   replacesMessageId?: string
+  /** Agent mode (create): tool ids selected at ingress and the raw GPAS cookie. */
+  agentToolIds?: string[]
+  cookie?: string
+  /** Agent mode (execute): sealed cookie loaded from the generation row. */
+  sealedCredential?: string
+}
+
+/** AAD binds a sealed GPAS session to one user's one generation. */
+function generationCredentialAad(userId: string, generationId: string): string {
+  return `${userId}:${generationId}:generation`
 }
 
 type CompletedUsage = GenerationUsage
@@ -216,6 +234,7 @@ export class GenerationService {
     private readonly artifactService: ArtifactService | null = null,
     tokenCounter?: TokenCounter,
     embeddings?: LocalEmbeddingService,
+    private readonly agent: AgentToolbox | null = null,
   ) {
     this.qwen = new OpenAI({
       fetch: modelBudgetFetch(config, redis),
@@ -329,6 +348,14 @@ export class GenerationService {
 
     const generationId = crypto.randomUUID()
     const streamId = `user:${input.user.id}:generation:${generationId}`
+    const agentToolIds = input.agentToolIds?.length ? input.agentToolIds : undefined
+    const credential = agentToolIds && input.cookie !== undefined
+      ? sealCredential(
+          input.cookie,
+          this.config.requestEncryptionKey,
+          generationCredentialAad(input.user.id, generationId),
+        )
+      : undefined
 
     let start: GenerationStart
 
@@ -345,6 +372,8 @@ export class GenerationService {
             model: this.config.qwenModel,
             artifactId: input.artifactId,
             contextMemoryEnabled: this.config.contextMemoryEnabled,
+            agentToolIds,
+            credential,
           })
         : await createGenerationStart(this.database, {
             userId: input.user.id,
@@ -358,6 +387,8 @@ export class GenerationService {
             model: this.config.qwenModel,
             artifactId: input.artifactId,
             contextMemoryEnabled: this.config.contextMemoryEnabled,
+            agentToolIds,
+            credential,
           })
     } catch (error) {
       if (error instanceof Error && error.message === 'CHAT_NOT_FOUND') {
@@ -492,6 +523,8 @@ export class GenerationService {
       model: item.model,
       artifactId: item.artifactId,
       replacesMessageId: item.replacesMessageId,
+      agentToolIds: item.agentToolIds,
+      sealedCredential: item.credential,
     }
     const runtime: GenerationRuntime = {
       generationId: start.generationId,
@@ -553,6 +586,8 @@ export class GenerationService {
       | { type: 'artifact_draft_ref'; streamArtifactId: string }
     > = []
     const completedDrafts: CompletedArtifactDraft[] = []
+    // Confirmation forms from agent tools, appended after the answer text.
+    const businessParts: GpasPart[] = []
     const acceptedArtifactIds = new Set<string>()
     let preparedArtifacts: PreparedArtifactVersion[] = []
     let eventWrites = Promise.resolve()
@@ -1030,152 +1065,273 @@ export class GenerationService {
         start.generationId,
       )
       if (!markedRunning) await this.checkpoint(runtime, true)
-      const responseStream = await this.qwen.responses.create(
-        {
-          model: input.model ?? this.config.qwenModel,
-          instructions: combinedInstructions || undefined,
-          input: context.messages.map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-          max_output_tokens: this.config.qwenMaxOutputTokens,
-          stream: true,
-        },
-        { signal: runtime.controller.signal },
-      )
-      await this.checkpoint(runtime, true)
+      // Agent mode: only tools chosen server-side at ingress are offered, and
+      // identity comes from the run's own sealed session, never the model.
+      const agentTools = !patchMode && input.agentToolIds?.length
+        ? this.agent?.select(input.agentToolIds) ?? null
+        : null
+      const agentSession = agentTools
+        ? new AgentSession(
+            this.config,
+            input.user,
+            input.sealedCredential
+              ? openCredential(
+                  input.sealedCredential,
+                  this.config.requestEncryptionKey,
+                  generationCredentialAad(input.user.id, start.generationId),
+                )
+              : undefined,
+            runtime.controller.signal,
+          )
+        : null
+      const modelInstructions = [
+        combinedInstructions,
+        agentTools?.instructions(),
+      ].filter(Boolean).join('\n\n')
+      const modelInput: OpenAI.Responses.ResponseInputItem[] =
+        context.messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+        }))
+      let toolCallsUsed = 0
 
-      for await (const event of responseStream) {
-        await this.checkpoint(runtime)
-        const providerEvent = event as unknown as {
-          type: string
-          item?: { id?: string; type?: string; name?: string }
+      // One model call in flight per run: the generation lease bounds total
+      // upstream concurrency (generation + background <= upstream).
+      for (;;) {
+        const toolsExhausted = toolCallsUsed >= this.config.agentMaxToolCalls
+        const responseStream = await this.qwen.responses.create(
+          {
+            model: input.model ?? this.config.qwenModel,
+            instructions: modelInstructions || undefined,
+            input: modelInput,
+            max_output_tokens: this.config.qwenMaxOutputTokens,
+            stream: true,
+            ...(agentTools
+              ? {
+                  tools: agentTools.tools,
+                  // The last round must answer from the results it already has.
+                  tool_choice: toolsExhausted ? 'none' as const : 'auto' as const,
+                }
+              : {}),
+          },
+          { signal: runtime.controller.signal },
+        )
+        await this.checkpoint(runtime, true)
+        const functionCalls: AgentFunctionCall[] = []
+        const collectFunctionCall = (item: { call_id?: string; name?: string; arguments?: string }) => {
+          if (!item.call_id || !item.name) return
+          if (functionCalls.some((call) => call.call_id === item.call_id)) return
+          functionCalls.push({
+            call_id: item.call_id,
+            name: item.name,
+            arguments: item.arguments ?? '',
+          })
+        }
+        let roundText = ''
+
+        for await (const event of responseStream) {
+          await this.checkpoint(runtime)
+          const providerEvent = event as unknown as {
+            type: string
+            item?: { id?: string; type?: string; name?: string }
+          }
+
+          if (event.type === 'response.created') {
+            completeStep('model', '模型服务已连接')
+            runtime.providerRequestId = event.response.id
+            const marked = await markGenerationStreaming(
+              this.database,
+              start.generationId,
+              runtime.providerRequestId,
+            )
+
+            if (!marked) {
+              await this.checkpoint(runtime, true)
+            }
+          } else if (providerEvent.type === 'response.output_item.added') {
+            const item = providerEvent.item
+            const itemType = item?.type ?? ''
+            const itemKey = item?.id ?? `${itemType}:${eventId}`
+
+            if (itemType === 'reasoning') {
+              completeStep('model', '模型服务已连接')
+              reasoningStepSequence += 1
+              const stepId = `reasoning:${reasoningStepSequence}`
+              reasoningStepIds.set(itemKey, stepId)
+              updateStep({
+                id: stepId,
+                kind: 'reasoning',
+                label: '分析并组织回答',
+                status: 'active',
+              })
+            } else if (agentTools && itemType === 'function_call') {
+              // Agent tools are executed and traced after this round's stream.
+            } else if (
+              itemType === 'function_call' ||
+              itemType.endsWith('_call')
+            ) {
+              toolStepSequence += 1
+              const stepId = `tool:${toolStepSequence}`
+              toolStepIds.set(itemKey, stepId)
+              const toolName = itemType === 'web_search_call'
+                ? 'web_search'
+                : itemType === 'file_search_call'
+                  ? 'file_analysis'
+                  : item?.name === 'database_query'
+                    ? 'database_query'
+                    : 'tool'
+              updateStep({
+                id: stepId,
+                kind: 'tool',
+                label: toolName === 'web_search'
+                  ? '搜索相关信息'
+                  : toolName === 'file_analysis'
+                    ? '分析文件'
+                    : toolName === 'database_query'
+                      ? '查询数据'
+                      : '调用工具',
+                status: 'active',
+              })
+              emit({
+                type: 'tool.start',
+                toolRunId: stepId,
+                toolName,
+              })
+            }
+          } else if (
+            agentTools &&
+            providerEvent.type === 'response.output_item.done' &&
+            providerEvent.item?.type === 'function_call'
+          ) {
+            collectFunctionCall(providerEvent.item)
+          } else if (providerEvent.type === 'response.output_item.done') {
+            const item = providerEvent.item
+            const itemType = item?.type ?? ''
+            const itemKey = item?.id ?? ''
+            const reasoningStepId = reasoningStepIds.get(itemKey) ??
+              [...runtime.executionSteps].reverse().find(
+                (step) => step.kind === 'reasoning' && step.status === 'active',
+              )?.id
+            const toolStepId = toolStepIds.get(itemKey) ??
+              [...runtime.executionSteps].reverse().find(
+                (step) => step.kind === 'tool' && step.status === 'active',
+              )?.id
+
+            if (itemType === 'reasoning' && reasoningStepId) {
+              completeStep(reasoningStepId)
+            } else if (toolStepId) {
+              completeStep(toolStepId)
+              emit({
+                type: 'tool.result',
+                toolRunId: toolStepId,
+                toolName: 'tool',
+              })
+            }
+          } else if (event.type === 'response.output_text.delta') {
+            completeStep('model', '模型服务已连接')
+            for (const step of runtime.executionSteps) {
+              if (step.kind === 'reasoning' && step.status === 'active') {
+                completeStep(step.id)
+              }
+            }
+            ensureResponseStep()
+            if (firstTokenAt === null) {
+              firstTokenAt = Date.now()
+            }
+            roundText += event.delta
+
+            if (patchMode) {
+              patchOutput += event.delta
+            } else if (parser) {
+              parser.push(event.delta)
+            } else {
+              const startIndex = runtime.partialOutput.length
+              runtime.partialOutput += event.delta
+              appendTextPart(event.delta)
+              messageSequence += 1
+              emit({
+                type: 'message.delta',
+                sequence: messageSequence,
+                startIndex,
+                delta: event.delta,
+              })
+            }
+          } else if (event.type === 'response.completed') {
+            runtime.providerRequestId = event.response.id
+            // Agent runs make several model calls; usage accumulates.
+            runtime.usage = addUsage(runtime.usage, extractUsage(event.response))
+            if (agentTools) {
+              for (const item of event.response.output ?? []) {
+                if (item.type === 'function_call') collectFunctionCall(item)
+              }
+            }
+          } else if (event.type === 'response.incomplete') {
+            runtime.providerRequestId = event.response.id
+            runtime.usage = addUsage(runtime.usage, extractUsage(event.response))
+            throw new GenerationLengthError()
+          } else if (event.type === 'response.failed') {
+            throw new Error(
+              event.response.error?.message || 'Qwen generation failed',
+            )
+          } else if (event.type === 'error') {
+            throw new Error(event.message || 'Qwen stream failed')
+          }
         }
 
-        if (event.type === 'response.created') {
-          completeStep('model', '模型服务已连接')
-          runtime.providerRequestId = event.response.id
-          const marked = await markGenerationStreaming(
-            this.database,
-            start.generationId,
-            runtime.providerRequestId,
-          )
 
-          if (!marked) {
-            await this.checkpoint(runtime, true)
-          }
-        } else if (providerEvent.type === 'response.output_item.added') {
-          const item = providerEvent.item
-          const itemType = item?.type ?? ''
-          const itemKey = item?.id ?? `${itemType}:${eventId}`
-
-          if (itemType === 'reasoning') {
-            completeStep('model', '模型服务已连接')
-            reasoningStepSequence += 1
-            const stepId = `reasoning:${reasoningStepSequence}`
-            reasoningStepIds.set(itemKey, stepId)
-            updateStep({
-              id: stepId,
-              kind: 'reasoning',
-              label: '分析并组织回答',
-              status: 'active',
+        if (!agentTools || !agentSession || functionCalls.length === 0 || toolsExhausted) break
+        await this.checkpoint(runtime, true)
+        if (roundText) modelInput.push({ role: 'assistant', content: roundText })
+        for (const call of functionCalls) {
+          modelInput.push({
+            type: 'function_call',
+            call_id: call.call_id,
+            name: call.name,
+            arguments: call.arguments,
+          })
+          if (toolCallsUsed >= this.config.agentMaxToolCalls) {
+            modelInput.push({
+              type: 'function_call_output',
+              call_id: call.call_id,
+              output: JSON.stringify({ error: '本次回答的工具调用次数已达上限，请基于已有结果回答。' }),
             })
-          } else if (
-            itemType === 'function_call' ||
-            itemType.endsWith('_call')
-          ) {
-            toolStepSequence += 1
-            const stepId = `tool:${toolStepSequence}`
-            toolStepIds.set(itemKey, stepId)
-            const toolName = itemType === 'web_search_call'
-              ? 'web_search'
-              : itemType === 'file_search_call'
-                ? 'file_analysis'
-                : item?.name === 'database_query'
-                  ? 'database_query'
-                  : 'tool'
-            updateStep({
-              id: stepId,
-              kind: 'tool',
-              label: toolName === 'web_search'
-                ? '搜索相关信息'
-                : toolName === 'file_analysis'
-                  ? '分析文件'
-                  : toolName === 'database_query'
-                    ? '查询数据'
-                    : '调用工具',
-              status: 'active',
-            })
-            emit({
-              type: 'tool.start',
-              toolRunId: stepId,
-              toolName,
-            })
+            continue
           }
-        } else if (providerEvent.type === 'response.output_item.done') {
-          const item = providerEvent.item
-          const itemType = item?.type ?? ''
-          const itemKey = item?.id ?? ''
-          const reasoningStepId = reasoningStepIds.get(itemKey) ??
-            [...runtime.executionSteps].reverse().find(
-              (step) => step.kind === 'reasoning' && step.status === 'active',
-            )?.id
-          const toolStepId = toolStepIds.get(itemKey) ??
-            [...runtime.executionSteps].reverse().find(
-              (step) => step.kind === 'tool' && step.status === 'active',
-            )?.id
-
-          if (itemType === 'reasoning' && reasoningStepId) {
-            completeStep(reasoningStepId)
-          } else if (toolStepId) {
-            completeStep(toolStepId)
-            emit({
-              type: 'tool.result',
-              toolRunId: toolStepId,
-              toolName: 'tool',
-            })
-          }
-        } else if (event.type === 'response.output_text.delta') {
-          completeStep('model', '模型服务已连接')
-          for (const step of runtime.executionSteps) {
-            if (step.kind === 'reasoning' && step.status === 'active') {
-              completeStep(step.id)
-            }
-          }
-          ensureResponseStep()
-          if (firstTokenAt === null) {
-            firstTokenAt = Date.now()
-          }
-
-          if (patchMode) {
-            patchOutput += event.delta
-          } else if (parser) {
-            parser.push(event.delta)
-          } else {
-            const startIndex = runtime.partialOutput.length
-            runtime.partialOutput += event.delta
-            appendTextPart(event.delta)
-            messageSequence += 1
-            emit({
-              type: 'message.delta',
-              sequence: messageSequence,
-              startIndex,
-              delta: event.delta,
-            })
-          }
-        } else if (event.type === 'response.completed') {
-          runtime.providerRequestId = event.response.id
-          runtime.usage = extractUsage(event.response)
-        } else if (event.type === 'response.incomplete') {
-          runtime.providerRequestId = event.response.id
-          runtime.usage = extractUsage(event.response)
-          throw new GenerationLengthError()
-        } else if (event.type === 'response.failed') {
-          throw new Error(
-            event.response.error?.message || 'Qwen generation failed',
-          )
-        } else if (event.type === 'error') {
-          throw new Error(event.message || 'Qwen stream failed')
+          toolCallsUsed += 1
+          toolStepSequence += 1
+          const stepId = `tool:${toolStepSequence}`
+          const title = agentTools.title(call.name) ?? '业务数据'
+          updateStep({
+            id: stepId,
+            kind: 'tool',
+            label: agentTools.effect(call.name) === 'prepare_confirmation'
+              ? `准备${title}`
+              : `查询${title}`,
+            status: 'active',
+          })
+          emit({ type: 'tool.start', toolRunId: stepId, toolName: call.name })
+          const toolStartedAt = new Date()
+          const result = await agentTools.execute(call, agentSession)
+          await this.checkpoint(runtime, true)
+          await recordToolRun(this.database, {
+            userId: input.user.id,
+            generationId: start.generationId,
+            toolCallId: call.call_id,
+            toolName: result.toolId ?? call.name,
+            ok: result.ok,
+            args: result.args,
+            outputBytes: Buffer.byteLength(result.output, 'utf8'),
+            error: result.error,
+            startedAt: toolStartedAt,
+          }).catch(() => undefined)
+          completeStep(stepId, result.ok ? undefined : '未能完成')
+          emit({ type: 'tool.result', toolRunId: stepId, toolName: call.name })
+          if (result.part) businessParts.push(result.part)
+          modelInput.push({
+            type: 'function_call_output',
+            call_id: call.call_id,
+            output: result.output,
+          })
         }
       }
 
@@ -1297,7 +1453,10 @@ export class GenerationService {
         desiredStatus: 'completed',
         content: runtime.partialOutput,
         messageId,
-        messageParts,
+        messageParts: [
+          ...messageParts,
+          ...businessParts.map((part) => ({ type: 'gpas' as const, part })),
+        ],
         preparedArtifacts,
         providerRequestId: runtime.providerRequestId,
         usage: runtime.usage,

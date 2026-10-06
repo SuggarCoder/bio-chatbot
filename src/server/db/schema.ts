@@ -359,6 +359,9 @@ export const generations = pgTable(
     streamId: varchar('streamId', { length: 256 }).notNull(),
     requestId: varchar('requestId', { length: 128 }).notNull(),
     providerRequestId: varchar('providerRequestId', { length: 256 }),
+    // Sealed GPAS session for agent tools (AES-GCM, AAD userId:generationId).
+    // Cleared when the generation is finalized.
+    credential: text('credential'),
     status: varchar('status', { length: 20 }).notNull().default('created'),
     priority: integer('priority').notNull().default(0),
     attempt: integer('attempt').notNull().default(0),
@@ -1213,7 +1216,7 @@ export const businessOperations = pgTable('BusinessOperation', {
   check('chk_business_status', sql`${table.status} in ('running', 'result_ready', 'completed', 'failed', 'uncertain')`),
 ])
 
-// Durable admission before embedding, planning or external business execution.
+// Durable admission before tool selection, generation or external business execution.
 export const ingressRequests = pgTable('IngressRequest', {
   id: uuid('id').defaultRandom().primaryKey(),
   userId: uuid('userId').notNull().references(() => users.id, { onDelete: 'cascade' }),
@@ -1225,7 +1228,6 @@ export const ingressRequests = pgTable('IngressRequest', {
   externalUserId: text('externalUserId').notNull(),
   teamId: text('teamId').notNull(),
   status: text('status').notNull().default('queued'),
-  plan: jsonb('plan').$type<import('../capabilities/registry.js').CapabilityPlan>(),
   result: jsonb('result').$type<Record<string, unknown>>(),
   error: jsonb('error').$type<{ code: string; message: string }>(),
   attempts: integer('attempts').notNull().default(0),

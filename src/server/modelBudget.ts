@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AppConfig } from './config.js'
 import { redisKey, type RedisClient } from './cache.js'
 
-// Shared by planner, generation streams and background requests, across processes.
+// Shared by agent generation calls and background requests, across processes.
 export const acquireModelPermit = `
 local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000)
 redis.call('ZREMRANGEBYSCORE',KEYS[1],'-inf',now)

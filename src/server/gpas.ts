@@ -1,50 +1,11 @@
 import { z } from 'zod'
 import { AuthenticationError } from './auth.js'
 import type { AppConfig } from './config.js'
+import { GpasClient } from './gpas/client.js'
 import type { Gpas2UserInfo } from './domain.js'
 import { sampleKeys, sampleLabels, sampleCountsSchema, type GpasPart, type ProjectInput } from './gpasContracts.js'
 
-type GpasOperation = 'project_exists' | 'project_summary' | 'project_create'
-const operationMethods: Record<GpasOperation, 'GET' | 'POST'> = {
-  project_exists: 'GET',
-  project_summary: 'POST',
-  project_create: 'POST',
-}
-const operationLabels: Record<GpasOperation, string> = {
-  project_exists: '项目存在性查询',
-  project_summary: '项目进度汇总查询',
-  project_create: '项目创建',
-}
-
-export class GpasUpstreamError extends AuthenticationError {
-  constructor(
-    message: string,
-    code: string,
-    readonly diagnostics: {
-      operation: GpasOperation
-      upstreamStatus?: number
-      upstreamCode?: number
-      responseContentType?: string
-      method: string
-      endpoint: string
-    },
-    statusCode = 502,
-  ) {
-    super(message, statusCode, code)
-  }
-}
-
-export function gpasUrl(userInfoUrl: string | undefined, resource: string): URL {
-  if (!userInfoUrl) throw new AuthenticationError('未配置 GPAS 用户信息接口地址。', 503, 'gpas_config_invalid')
-  const url = new URL(userInfoUrl)
-  const path = url.pathname.endsWith('/') ? url.pathname.slice(0, -1) : url.pathname
-  const suffix = '/user/info'
-  if (!path.endsWith(suffix)) throw new AuthenticationError('GPAS 用户信息接口地址应以 /user/info 结尾。', 503, 'gpas_config_invalid')
-  url.pathname = `${path.slice(0, -suffix.length)}/${resource}`
-  url.search = ''
-  url.hash = ''
-  return url
-}
+export { GpasUpstreamError, gpasUrl } from './gpas/client.js'
 
 const textCell = (value: unknown) => String(value || '未提供').replace(/[\\`*_{}\[\]<>()|#]/g, '\\$&').replace(/[\r\n]+/g, ' ')
 export function profileReply(profile: Gpas2UserInfo) {
@@ -55,7 +16,6 @@ export function profileReply(profile: Gpas2UserInfo) {
   ].map(([label, value]) => `| ${label} | ${textCell(value)} |`).join('\n')}`
 }
 
-const envelope = z.object({ code: z.number(), message: z.string().optional() }).passthrough()
 const seedSchema = z.object({
   projectCode: z.string().min(1), userName: z.string(), projectName: z.string().optional(),
   phone: z.string().optional(), teamId: z.string().min(1),
@@ -72,58 +32,44 @@ export type BusinessReply = {
   part: GpasPart
 }
 
+export type SampleProgress = {
+  type: typeof sampleKeys[number]
+  label: string
+  plan: number
+  submitted: number
+  remaining: number
+  /** Percentage with one decimal, or null when no plan is set. */
+  completionRate: number | null
+}
+
+export type ProjectProgress =
+  | { initialized: false; form: BusinessReply }
+  | { initialized: true; demo: boolean; projectName: string; teamName: string | null; samples: SampleProgress[] }
+
+export function progressReply(progress: ProjectProgress): BusinessReply {
+  if (!progress.initialized) return progress.form
+  const prefix = progress.demo ? '（本地演示数据）\n\n' : ''
+  const lines = progress.samples.map((row) => {
+    const rate = row.completionRate === null ? '未设置计划' : `${row.completionRate.toFixed(1)}%`
+    return `| ${row.label} | ${row.plan} | ${row.submitted} | ${row.remaining} | ${rate} |`
+  })
+  return {
+    content: `${prefix}项目：${textCell(progress.projectName)}\n\n团队：${textCell(progress.teamName)}\n\n| 样本类型 | 计划数量 | 已提交 | 剩余 | 完成率 |\n| --- | ---: | ---: | ---: | --- |\n${lines.join('\n')}\n\n已提交数量按接口返回的各年月累计统计。`,
+    part: { type: 'gpas', order: 1 },
+  }
+}
+
 export class GpasService {
   // Development fixtures are isolated to this process and never enabled in production.
   private readonly mockProjects = new Map<string, ProjectInput>()
-  constructor(private readonly config: AppConfig) {}
-
   private team(profile: Gpas2UserInfo) {
     if (!profile.ownteamId) throw new AuthenticationError('当前用户未关联团队，无法查询项目。', 422, 'team_missing')
     return profile.ownteamId
   }
 
-  private async request(cookie: string | undefined, operation: GpasOperation, path: string, body?: unknown) {
-    if (!cookie) throw new AuthenticationError('登录已失效，请重新登录。')
-    const url = gpasUrl(this.config.gpas2UserInfoUrl, path)
-    const method = operationMethods[operation]
-    // Keep the actual request path for diagnosis. Only URL credentials are
-    // removed; cookies and payloads are never included in diagnostics.
-    const endpoint = new URL(url)
-    endpoint.username = ''
-    endpoint.password = ''
-    const diagnostics = { operation, method, endpoint: endpoint.toString() }
-    const label = operationLabels[operation]
-    let response: Response
-    try {
-      response = await fetch(url, {
-        method, redirect: 'error',
-        headers: { accept: 'application/json', cookie, ...(method === 'POST' ? { 'content-type': 'application/json' } : {}) },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(10_000),
-      })
-    } catch {
-      throw new GpasUpstreamError(`${label}连接失败或超时，请稍后重试；若刚提交过表单，请先查询项目进度确认结果。`, 'gpas_unavailable', diagnostics)
-    }
-    const responseDiagnostics = {
-      ...diagnostics,
-      upstreamStatus: response.status,
-      responseContentType: response.headers.get('content-type') ?? undefined,
-    }
-    if (response.status === 401 || response.status === 403) throw new GpasUpstreamError(`${label}失败：登录已失效或无权访问项目（上游 HTTP ${response.status}）。`, 'unauthorized', responseDiagnostics, response.status)
-    if (!response.ok) throw new GpasUpstreamError(`${label}返回错误（上游 HTTP ${response.status}），请联系管理员检查对应接口。`, 'gpas_upstream_error', responseDiagnostics)
-    let payload: z.infer<typeof envelope>
-    try { payload = envelope.parse(await response.json()) } catch {
-      throw new GpasUpstreamError(`${label}返回了无效数据（上游 HTTP ${response.status}）。`, 'gpas_invalid_response', responseDiagnostics)
-    }
-    if (payload.code === 401 || payload.code === 403) throw new GpasUpstreamError(`${label}失败：登录已失效或无权访问项目。`, 'unauthorized', { ...responseDiagnostics, upstreamCode: payload.code }, payload.code)
-    if (payload.code !== 200) throw new GpasUpstreamError(`${label}未成功（业务状态码 ${payload.code}），请检查填写信息或稍后重试。`, 'gpas_business_error', { ...responseDiagnostics, upstreamCode: payload.code })
-    return payload
-  }
-
-  private parse<T>(schema: z.ZodType<T>, value: unknown): T {
-    const parsed = schema.safeParse(value)
-    if (!parsed.success) throw new AuthenticationError('项目服务数据不完整，请联系管理员。', 502, 'gpas_invalid_response')
-    return parsed.data
+  readonly client: GpasClient
+  constructor(private readonly config: AppConfig) {
+    this.client = new GpasClient(config)
   }
 
   async existence(profile: Gpas2UserInfo, cookie?: string) {
@@ -132,7 +78,7 @@ export class GpasService {
       data: this.mockProjects.has(team),
       info: { projectCode: 'DEMO-001', userName: '演示项目', phone: '13800000000', teamId: team },
     }
-    return this.parse(existenceSchema, await this.request(cookie, 'project_exists', `project/exist/${encodeURIComponent(team)}`))
+    return this.client.read(cookie, { operation: 'project_exists', label: '项目存在性查询', method: 'GET', path: `project/exist/${encodeURIComponent(team)}` }, existenceSchema)
   }
 
   private initializationForm(profile: Gpas2UserInfo, exists: z.infer<typeof existenceSchema>): BusinessReply {
@@ -161,25 +107,35 @@ export class GpasService {
     return this.initializationStatus(profile, cookie)
   }
 
-  async progress(profile: Gpas2UserInfo, cookie?: string): Promise<BusinessReply> {
+  /** Structured progress data shared by the chat reply and agent tools. */
+  async progressData(profile: Gpas2UserInfo, cookie?: string): Promise<ProjectProgress> {
     const exists = await this.existence(profile, cookie)
-    if (!exists.data) return this.initializationForm(profile, exists)
-    const prefix = this.config.gpas2AuthMode === 'mock' ? '（本地演示数据）\n\n' : ''
+    if (!exists.data) return { initialized: false, form: this.initializationForm(profile, exists) }
     const mock = this.mockProjects.get(this.team(profile))
     const summary = this.config.gpas2AuthMode === 'mock'
       ? { projectPlanInfo: { ...mock!.samples, name: mock!.projectName, id: 'demo-project' }, realSubmitInfo: [] }
-      : this.parse(summarySchema, await this.request(cookie, 'project_summary', `summary/submit/info/${encodeURIComponent(this.team(profile))}`))
-    const lines = sampleKeys.map((key, index) => {
+      : await this.client.read(cookie, { operation: 'project_summary', label: '项目进度汇总查询', method: 'POST', path: `summary/submit/info/${encodeURIComponent(this.team(profile))}` }, summarySchema)
+    const samples = sampleKeys.map((key, index) => {
       const plan = summary.projectPlanInfo[key]
       const submitted = summary.realSubmitInfo.reduce((total, row) => total + (row[key] ?? 0), 0)
       if (!Number.isSafeInteger(submitted)) throw new AuthenticationError('样本提交总量无效。', 502, 'gpas_invalid_response')
-      const rate = plan > 0 ? `${(submitted / plan * 100).toFixed(1)}%` : '未设置计划'
-      return `| ${sampleLabels[index]} | ${plan} | ${submitted} | ${Math.max(0, plan - submitted)} | ${rate} |`
+      return {
+        type: key, label: sampleLabels[index], plan, submitted,
+        remaining: Math.max(0, plan - submitted),
+        completionRate: plan > 0 ? Number((submitted / plan * 100).toFixed(1)) : null,
+      }
     })
     return {
-      content: `${prefix}项目：${textCell(summary.projectPlanInfo.name)}\n\n团队：${textCell(profile.ownteamName)}\n\n| 样本类型 | 计划数量 | 已提交 | 剩余 | 完成率 |\n| --- | ---: | ---: | ---: | --- |\n${lines.join('\n')}\n\n已提交数量按接口返回的各年月累计统计。`,
-      part: { type: 'gpas', order: 1 },
+      initialized: true,
+      demo: this.config.gpas2AuthMode === 'mock',
+      projectName: summary.projectPlanInfo.name,
+      teamName: profile.ownteamName ?? null,
+      samples,
     }
+  }
+
+  async progress(profile: Gpas2UserInfo, cookie?: string): Promise<BusinessReply> {
+    return progressReply(await this.progressData(profile, cookie))
   }
 
   async create(profile: Gpas2UserInfo, cookie: string | undefined, input: ProjectInput, expected: NonNullable<GpasPart['form']>): Promise<BusinessReply> {
@@ -189,10 +145,10 @@ export class GpasService {
       throw new AuthenticationError('初始化信息已变化，请重新发送“我的任务进度”获取表单。', 409, 'project_form_stale')
     }
     if (this.config.gpas2AuthMode === 'mock') this.mockProjects.set(this.team(profile), input)
-    else await this.request(cookie, 'project_create', 'project/create', {
+    else await this.client.call(cookie, { operation: 'project_create', label: '项目创建', method: 'POST', path: 'project/create', body: {
       projectCode: exists.info.projectCode, projectName: input.projectName, projectDesc: input.projectDesc,
       ownTeamId: this.team(profile), phone: input.phone, planContent: JSON.stringify(input.samples),
-    })
+    } })
     return { content: '项目初始化成功。发送“我的任务进度”可查询四类样本的最新提交情况。', part: { type: 'gpas', order: 1 } }
   }
 }

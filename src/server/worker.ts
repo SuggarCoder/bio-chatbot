@@ -39,6 +39,10 @@ import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
 import { normalizeExecutionSteps } from './executionTrace.js'
 import { SeaweedS3ObjectStore } from './storage/seaweedS3ObjectStore.js'
 import { QwenTokenCounter } from './tokenBudget.js'
+import { AgentToolbox } from './agent/tools.js'
+import { createGpasCapabilities } from './capabilities/gpas.js'
+import { GpasService } from './gpas.js'
+import { createGpasTools } from './gpas/tools/index.js'
 
 const config = readConfig()
 const database = createDatabase(config.databaseUrl, config.pgPoolMax)
@@ -68,6 +72,14 @@ await tokenCounter.initialize()
 if (config.artifactContextV2Enabled) {
   await embeddingService.initialize()
 }
+// Agent tools share the GPAS specs used by the API's capability catalog.
+const gpasService = new GpasService(config)
+const agentToolbox = new AgentToolbox(
+  config,
+  createGpasTools(gpasService),
+  gpasService.client,
+  createGpasCapabilities(gpasService).descriptions(),
+)
 const generations = new GenerationService(
   config,
   database,
@@ -77,6 +89,7 @@ const generations = new GenerationService(
   artifactService,
   tokenCounter,
   embeddingService,
+  agentToolbox,
 )
 const queue = new GenerationQueue(config, redis)
 const backgroundQueue = new BackgroundQueue(config, redis)

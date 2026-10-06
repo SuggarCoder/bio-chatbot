@@ -43,6 +43,13 @@
       "when": 1791293333756,
       "tag": "0005_user_generation_concurrency_3",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791297714149,
+      "tag": "0006_agent_mode",
+      "breakpoints": true
     }
   ]
 }

@@ -37,6 +37,9 @@ export type GenerationWorkItem = {
   contextMaxSeq?: number
   summaryVersion?: number
   summaryCoveredMaxSeq?: number
+  /** Agent mode: tool ids chosen at ingress, and the sealed GPAS session. */
+  agentToolIds?: string[]
+  credential?: string
   user: CurrentUser
 }
 
@@ -521,6 +524,7 @@ export async function loadGenerationWorkItem(
       model: generations.model,
       attempt: generations.attempt,
       metadata: generations.metadata,
+      credential: generations.credential,
       content: messages.content,
       userId: users.id,
       externalUserId: users.externalUserId,
@@ -575,6 +579,10 @@ export async function loadGenerationWorkItem(
     summaryCoveredMaxSeq: typeof metadata.summaryCoveredMaxSeq === 'number'
       ? metadata.summaryCoveredMaxSeq
       : undefined,
+    agentToolIds: Array.isArray(metadata.agentToolIds)
+      ? metadata.agentToolIds.filter((id): id is string => typeof id === 'string')
+      : undefined,
+    credential: row.credential ?? undefined,
     user: {
       id: row.userId,
       externalUserId: row.externalUserId,

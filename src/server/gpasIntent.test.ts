@@ -27,18 +27,6 @@ test('capability retrieval is vector driven, cached, bounded and reserves contex
   assert.equal(calls.length, 49)
 })
 
-test('ambiguous BGE scores are handed to semantic planning, not converted to an action', async () => {
-  const router = new SemanticIntentRouter({ embed: async () => vector(0) }, descriptions)
-  const decision = { capabilityId: null, intent: 'clarify', scope: 'unspecified', confidence: 0.3 }
-  const result = await router.classify('这能再来一次吗', { decide: async input => {
-    assert.equal(input.text, '这能再来一次吗')
-    assert.ok(input.candidates.length <= 16)
-    assert.deepEqual(input.history, [{ role: 'user', content: '前一轮' }])
-    return decision
-  } }, [{ role: 'user', content: '前一轮' }])
-  assert.deepEqual(result.decision, decision)
-})
-
 test('embedding failures and invalid vectors fail explicitly without keyword fallback and permit retry', async () => {
   let fail = true
   const router = new SemanticIntentRouter({ embed: async () => {
