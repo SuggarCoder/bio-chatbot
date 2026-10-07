@@ -113,11 +113,13 @@ const gpasFile = (fileId: string, overrides: Record<string, unknown> = {}) => ({
 })
 
 test('file list tool queries the session team and keeps only the requested batch', async (t) => {
-  const bodies: Array<Record<string, unknown>> = []
+  const queries: Array<Record<string, string>> = []
   t.mock.method(globalThis, 'fetch', async (url: URL, init: RequestInit) => {
     assert.equal(url.pathname, '/api/gpas2/v1/file/dual/merge/list')
+    assert.equal(init.method, 'GET')
+    assert.equal(init.body, undefined)
     assert.equal(new Headers(init.headers).get('cookie'), 'session=mine')
-    bodies.push(JSON.parse(String(init.body)))
+    queries.push(Object.fromEntries(url.searchParams))
     return Response.json({ code: 200, message: 'ok', maxPageSize: 100, dataPage: {
       currentCnt: 3, page: 1, pageSize: 50, totalData: 3, totalPage: 1,
       dataList: [
@@ -133,7 +135,7 @@ test('file list tool queries the session team and keeps only the requested batch
     total: number; rows: Array<{ paired: boolean; files: Array<Record<string, unknown>> }>; missingFileIds: string[]
   }
 
-  assert.deepEqual(bodies[0], { page: 1, pageSize: 50, orderBy: ['-create_time'], ownTeamId: 'team-test' })
+  assert.deepEqual(queries[0], { page: '1', pageSize: '50', ownTeamId: 'team-test' })
   assert.equal(data.total, 1)
   assert.equal(data.rows[0].paired, true)
   assert.deepEqual(data.rows[0].files.map((file) => file.fileId), ['f-1', 'f-2'])
@@ -149,17 +151,17 @@ test('file list tool queries the session team and keeps only the requested batch
 })
 
 test('file list tool forwards filters and rejects malformed pages', async (t) => {
-  let body: Record<string, unknown> = {}
+  let query: Record<string, string> = {}
   let payload: unknown = { code: 200, dataPage: { dataList: [], totalData: 0 } }
-  t.mock.method(globalThis, 'fetch', async (_url: URL, init: RequestInit) => {
-    body = JSON.parse(String(init.body))
+  t.mock.method(globalThis, 'fetch', async (url: URL) => {
+    query = Object.fromEntries(url.searchParams)
     return Response.json(payload)
   })
   const service = new GpasService(config)
   const tool = createGpasTools(service).find((item) => item.id === 'file.list')!
   const context = { profile, cookie: 'session=mine', client: service.client }
   const data = await tool.run(context, tool.input.parse({ fileName: 'S01', status: 'uploaded;failed', page: 2, pageSize: 10 }))
-  assert.deepEqual(body, { fileName: 'S01', status: 'uploaded;failed', page: 2, pageSize: 10, orderBy: ['-create_time'], ownTeamId: 'team-test' })
+  assert.deepEqual(query, { fileName: 'S01', status: 'uploaded;failed', page: '2', pageSize: '10', ownTeamId: 'team-test' })
   assert.match(tool.toReply(data, context).content, /没有查询到上传文件/)
   assert.equal(tool.input.safeParse({ pageSize: 500 }).success, false)
 

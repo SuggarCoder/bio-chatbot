@@ -74,13 +74,14 @@ export const fileListTool = defineGpasTool({
     if (!profile.ownteamId) throw new AuthenticationError('当前用户未关联团队，无法查询文件。', 422, 'team_missing')
     const lookup = args.fileIds?.length ? new Set(args.fileIds) : null
     const { fileIds: _ids, page, pageSize, ...filters } = args
+    // GET with query parameters. orderBy is left to the API default
+    // (-update_time, -create_time), which already lists new uploads first.
     const data = await client.read(cookie, {
-      operation: 'file_merge_list', label: '上传文件列表查询', method: 'POST', path: 'file/dual/merge/list',
-      body: {
+      operation: 'file_merge_list', label: '上传文件列表查询', method: 'GET', path: 'file/dual/merge/list',
+      query: {
         ...filters,
         page: lookup ? 1 : page ?? 1,
         pageSize: lookup ? LOOKUP_PAGE_SIZE : pageSize ?? 20,
-        orderBy: ['-create_time'],
         ownTeamId: profile.ownteamId,
       },
     }, listSchema)

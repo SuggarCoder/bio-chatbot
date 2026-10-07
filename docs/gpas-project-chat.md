@@ -112,9 +112,9 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 上传结果摘要，供模型在本轮及后续上下文中读取；界面显示用户原文和 `gpas_upload` part 中的文件列表。
 `uploads` 由客户端上报，只作为模型上下文，服务端不会据此对 GPAS 做任何写操作。
 
-带上传结果的消息总会向助手提供 `file.list` 工具（`POST file/dual/merge/list`，服务端用会话 Cookie 和
+带上传结果的消息总会向助手提供 `file.list` 工具（`GET file/dual/merge/list`，参数放在查询串，服务端用会话 Cookie 和
 当前团队 `ownTeamId` 查询）。助手按这批上传成功的 `fileId` 查询，并用表格展示文件状态、质检、分析和元信息状态，
-而不是复述上传进度。接口不支持按 fileId 过滤，因此取最新一页（50 条，`-create_time`）在服务端筛选，
+而不是复述上传进度。接口不支持按 fileId 过滤，因此按接口默认排序（`-update_time, -create_time`）取最新一页（50 条）在服务端筛选，
 未找到的 fileId 作为“可能仍在入库”返回。用户之后也可以直接问“我上传的文件”。
 
 ### 远端验收清单

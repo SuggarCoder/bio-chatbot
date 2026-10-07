@@ -11,6 +11,8 @@ export type GpasRequest = {
   method: 'GET' | 'POST'
   /** Resource path relative to the GPAS API prefix, already URL-encoded. */
   path: string
+  /** Query parameters; undefined values are skipped. */
+  query?: Record<string, string | number | undefined>
   body?: unknown
 }
 
@@ -59,12 +61,17 @@ export class GpasClient {
 
   async call(cookie: string | undefined, request: GpasRequest): Promise<GpasEnvelope> {
     if (!cookie) throw new AuthenticationError('登录已失效，请重新登录。')
-    const { operation, label, method, path, body } = request
+    const { operation, label, method, path, query, body } = request
     const url = gpasUrl(this.config.gpas2UserInfoUrl, path)
+    for (const [key, value] of Object.entries(query ?? {})) {
+      if (value !== undefined) url.searchParams.set(key, String(value))
+    }
     // Keep the actual request path for diagnosis. Only URL credentials are removed.
     const endpoint = new URL(url)
     endpoint.username = ''
     endpoint.password = ''
+    // Query values are business filters; diagnostics keep the path only.
+    endpoint.search = ''
     const diagnostics = { operation, method, endpoint: endpoint.toString() }
     let response: Response
     try {
