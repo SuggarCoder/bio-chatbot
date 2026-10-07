@@ -93,11 +93,14 @@ export function renderUploadContext(batch: GpasUploadBatch): string {
     return `${index + 1}. ${fields.join('｜')}`
   })
   const uploaded = batch.items.filter(item => item.status === 'uploaded').length
+  const fileIds = batch.items.flatMap(item => item.status === 'uploaded' && item.fileId ? [item.fileId] : [])
   return [
     '[GPAS 文件上传结果（由客户端上报）]',
     `样本类型：${sampleLabel(batch.sampleType)}（${batch.sampleType}）`,
     `共 ${batch.items.length} 个文件，成功 ${uploaded} 个。`,
     ...lines,
-    '说明：助手目前只能说明这些文件的上传情况，不能代为发起分析、提交或删除文件。',
+    fileIds.length
+      ? `说明：请先调用 file.list 工具（fileIds=${JSON.stringify(fileIds)}）查询这批文件在 GPAS 中的状态，并用表格展示返回结果；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。`
+      : '说明：本批没有上传成功的文件；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。',
   ].join('\n')
 }

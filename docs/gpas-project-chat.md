@@ -94,6 +94,10 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 文件名预配对，再用 FASTQ 头部的 read ID 交叉验证；新增文件只读取新文件，但整批重新配对。
 存在孤立 R2、文件名不规范、或未确认的疑似 R1 时不能发送。上传前必须选择样本类型。
 
+文件列表显示在输入框上方，样本类型在文件列表下一行。可选的样本类型来自 `project.status` 工具
+（`GET /ai-chatbot/api/gpas/upload/sample-types`）：团队未初始化项目时显示全部四类；已初始化时只显示
+计划数量大于 0 的类型，多个项目取交集（AND）；只有一类时自动选中。发送按钮不可用时悬停显示原因。
+
 点击发送时先上传，全部文件结束后才发送消息：
 
 - 浏览器直接请求同源 `/api/gpas2/v1/file/*`，只带 GPAS Cookie（可用 `VITE_GPAS_API_BASE` 覆盖前缀）。
@@ -108,6 +112,11 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 上传结果摘要，供模型在本轮及后续上下文中读取；界面显示用户原文和 `gpas_upload` part 中的文件列表。
 `uploads` 由客户端上报，只作为模型上下文，服务端不会据此对 GPAS 做任何写操作。
 
+带上传结果的消息总会向助手提供 `file.list` 工具（`POST file/dual/merge/list`，服务端用会话 Cookie 和
+当前团队 `ownTeamId` 查询）。助手按这批上传成功的 `fileId` 查询，并用表格展示文件状态、质检、分析和元信息状态，
+而不是复述上传进度。接口不支持按 fileId 过滤，因此取最新一页（50 条，`-create_time`）在服务端筛选，
+未找到的 fileId 作为“可能仍在入库”返回。用户之后也可以直接问“我上传的文件”。
+
 ### 远端验收清单
 
 上传接口无法在本地访问，以下需在远端用真实登录验证；默认假设集中在
@@ -120,3 +129,7 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 5. 哪些业务 `code` 可重试（填入 `RETRYABLE_BUSINESS_CODES`）。
 6. 上传 1 个单端加 1 对双端后，GPAS Web 能看到文件，数据状态页立即开始轮询（同时确认 `pollingGate` 的 key 与 `/me` 的 `userName`、`externalTeamId` 对应）。
 7. 上传中断网再恢复能继续；限速弱网下进度持续推进；Cookie 失效时整批停止并提示重新登录。
+8. 服务端转发会话 Cookie 能调用 `file/dual/merge/list`；返回体为顶层 `dataPage`（不在 `data` 内）；
+   文件行上是否有 `qcStatus` 字段，状态取值是否需要翻译成中文（见 `src/server/gpas/tools/file.ts`）。
+9. 刚上传完成的文件能否立即出现在 `merge/list` 中；若有延迟，助手会提示部分文件“可能仍在入库”。
+10. `summary/submit/info` 在多项目团队下 `projectPlanInfo` 的实际形状（当前同时接受对象或对象数组）。

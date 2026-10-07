@@ -15,7 +15,8 @@ import { fileURLToPath } from 'node:url'
 import { AuthenticationError, loadProfile, resolveCurrentUser } from './auth.js'
 import { GpasUpstreamError } from './gpas.js'
 import { createCapabilityRuntime, type CapabilityRuntime } from './capabilities/runtime.js'
-import { gpasUploadBatchSchema, projectInputSchema } from './gpasContracts.js'
+import { gpasUploadBatchSchema, projectInputSchema, type SampleKey } from './gpasContracts.js'
+import { createGpasTools } from './gpas/tools/index.js'
 import {
   redisKey,
   consumeGenerationRateLimit,
@@ -67,6 +68,14 @@ import {
 
 const APP_BASE = '/ai-chatbot/'
 const API_BASE = '/ai-chatbot/api'
+
+/**
+ * Upload results are always followed by a file status lookup, even when the
+ * router narrowed the catalog for the message text.
+ */
+export function withUploadTools(ids: string[], catalog: readonly string[], hasUploads: boolean): string[] {
+  return hasUploads && catalog.includes('file.list') && !ids.includes('file.list') ? [...ids, 'file.list'] : ids
+}
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -374,6 +383,16 @@ export async function buildApp(
 
   app.get(`${API_BASE}/me`, { schema: httpSchemas.me }, async (request) => {
     return authenticate(request)
+  })
+
+  // Upload sample types come from the project status tool, so the composer
+  // and the agent share one definition of "initialized sample types".
+  const projectStatusTool = createGpasTools(gpas).find((tool) => tool.id === 'project.status')!
+  app.get(`${API_BASE}/gpas/upload/sample-types`, { schema: httpSchemas.uploadSampleTypes }, async (request) => {
+    const profile = await loadProfile(request, config)
+    const cookie = request.headers.cookie
+    const data = await projectStatusTool.run({ profile, cookie, client: gpas.client }, {}) as { initialized: boolean; sampleTypes: SampleKey[] }
+    return { initialized: data.initialized, types: data.sampleTypes }
   })
 
   app.get<{
@@ -1082,7 +1101,7 @@ export async function buildApp(
       artifactId: artifactId || undefined,
       supersedesGenerationId: supersedesGenerationId || undefined,
       uploads,
-      agentToolIds: await selectAgentToolIds(content),
+      agentToolIds: withUploadTools(await selectAgentToolIds(content), agentToolCatalog, Boolean(uploads)),
       cookie,
     })
   }, () => app.log.warn('Durable ingress storage temporarily unavailable'))

@@ -1,4 +1,4 @@
-import type { GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput } from '../../../server/gpasContracts'
+import type { GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput, SampleKey } from '../../../server/gpasContracts'
 export type { GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput } from '../../../server/gpasContracts'
 
 const API_BASE = `${import.meta.env?.BASE_URL ?? '/ai-chatbot/'}api`
@@ -207,6 +207,11 @@ async function requestJson<T>(
 
 export function fetchCurrentUser() {
   return requestJson<CurrentUserDto>('/me')
+}
+
+/** Sample types the team can upload, from the GPAS project status tool. */
+export function fetchUploadSampleTypes() {
+  return requestJson<{ initialized: boolean; types: SampleKey[] }>('/gpas/upload/sample-types')
 }
 
 export async function fetchChats() {

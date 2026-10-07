@@ -1013,6 +1013,9 @@ function ChatComposer(props: {
   const canSubmit = () => !props.disabled && (
     uploads.hasFiles() ? uploads.canStart() : hasTypedContent()
   )
+  /** Shown on hover over a disabled send button. */
+  const submitBlockReason = () =>
+    !props.disabled && uploads.hasFiles() ? uploads.blockReason() : null
 
   const handleSubmit = () => {
     if (!canSubmit()) {
@@ -1054,6 +1057,8 @@ function ChatComposer(props: {
           onChange={handleFileChange}
         />
 
+        <UploadTray controller={uploads} />
+
         <textarea
           rows={props.centered ? 3 : 2}
           value={props.value}
@@ -1063,8 +1068,6 @@ function ChatComposer(props: {
           onInput={(event) => handleComposerInput(event.currentTarget.value)}
           onKeyDown={handleKeyDown}
         />
-
-        <UploadTray controller={uploads} />
 
         <Show when={voiceHint()}>
           <p class="mt-2 px-3 text-xs font-medium text-sky-700">{voiceHint()}</p>
@@ -1140,19 +1143,22 @@ function ChatComposer(props: {
               </button>
             }
           >
-            <button
-              type="button"
-              aria-label="发送"
-              disabled={!canSubmit()}
-              onClick={handleSubmit}
-              class={
-                !canSubmit()
-                  ? 'grid h-11 w-11 place-items-center rounded-full border border-slate-200 bg-slate-100 text-slate-400'
-                  : 'grid h-11 w-11 place-items-center rounded-full bg-teal-700 text-white transition duration-200 hover:bg-teal-800'
-              }
-            >
-              <SendIcon />
-            </button>
+            {/* A disabled button gets no pointer events, so the wrapper receives the hover. */}
+            <Tooltip content={submitBlockReason()} contentClass={submitBlockReason() ? '' : 'hidden'}>
+              <button
+                type="button"
+                aria-label="发送"
+                disabled={!canSubmit()}
+                onClick={handleSubmit}
+                class={
+                  !canSubmit()
+                    ? 'pointer-events-none grid h-11 w-11 place-items-center rounded-full border border-slate-200 bg-slate-100 text-slate-400'
+                    : 'grid h-11 w-11 place-items-center rounded-full bg-teal-700 text-white transition duration-200 hover:bg-teal-800'
+                }
+              >
+                <SendIcon />
+              </button>
+            </Tooltip>
             </Show>
           </Show>
         </div>

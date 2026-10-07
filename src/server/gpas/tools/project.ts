@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { progressReply, type GpasService } from '../../gpas.js'
+import { sampleKeys } from '../../gpasContracts.js'
 import { defineGpasTool } from '../defineTool.js'
 
 /** Project tools still use GpasService for its local mock fixtures. */
@@ -20,15 +21,17 @@ export function createProjectTools(service: GpasService) {
 
   const status = defineGpasTool({
     id: 'project.status', domain: 'project', title: '项目初始化状态', effect: 'read',
-    description: '只判断当前团队是否已经创建或初始化项目，不查询样本完成进度。',
+    description: '判断当前团队是否已经创建或初始化项目，并给出可上传的样本类型（已初始化时为各项目都有计划的类型，未初始化时为全部四类），不查询样本完成进度。',
     examples: ['我们的项目是否已经初始化', '团队项目建好了没有', '查下我的项目创建了没', '我们有项目了吗'],
     policy: '可以检查当前团队是否已初始化项目。一个团队的项目仅允许首次初始化。',
     input: z.object({}),
     run: async ({ profile, cookie }) => {
       const reply = await service.initializationStatus(profile, cookie)
-      return { initialized: !reply.part.form, reply }
+      const initialized = !reply.part.form
+      const sampleTypes = initialized ? (await service.sampleTypes(profile, cookie)).types : [...sampleKeys]
+      return { initialized, sampleTypes, reply }
     },
-    toModel: (data) => ({ initialized: data.initialized }),
+    toModel: (data) => ({ initialized: data.initialized, sampleTypes: data.sampleTypes }),
     toReply: (data) => data.reply,
   })
 

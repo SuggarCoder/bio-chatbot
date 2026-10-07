@@ -3,11 +3,13 @@ import { AuthenticationError } from './auth.js'
 import type { AppConfig } from './config.js'
 import { GpasClient } from './gpas/client.js'
 import type { Gpas2UserInfo } from './domain.js'
-import { sampleKeys, sampleLabels, sampleCountsSchema, type GpasPart, type ProjectInput } from './gpasContracts.js'
+import { sampleKeys, sampleLabels, sampleCountsSchema, type GpasPart, type ProjectInput, type SampleKey } from './gpasContracts.js'
+
+type SampleCounts = z.infer<typeof sampleCountsSchema>
 
 export { GpasUpstreamError, gpasUrl } from './gpas/client.js'
 
-const textCell = (value: unknown) => String(value || '未提供').replace(/[\\`*_{}\[\]<>()|#]/g, '\\$&').replace(/[\r\n]+/g, ' ')
+export const textCell = (value: unknown) => String(value || '未提供').replace(/[\\`*_{}\[\]<>()|#]/g, '\\$&').replace(/[\r\n]+/g, ' ')
 export function profileReply(profile: Gpas2UserInfo) {
   return `当前登录用户与团队信息：\n\n| 信息 | 内容 |\n| --- | --- |\n${[
     ['姓名', profile.realName], ['账号', profile.userName], ['用户 ID', profile.userId],
@@ -22,10 +24,22 @@ const seedSchema = z.object({
 })
 const existenceSchema = z.object({ data: z.boolean(), info: seedSchema.optional() })
 const optionalCounts = sampleCountsSchema.partial()
+const projectPlanSchema = sampleCountsSchema.extend({ name: z.string(), id: z.string() })
 const summarySchema = z.object({
-  projectPlanInfo: sampleCountsSchema.extend({ name: z.string(), id: z.string() }),
+  // A team normally has one project; an array is accepted for multi-project teams.
+  projectPlanInfo: z.union([projectPlanSchema, z.array(projectPlanSchema).min(1)]),
   realSubmitInfo: z.array(optionalCounts.extend({ year: z.number().int(), month: z.number().int().min(1).max(12) })),
 })
+type ProjectPlan = z.infer<typeof projectPlanSchema>
+const planList = (info: ProjectPlan | ProjectPlan[]) => Array.isArray(info) ? info : [info]
+
+/**
+ * Sample types every project of the team has planned (plan > 0). Multiple
+ * projects combine with AND, so an upload type is valid for all of them.
+ */
+export function plannedSampleTypes(plans: readonly SampleCounts[]): SampleKey[] {
+  return sampleKeys.filter((key) => plans.every((plan) => plan[key] > 0))
+}
 
 export type BusinessReply = {
   content: string
@@ -107,16 +121,32 @@ export class GpasService {
     return this.initializationStatus(profile, cookie)
   }
 
+  private async summary(profile: Gpas2UserInfo, cookie?: string): Promise<z.infer<typeof summarySchema>> {
+    const mock = this.mockProjects.get(this.team(profile))
+    return this.config.gpas2AuthMode === 'mock'
+      ? { projectPlanInfo: { ...mock!.samples, name: mock!.projectName, id: 'demo-project' }, realSubmitInfo: [] }
+      : this.client.read(cookie, { operation: 'project_summary', label: '项目进度汇总查询', method: 'POST', path: `summary/submit/info/${encodeURIComponent(this.team(profile))}` }, summarySchema)
+  }
+
+  /**
+   * Sample types the team can upload. Without an initialized project all four
+   * are offered; otherwise only the types planned in every project.
+   */
+  async sampleTypes(profile: Gpas2UserInfo, cookie?: string): Promise<{ initialized: boolean; types: SampleKey[] }> {
+    const exists = await this.existence(profile, cookie)
+    if (!exists.data) return { initialized: false, types: [...sampleKeys] }
+    const summary = await this.summary(profile, cookie)
+    return { initialized: true, types: plannedSampleTypes(planList(summary.projectPlanInfo)) }
+  }
+
   /** Structured progress data shared by the chat reply and agent tools. */
   async progressData(profile: Gpas2UserInfo, cookie?: string): Promise<ProjectProgress> {
     const exists = await this.existence(profile, cookie)
     if (!exists.data) return { initialized: false, form: this.initializationForm(profile, exists) }
-    const mock = this.mockProjects.get(this.team(profile))
-    const summary = this.config.gpas2AuthMode === 'mock'
-      ? { projectPlanInfo: { ...mock!.samples, name: mock!.projectName, id: 'demo-project' }, realSubmitInfo: [] }
-      : await this.client.read(cookie, { operation: 'project_summary', label: '项目进度汇总查询', method: 'POST', path: `summary/submit/info/${encodeURIComponent(this.team(profile))}` }, summarySchema)
+    const summary = await this.summary(profile, cookie)
+    const plans = planList(summary.projectPlanInfo)
     const samples = sampleKeys.map((key, index) => {
-      const plan = summary.projectPlanInfo[key]
+      const plan = plans.reduce((total, row) => total + row[key], 0)
       const submitted = summary.realSubmitInfo.reduce((total, row) => total + (row[key] ?? 0), 0)
       if (!Number.isSafeInteger(submitted)) throw new AuthenticationError('样本提交总量无效。', 502, 'gpas_invalid_response')
       return {
@@ -128,7 +158,7 @@ export class GpasService {
     return {
       initialized: true,
       demo: this.config.gpas2AuthMode === 'mock',
-      projectName: summary.projectPlanInfo.name,
+      projectName: plans.map((row) => row.name).join('、'),
       teamName: profile.ownteamName ?? null,
       samples,
     }

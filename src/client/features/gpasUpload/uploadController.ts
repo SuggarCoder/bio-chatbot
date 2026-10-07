@@ -6,6 +6,7 @@ import {
   screenFiles,
   type PairingResult,
 } from './fastqPairing'
+import { fetchUploadSampleTypes } from '../chatbot/chatApi'
 import { invalidateGpasPollingGate } from './gpasUploadApi'
 import {
   UploadSession,
@@ -29,13 +30,19 @@ export function uploadFallbackContent(batch: GpasUploadBatch): string {
  */
 export function createGpasUploadController(options: {
   currentUser: () => { userName: string | null; externalTeamId: string | null } | undefined
+  /** Sample types the team may upload; defaults to the project status endpoint. */
+  loadSampleTypes?: () => Promise<{ types: SampleKey[] }>
 }) {
+  const loadSampleTypes = options.loadSampleTypes ?? fetchUploadSampleTypes
   const pairingSession = createPairingSession()
   const [files, setFiles] = createSignal<File[]>([])
   const [results, setResults] = createSignal<PairingResult<File>[]>([])
   const [validating, setValidating] = createSignal(false)
   const [confirmedSingles, setConfirmedSingles] = createSignal<ReadonlySet<File>>(new Set())
   const [sampleType, setSampleType] = createSignal<SampleKey | null>(null)
+  const [availableTypes, setAvailableTypes] = createSignal<SampleKey[] | null>(null)
+  const [typesLoading, setTypesLoading] = createSignal(false)
+  const [typesError, setTypesError] = createSignal<string | null>(null)
   const [notices, setNotices] = createSignal<string[]>([])
   const [overLimit, setOverLimit] = createSignal(false)
   const [phase, setPhase] = createSignal<UploadPhase>('idle')
@@ -66,6 +73,40 @@ export function createGpasUploadController(options: {
   }
 
   const blockers = () => pairingBlockers(results(), confirmedSingles())
+
+  let typesRun = 0
+  const loadTypes = async () => {
+    if (typesLoading()) return
+    const run = ++typesRun
+    setTypesLoading(true)
+    setTypesError(null)
+    try {
+      const { types } = await loadSampleTypes()
+      if (run !== typesRun) return
+      setAvailableTypes(types)
+      const current = sampleType()
+      if (current && !types.includes(current)) setSampleType(null)
+      if (types.length === 1) setSampleType(types[0])
+    } catch (error) {
+      if (run === typesRun) setTypesError(error instanceof Error && error.message ? error.message : '查询项目样本类型失败')
+    } finally {
+      if (run === typesRun) setTypesLoading(false)
+    }
+  }
+
+  /** Why the batch cannot be sent yet, or null when it can. */
+  const blockReason = (): string | null => {
+    if (files().length === 0) return null
+    if (phase() === 'uploading') return '正在上传'
+    if (phase() === 'failed') return '请先处理上传失败的文件'
+    if (validating() || results().length !== files().length) return '正在校验单双端'
+    const types = availableTypes()
+    if (types === null) return typesError() ? '样本类型查询失败，请重试' : '正在查询项目样本类型'
+    if (types.length === 0) return '项目计划中没有可共同上传的样本类型'
+    const type = sampleType()
+    if (type === null || !types.includes(type)) return '请先选择样本类型'
+    return blockers()[0] ?? null
+  }
 
   const scheduleSnapshot = (next: UploadSnapshot<File>) => {
     latest = next
@@ -127,6 +168,7 @@ export function createGpasUploadController(options: {
   const reset = () => {
     controller?.abort()
     validationRun++
+    typesRun++
     session = undefined
     onReady = undefined
     setFiles([])
@@ -134,6 +176,10 @@ export function createGpasUploadController(options: {
     setValidating(false)
     setConfirmedSingles(new Set<File>())
     setSampleType(null)
+    // Re-read next time: the project plan may change between batches.
+    setAvailableTypes(null)
+    setTypesLoading(false)
+    setTypesError(null)
     setNotices([])
     setOverLimit(false)
     setPhase('idle')
@@ -153,6 +199,11 @@ export function createGpasUploadController(options: {
     validating,
     sampleType,
     setSampleType,
+    availableTypes,
+    typesLoading,
+    typesError,
+    retrySampleTypes: () => void loadTypes(),
+    blockReason,
     confirmedSingles,
     notices,
     overLimit,
@@ -162,7 +213,7 @@ export function createGpasUploadController(options: {
     blockers,
     hasFiles: () => files().length > 0,
     busy: () => phase() !== 'idle',
-    canStart: () => files().length > 0 && !validating() && sampleType() !== null && blockers().length === 0 && phase() === 'idle',
+    canStart: () => files().length > 0 && blockReason() === null,
 
     addFiles(incoming: File[]) {
       if (phase() !== 'idle') return
@@ -172,6 +223,7 @@ export function createGpasUploadController(options: {
       if (screened.accepted.length === 0) return
       setFiles([...files(), ...screened.accepted])
       void revalidate()
+      if (availableTypes() === null && !typesLoading()) void loadTypes()
     },
 
     removeFile(file: File) {
@@ -195,7 +247,7 @@ export function createGpasUploadController(options: {
     /** Uploads the batch; `ready` receives the results once every file settled. */
     start(ready: (batch: GpasUploadBatch) => void) {
       const type = sampleType()
-      if (!type || !files().length || validating() || blockers().length > 0 || phase() !== 'idle') return
+      if (!type || blockReason() !== null) return
       onReady = ready
       session = new UploadSession(unitsFromPairing(results()), type, browserUploadEnvironment(), {}, scheduleSnapshot)
       void runSession()

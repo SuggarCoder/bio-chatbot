@@ -1,5 +1,5 @@
 import { For, Show } from 'solid-js'
-import { GPAS_UPLOAD_MAX_FILES, sampleKeys, sampleLabel, type GpasUploadBatch } from '../../../server/gpasContracts'
+import { GPAS_UPLOAD_MAX_FILES, sampleLabel, type GpasUploadBatch } from '../../../server/gpasContracts'
 import type { PairingResult } from './fastqPairing'
 import { gpasWebUploadUrl } from './gpasUploadApi'
 import type { GpasUploadController } from './uploadController'
@@ -43,7 +43,7 @@ const toneClass = {
   error: 'bg-rose-50 text-rose-600 ring-rose-100',
 }
 
-/** Selected files, pairing, sample type and upload progress above the composer input. */
+/** Selected files, pairing, sample type and upload progress at the top of the composer. */
 export function UploadTray(props: { controller: GpasUploadController }) {
   const c = props.controller
   const groupNumbers = () => {
@@ -60,7 +60,7 @@ export function UploadTray(props: { controller: GpasUploadController }) {
   }
 
   return (
-    <div class="mt-1 space-y-2 px-3 pb-1 text-xs" data-testid="gpas-upload-tray">
+    <div class={`space-y-2 px-3 text-xs ${c.hasFiles() || c.overLimit() || c.notices().length ? 'mb-1 border-b border-slate-100 pb-2 pt-1' : ''}`} data-testid="gpas-upload-tray">
       <Show when={c.overLimit()}>
         <p role="alert" class="font-medium text-rose-500">
           单次最多上传 {GPAS_UPLOAD_MAX_FILES} 个文件，本次选择未添加。更多文件请前往{' '}
@@ -70,24 +70,6 @@ export function UploadTray(props: { controller: GpasUploadController }) {
       <For each={c.notices()}>{(notice) => <p class="font-medium text-rose-500">{notice}</p>}</For>
 
       <Show when={c.hasFiles()}>
-        <div class="flex flex-wrap items-center gap-2" role="radiogroup" aria-label="样本类型">
-          <span class="font-medium text-slate-500">样本类型</span>
-          <For each={[...sampleKeys]}>
-            {(key) => (
-              <button
-                type="button"
-                role="radio"
-                aria-checked={c.sampleType() === key}
-                disabled={c.busy()}
-                onClick={() => c.setSampleType(key)}
-                class={`rounded-full px-3 py-1 ring-1 transition ${c.sampleType() === key ? 'bg-teal-600 text-white ring-teal-600' : 'bg-white text-slate-600 ring-slate-200 hover:ring-teal-300'}`}
-              >
-                {sampleLabel(key)}
-              </button>
-            )}
-          </For>
-        </div>
-
         <ul class="space-y-1">
           <Show
             when={rows()}
@@ -154,9 +136,47 @@ export function UploadTray(props: { controller: GpasUploadController }) {
           </Show>
         </ul>
 
+        <div class="flex flex-wrap items-center gap-2" role="radiogroup" aria-label="样本类型" data-testid="gpas-sample-types">
+          <span class="font-medium text-slate-500">样本类型</span>
+          <Show when={c.availableTypes()} fallback={
+            <Show when={c.typesError()} fallback={<span class="text-slate-400">正在查询项目样本类型…</span>}>
+              {(message) => (
+                <span class="text-rose-500">
+                  {message()}{' '}
+                  <button type="button" onClick={() => c.retrySampleTypes()} class="font-medium text-teal-700 hover:underline">重试</button>
+                </span>
+              )}
+            </Show>
+          }>
+            {(types) => (
+              <Show when={types().length > 0} fallback={
+                <span class="text-rose-500">
+                  项目计划中没有可共同上传的样本类型，请前往{' '}
+                  <a class="underline" href={gpasWebUploadUrl()} target="_blank" rel="noopener">GPAS Web</a>{' '}上传。
+                </span>
+              }>
+                <For each={types()}>
+                  {(key) => (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={c.sampleType() === key}
+                      disabled={c.busy()}
+                      onClick={() => c.setSampleType(key)}
+                      class={`rounded-full px-3 py-1 ring-1 transition ${c.sampleType() === key ? 'bg-teal-600 text-white ring-teal-600' : 'bg-white text-slate-600 ring-slate-200 hover:ring-teal-300'}`}
+                    >
+                      {sampleLabel(key)}
+                    </button>
+                  )}
+                </For>
+              </Show>
+            )}
+          </Show>
+        </div>
+
         <Show when={c.phase() === 'idle' && rows()}>
           <For each={c.blockers()}>{(blocker) => <p class="font-medium text-rose-500">{blocker}</p>}</For>
-          <Show when={c.sampleType() === null}>
+          <Show when={c.sampleType() === null && c.availableTypes()?.length}>
             <p class="font-medium text-slate-500">请选择样本类型后发送，发送时开始上传。</p>
           </Show>
         </Show>

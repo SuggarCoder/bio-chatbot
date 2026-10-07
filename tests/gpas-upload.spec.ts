@@ -10,7 +10,13 @@ const upload = (name: string, buffer: Buffer) => ({ name, mimeType: 'application
 
 type Recorded = { messageBodies: Record<string, any>[]; tasks: Record<string, any>[]; slices: string[] }
 
-async function mockApis(page: Page, slice: (url: string, count: number) => { status: number; body?: unknown } | 'hang') {
+const allTypes = ['clinic', 'media', 'environment', 'lab']
+
+async function mockApis(
+  page: Page,
+  slice: (url: string, count: number) => { status: number; body?: unknown } | 'hang',
+  sampleTypes: string[] = allTypes,
+) {
   const recorded: Recorded = { messageBodies: [], tasks: [], slices: [] }
   let seq = 0
   const summary = { id: chatId, title: '上传', chatType: 'general', status: 'active', createdAt: timestamp, updatedAt: timestamp }
@@ -25,6 +31,7 @@ async function mockApis(page: Page, slice: (url: string, count: number) => { sta
     const path = new URL(request.url()).pathname
     if (path.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
     if (path.endsWith('/me')) return route.fulfill({ json: { id: 'u', externalUserId: 'u', externalTeamId: 'team-1', userName: 'demo', realName: '演示用户', name: '演示用户' } })
+    if (path.endsWith('/gpas/upload/sample-types')) return route.fulfill({ json: { initialized: sampleTypes !== allTypes, types: sampleTypes } })
     if (path.endsWith('/health')) return route.fulfill({ json: { status: 'ok' } })
     if (path.endsWith('/conversations')) return route.fulfill({ json: { conversations: [summary] } })
     if (path.endsWith('/artifacts')) return route.fulfill({ json: { artifacts: [] } })
@@ -129,4 +136,35 @@ test('cancelling keeps the typed text and selection, and sends nothing', async (
   await expect(composer(page)).toHaveValue('先别发')
   await expect(page.getByTestId('gpas-upload-file')).toHaveCount(1)
   expect(recorded.messageBodies).toHaveLength(0)
+})
+
+test('the tray sits above the input, offers only planned sample types and explains a blocked send', async ({ page }) => {
+  await mockApis(page, () => ({ status: 200 }), ['clinic', 'environment'])
+  await page.goto(`/ai-chatbot/${chatId}`)
+  await fileInput(page).setInputFiles([upload('a.fq', fastq('A', null)), upload('b.fq', fastq('B', null))])
+  await expect(page.getByTestId('gpas-upload-file')).toHaveCount(2)
+
+  const tray = page.getByTestId('gpas-upload-tray')
+  const trayBox = (await tray.boundingBox())!
+  const inputBox = (await composer(page).boundingBox())!
+  expect(trayBox.y + trayBox.height).toBeLessThanOrEqual(inputBox.y + 1)
+  const lastFile = (await page.getByTestId('gpas-upload-file').last().boundingBox())!
+  const typeRow = (await page.getByTestId('gpas-sample-types').boundingBox())!
+  expect(typeRow.y).toBeGreaterThanOrEqual(lastFile.y + lastFile.height)
+
+  await expect(page.getByRole('radio')).toHaveText(['临床样本', '环境样本'])
+  const send = page.getByRole('button', { name: '发送' })
+  await expect(send).toBeDisabled()
+  await send.hover({ force: true })
+  await expect(page.getByRole('tooltip')).toHaveText('请先选择样本类型')
+  await page.getByRole('radio', { name: '环境样本' }).click()
+  await expect(send).toBeEnabled()
+})
+
+test('a single planned sample type is selected automatically', async ({ page }) => {
+  await mockApis(page, () => ({ status: 200 }), ['lab'])
+  await page.goto(`/ai-chatbot/${chatId}`)
+  await fileInput(page).setInputFiles([upload('a.fq', fastq('A', null))])
+  await expect(page.getByRole('radio', { name: '实验室样本' })).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByRole('button', { name: '发送' })).toBeEnabled()
 })
