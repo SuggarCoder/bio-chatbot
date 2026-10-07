@@ -60,7 +60,7 @@ import {
 import type { MessagePart } from './db/schema.js'
 import type { Database } from './db/client.js'
 import { AuthenticationError } from './auth.js'
-import { gpasPartSchema, type GpasPart } from './gpasContracts.js'
+import { gpasPartSchema, gpasUploadPartSchema, renderUploadContext, type GpasPart, type GpasUploadBatch } from './gpasContracts.js'
 import type { BusinessReply } from './gpas.js'
 
 export {
@@ -285,6 +285,11 @@ export function mapMessage(
           if (parsed.success) parts.push(parsed.data)
           return
         }
+        if (part?.type === 'gpas_upload') {
+          const parsed = gpasUploadPartSchema.safeParse(part)
+          if (parsed.success) parts.push(parsed.data)
+          return
+        }
         if (part?.type === 'text' && typeof part.text === 'string') {
           parts.push({
             type: 'text' as const,
@@ -311,10 +316,14 @@ export function mapMessage(
       })
   }
   parts.sort((left, right) => left.order - right.order)
-  const content = row.content ?? parts
+  const textContent = () => parts
     .filter((part) => part.type === 'text')
     .map((part) => part.text)
     .join('')
+  // Upload messages keep model-facing context in `content`; show the user's text.
+  const content = parts.some((part) => part.type === 'gpas_upload')
+    ? textContent()
+    : row.content ?? textContent()
   const normalizedExecutionSteps = normalizeExecutionSteps(executionSteps)
 
   return {
@@ -1088,6 +1097,8 @@ export async function createGenerationStart(
     chatId: string
     clientMessageId: string
     content: string
+    /** Client-reported upload results; rendered into the model-facing content. */
+    uploads?: GpasUploadBatch
     generationId: string
     streamId: string
     requestId: string
@@ -1157,8 +1168,16 @@ export async function createGenerationStart(
         seq: sequence.userSeq,
         role: 'user',
         status: 'completed',
-        content: input.content,
-        parts: [{ type: 'text', text: input.content }],
+        // Every context path reads `content`, so upload results reach the model
+        // (current turn, history, summaries) without a separate loader.
+        content: input.uploads
+          ? `${input.content}
+
+${renderUploadContext(input.uploads)}`
+          : input.content,
+        parts: input.uploads
+          ? [{ type: 'text', order: 0, text: input.content }, { type: 'gpas_upload', order: 1, batch: input.uploads }]
+          : [{ type: 'text', text: input.content }],
         sharedText: input.content,
         clientMessageId: input.clientMessageId,
       })

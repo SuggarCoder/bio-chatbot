@@ -39,6 +39,7 @@ export type GenerationStartRetry = {
   content: string
   clientMessageId: string
   projectInput?: import('./chatApi').ProjectInput
+  uploads?: import('./chatApi').GpasUploadBatch
 }
 
 export type ActiveGeneration = {
@@ -111,7 +112,11 @@ type ChatStoreContextValue = {
   renameConversation: (id: string, title: string) => Promise<void>
   deleteConversation: (id: string) => Promise<void>
   updateConversationDraft: (id: string, value: string) => void
-  appendUserMessage: (id: string, content: string) => ChatMessage | undefined
+  appendUserMessage: (
+    id: string,
+    content: string,
+    uploads?: import('./chatApi').GpasUploadBatch,
+  ) => ChatMessage | undefined
   confirmUserMessage: (id: string, message: ChatMessageDto) => void
   setRequestPending: (id: string, pending: boolean) => void
   appendBusinessReply: (id: string, message: ChatMessageDto) => void
@@ -529,7 +534,11 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     )
   }
 
-  const appendUserMessage = (id: string, content: string) => {
+  const appendUserMessage = (
+    id: string,
+    content: string,
+    uploads?: import('./chatApi').GpasUploadBatch,
+  ) => {
     const normalized = content.trim()
 
     if (!state.conversations[id] || !normalized) {
@@ -541,6 +550,9 @@ export const ChatStoreProvider: ParentComponent = (props) => {
       normalized,
       'done',
     )
+    if (uploads) {
+      message.parts = [...message.parts, { type: 'gpas_upload', order: 1, batch: uploads }]
+    }
 
     setState(
       'conversations',

@@ -84,3 +84,39 @@ HTTP 成功但业务 `code` 非 200 为 `gpas_business_error`。
 
 智能体每次工具调用写入 `ToolRun`（工具名、校验后的参数、结果字节数、错误），可按
 generation 查询；不记录 Cookie 或工具返回的数据。
+
+## 测序文件上传（第一阶段）
+
+输入框“上传文件”接受 `.fastq/.fastq.gz/.fq/.fq.gz`，单次最多 10 个；超出时本次选择不加入，
+并提示前往 `{当前域名}/app/upload`（GPAS Web 上传页）。同名的不同文件、空文件直接拒绝。
+
+选择后立即在浏览器内做单双端判断（`src/client/features/gpasUpload/fastqPairing.ts`）：
+文件名预配对，再用 FASTQ 头部的 read ID 交叉验证；新增文件只读取新文件，但整批重新配对。
+存在孤立 R2、文件名不规范、或未确认的疑似 R1 时不能发送。上传前必须选择样本类型。
+
+点击发送时先上传，全部文件结束后才发送消息：
+
+- 浏览器直接请求同源 `/api/gpas2/v1/file/*`，只带 GPAS Cookie（可用 `VITE_GPAS_API_BASE` 覆盖前缀）。
+- 5MB 分片、全局并发 3、R1/R2 交错上传；每片最多 6 次尝试，指数退避加抖动；
+  断网时等待恢复且不计次数；30 秒无上传进度或发完后 60 秒无响应视为超时。
+- 401/403 停止整批并提示重新登录；部分失败时可重试失败文件（复用原任务补传缺失分片），
+  或跳过失败直接发送；取消上传不发送消息，保留输入内容。
+- 有文件上传成功后删除同源 `localStorage` 的 `pollingGate_{userName}_{teamId}`，
+  让 GPAS Web 数据状态页立即重新判断是否轮询。
+
+消息请求体增加可选 `uploads`（`gpasUploadBatchSchema`）。用户消息 `content` 追加服务端渲染的
+上传结果摘要，供模型在本轮及后续上下文中读取；界面显示用户原文和 `gpas_upload` part 中的文件列表。
+`uploads` 由客户端上报，只作为模型上下文，服务端不会据此对 GPAS 做任何写操作。
+
+### 远端验收清单
+
+上传接口无法在本地访问，以下需在远端用真实登录验证；默认假设集中在
+`src/client/features/gpasUpload/gpasUploadApi.ts` 顶部，不符时在那里调整：
+
+1. 只带 Cookie（不带 `Authorization`）能调用 `file/task`、`file/dual/task`、`file/upload/{id}`、`file/dual/upload/{id}`。
+2. 同一分片 `no` 重复上传安全；同一任务可在失败后补传缺失分片。
+3. `dual/task` 原样返回 `fileList[].name`；`endType` 两端取值不同。
+4. `sampleType` 接受 `clinic/media/environment/lab`。
+5. 哪些业务 `code` 可重试（填入 `RETRYABLE_BUSINESS_CODES`）。
+6. 上传 1 个单端加 1 对双端后，GPAS Web 能看到文件，数据状态页立即开始轮询（同时确认 `pollingGate` 的 key 与 `/me` 的 `userName`、`externalTeamId` 对应）。
+7. 上传中断网再恢复能继续；限速弱网下进度持续推进；Cookie 失效时整批停止并提示重新登录。

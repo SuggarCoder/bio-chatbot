@@ -54,6 +54,10 @@ import {
   StreamingMarkdown,
 } from '../../features/chatbot/MarkdownMessage'
 import { recordStreamOperation } from '../../features/chatbot/streamMetrics'
+import { FASTQ_ACCEPT } from '../../features/gpasUpload/fastqPairing'
+import { createGpasUploadController, uploadFallbackContent } from '../../features/gpasUpload/uploadController'
+import { UploadedFilesSummary, UploadTray } from '../../features/gpasUpload/UploadTray'
+import type { GpasUploadBatch } from '../../features/chatbot/chatApi'
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
 import { PopupMenu, type PopupMenuEntry, type PopupMenuItem } from '../../shared/ui/PopupMenu'
@@ -326,6 +330,7 @@ async function runAssistantReply(
     | undefined,
   chatStore: ReturnType<typeof useChatStore>,
   projectInput?: import('../../features/chatbot/chatApi').ProjectInput,
+  uploads?: GpasUploadBatch,
 ) {
   if (
     startingReplies.has(conversationId) ||
@@ -353,6 +358,7 @@ async function runAssistantReply(
         content: prompt,
         clientMessageId,
         projectInput,
+        uploads,
         artifactId:
           artifactStore.state.visibleConversationId === conversationId &&
           artifactStore.state.isPanelOpen
@@ -385,6 +391,7 @@ async function runAssistantReply(
           content: prompt,
           clientMessageId,
           projectInput,
+          uploads,
         },
       )
       if (projectInput) throw error
@@ -945,7 +952,8 @@ function ExpandedSidebarPanel(props: {
 function ChatComposer(props: {
   value: string
   onInput: (value: string) => void
-  onSubmit: () => void
+  /** Called with upload results after every selected file has settled. */
+  onSubmit: (uploads?: GpasUploadBatch) => void
   onStop?: () => void
   centered?: boolean
   disabled?: boolean
@@ -953,51 +961,24 @@ function ChatComposer(props: {
   stopping?: boolean
   placeholder?: string
 }) {
-  const [selectedFiles, setSelectedFiles] = createSignal<File[]>([])
-  const [fileError, setFileError] = createSignal('')
+  const chatStore = useChatStore()
+  const uploads = createGpasUploadController({ currentUser: chatStore.currentUser })
   const [isVoiceHolding, setIsVoiceHolding] = createSignal(false)
   const [voiceHint, setVoiceHint] = createSignal('')
   let fileInputRef: HTMLInputElement | undefined
   const hasTypedContent = () => props.value.trim().length > 0
 
-  const openFilePicker = () => fileInputRef?.click()
-  const appendFiles = (files: File[]) => {
-    setSelectedFiles((current) => {
-      const next = [...current]
-
-      for (const file of files) {
-        const exists = next.some(
-          (currentFile) =>
-            currentFile.name === file.name &&
-            currentFile.size === file.size &&
-            currentFile.lastModified === file.lastModified,
-        )
-
-        if (!exists) {
-          next.push(file)
-        }
-      }
-
-      return next
-    })
+  const openFilePicker = () => {
+    if (!uploads.busy()) fileInputRef?.click()
   }
 
   const handleFileChange = (event: Event & { currentTarget: HTMLInputElement }) => {
     const files = Array.from(event.currentTarget.files ?? [])
-
-    if (files.length === 0) {
-      return
-    }
-
-    const validFiles = files.filter((file) => file.name.toLowerCase().endsWith('.fastq'))
-    const hasInvalidFile = validFiles.length !== files.length
-
-    if (validFiles.length > 0) {
-      appendFiles(validFiles)
-    }
-
-    setFileError(hasInvalidFile ? '仅支持上传 .fastq 文件' : '')
     event.currentTarget.value = ''
+
+    if (files.length > 0) {
+      uploads.addFiles(files)
+    }
   }
 
   const handleComposerInput = (value: string) => {
@@ -1029,14 +1010,22 @@ function ChatComposer(props: {
     }
   }
 
+  const canSubmit = () => !props.disabled && (
+    uploads.hasFiles() ? uploads.canStart() : hasTypedContent()
+  )
+
   const handleSubmit = () => {
-    if (props.disabled || !hasTypedContent()) {
+    if (!canSubmit()) {
       return
     }
 
-    props.onSubmit()
-    setSelectedFiles([])
-    setFileError('')
+    if (!uploads.hasFiles()) {
+      props.onSubmit()
+      return
+    }
+
+    // The message is sent only after the upload settles, with its results.
+    uploads.start((batch) => props.onSubmit(batch))
   }
 
   createEffect(() => {
@@ -1059,7 +1048,7 @@ function ChatComposer(props: {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".fastq"
+          accept={FASTQ_ACCEPT}
           multiple
           hidden
           onChange={handleFileChange}
@@ -1069,26 +1058,13 @@ function ChatComposer(props: {
           rows={props.centered ? 3 : 2}
           value={props.value}
           placeholder={props.placeholder ?? '输入你的问题，回车发送'}
+          readOnly={uploads.busy()}
           class="gpas-scrollbar scrollbar-fade min-h-12 w-full resize-none border-none bg-transparent px-3 py-2 text-base leading-7 text-slate-700 outline-none placeholder:text-slate-400"
           onInput={(event) => handleComposerInput(event.currentTarget.value)}
           onKeyDown={handleKeyDown}
         />
 
-        <Show when={selectedFiles().length > 0}>
-          <div class="mt-1 flex flex-wrap gap-2 px-3 pb-1">
-            <For each={selectedFiles()}>
-              {(file) => (
-                <span class="inline-flex max-w-full items-center rounded-full bg-teal-50 px-3 py-1 text-xs font-medium text-teal-700 ring-1 ring-teal-100">
-                  <span class="truncate">{file.name}</span>
-                </span>
-              )}
-            </For>
-          </div>
-        </Show>
-
-        <Show when={fileError()}>
-          <p class="mt-2 px-3 text-xs font-medium text-rose-500">{fileError()}</p>
-        </Show>
+        <UploadTray controller={uploads} />
 
         <Show when={voiceHint()}>
           <p class="mt-2 px-3 text-xs font-medium text-sky-700">{voiceHint()}</p>
@@ -1132,7 +1108,7 @@ function ChatComposer(props: {
           </Show>
           <Show when={!props.generating}>
             <Show
-            when={hasTypedContent()}
+            when={hasTypedContent() || uploads.hasFiles()}
             fallback={
               <button
                 type="button"
@@ -1166,10 +1142,11 @@ function ChatComposer(props: {
           >
             <button
               type="button"
-              disabled={props.disabled}
+              aria-label="发送"
+              disabled={!canSubmit()}
               onClick={handleSubmit}
               class={
-                props.disabled
+                !canSubmit()
                   ? 'grid h-11 w-11 place-items-center rounded-full border border-slate-200 bg-slate-100 text-slate-400'
                   : 'grid h-11 w-11 place-items-center rounded-full bg-teal-700 text-white transition duration-200 hover:bg-teal-800'
               }
@@ -1658,7 +1635,14 @@ function ChatMessageBubble(props: {
         <div class="message-content text-base leading-7">
           <Show
             when={!isUser()}
-            fallback={<p class="whitespace-pre-wrap">{props.message.content}</p>}
+            fallback={
+              <>
+                <p class="whitespace-pre-wrap">{props.message.content}</p>
+                <For each={props.message.parts}>
+                  {(part) => part.type === 'gpas_upload' ? <UploadedFilesSummary batch={part.batch} /> : null}
+                </For>
+              </>
+            }
           >
             <Show
               when={liveGenerationId()}
@@ -1725,7 +1709,9 @@ function StaticMessageParts(props: {
           )
         : part.type === 'gpas'
           ? <Show when={part.form}>{(form) => <ProjectInitForm form={form()} messageId={props.message.id} disabled={props.disabled} onSubmit={props.onProjectSubmit} />}</Show>
-          : <StaticMarkdown text={part.text} />}
+          : part.type === 'gpas_upload'
+            ? <UploadedFilesSummary batch={part.batch} />
+            : <StaticMarkdown text={part.text} />}
     </For>
   )
 }
@@ -1753,8 +1739,8 @@ function EmptyConversationState() {
   const navigate = useNavigate()
   const chatStore = useChatStore()
 
-  const startConversation = async () => {
-    const content = chatStore.getRootDraft().trim()
+  const startConversation = async (uploads?: GpasUploadBatch) => {
+    const content = chatStore.getRootDraft().trim() || (uploads ? uploadFallbackContent(uploads) : '')
 
     if (content.length === 0) {
       return
@@ -1766,6 +1752,7 @@ function EmptyConversationState() {
       const message = chatStore.appendUserMessage(
         conversation.id,
         content,
+        uploads,
       )
       chatStore.setRootDraft('')
       navigate(appRoutes.session(conversation.id))
@@ -1777,6 +1764,8 @@ function EmptyConversationState() {
           message.clientMessageId,
           undefined,
           chatStore,
+          undefined,
+          uploads,
         )
       }
     } catch {
@@ -1799,7 +1788,7 @@ function EmptyConversationState() {
             centered
             value={chatStore.getRootDraft()}
             onInput={chatStore.setRootDraft}
-            onSubmit={() => void startConversation()}
+            onSubmit={(uploads) => void startConversation(uploads)}
             placeholder="输入你的第一条消息，例如：请总结这份样本分析的关键风险"
           />
         </div>
@@ -2364,8 +2353,8 @@ function SessionConversationView(props: { conversationId: string }) {
     }
   })
 
-  const sendFollowUp = () => {
-    const content = conversation()?.draft.trim() ?? ''
+  const sendFollowUp = (uploads?: GpasUploadBatch) => {
+    const content = conversation()?.draft.trim() || (uploads ? uploadFallbackContent(uploads) : '')
 
     if (content.length === 0) {
       return
@@ -2374,6 +2363,7 @@ function SessionConversationView(props: { conversationId: string }) {
     const message = chatStore.appendUserMessage(
       props.conversationId,
       content,
+      uploads,
     )
 
     if (message?.clientMessageId) {
@@ -2384,6 +2374,8 @@ function SessionConversationView(props: { conversationId: string }) {
         message.clientMessageId,
         undefined,
         chatStore,
+        undefined,
+        uploads,
       )
     }
   }
@@ -2506,6 +2498,8 @@ function SessionConversationView(props: { conversationId: string }) {
         retryRequest.clientMessageId,
         undefined,
         chatStore,
+        undefined,
+        retryRequest.uploads,
       )
       return
     }

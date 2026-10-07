@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { AuthenticationError, loadProfile, resolveCurrentUser } from './auth.js'
 import { GpasUpstreamError } from './gpas.js'
 import { createCapabilityRuntime, type CapabilityRuntime } from './capabilities/runtime.js'
-import { projectInputSchema } from './gpasContracts.js'
+import { gpasUploadBatchSchema, projectInputSchema } from './gpasContracts.js'
 import {
   redisKey,
   consumeGenerationRateLimit,
@@ -1050,7 +1050,7 @@ export async function buildApp(
     const user = await syncUser(database, profile)
     if (user.id !== row.userId) throw new AuthenticationError('请求身份不匹配。', 403)
     const { chatId, requestId: clientMessageId } = row
-    const { content, artifactId, supersedesGenerationId, projectInput } = row.payload
+    const { content, artifactId, supersedesGenerationId, projectInput, uploads } = row.payload
     await context.check()
     // Completed business replies (form confirmations) replay idempotently.
     const replay = await findBusinessExchange(database, user.id, chatId, clientMessageId)
@@ -1081,6 +1081,7 @@ export async function buildApp(
       clientMessageId,
       artifactId: artifactId || undefined,
       supersedesGenerationId: supersedesGenerationId || undefined,
+      uploads,
       agentToolIds: await selectAgentToolIds(content),
       cookie,
     })
@@ -1170,10 +1171,14 @@ export async function buildApp(
       }
 
       const projectInput = body.projectInput === undefined ? undefined : projectInputSchema.parse(body.projectInput)
+      const uploads = body.uploads === undefined ? undefined : gpasUploadBatchSchema.parse(body.uploads)
+      if (projectInput && uploads) {
+        return reply.code(400).send(errorBody(request, 'invalid_request', '项目表单确认不能同时附带上传文件。'))
+      }
       const rate = await consumeGenerationRateLimit(redis, config, user.id, 'capability')
       if (!rate.allowed) throw new GenerationRejectedError('请求过于频繁，请稍后重试。', 429, 'intent_rate_limited', rate.retryAfterMs)
       const ticket = await ingress.submit({ userId: user.id, chatId, requestId: clientMessageId,
-        payload: { content, artifactId: artifactId || undefined, supersedesGenerationId: supersedesGenerationId || undefined, projectInput },
+        payload: { content, artifactId: artifactId || undefined, supersedesGenerationId: supersedesGenerationId || undefined, projectInput, uploads },
         cookie: request.headers.cookie ?? '', externalUserId: profile.userId, teamId: profile.ownteamId ?? '',
       })
       return reply.code(202).send(ticket)

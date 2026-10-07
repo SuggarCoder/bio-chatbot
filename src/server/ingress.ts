@@ -4,10 +4,10 @@ import type { Database } from './db.js'
 import { chats, ingressRequests, users } from './db/schema.js'
 import { AuthenticationError } from './auth.js'
 import type { AppConfig } from './config.js'
-import type { projectInputSchema } from './gpasContracts.js'
+import type { GpasUploadBatch, projectInputSchema } from './gpasContracts.js'
 import type { z } from 'zod'
 
-export type IngressPayload = { content: string; artifactId?: string; supersedesGenerationId?: string; projectInput?: z.infer<typeof projectInputSchema> }
+export type IngressPayload = { content: string; artifactId?: string; supersedesGenerationId?: string; projectInput?: z.infer<typeof projectInputSchema>; uploads?: GpasUploadBatch }
 export type IngressRow = typeof ingressRequests.$inferSelect
 export type IngressContext = { check(): Promise<void> }
 export function sealCredential(cookie: string, key: string, aad: string): string {
