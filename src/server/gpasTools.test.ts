@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { z } from 'zod'
 
@@ -9,6 +10,8 @@ import { GpasService } from './gpas.js'
 import { GpasClient } from './gpas/client.js'
 import { defineGpasTool, identityFieldPattern } from './gpas/defineTool.js'
 import { createGpasTools } from './gpas/tools/index.js'
+import { parseBrief } from './gpas/tools/file.js'
+import { gpasPartSchema } from './gpasContracts.js'
 
 const config = { gpas2AuthMode: 'upstream', gpas2UserInfoUrl: 'https://gpas.example.invalid:8058/api/gpas2/v1/user/info' } as AppConfig
 const profile = { userId: 'user-test', ownteamId: 'team-test', realName: '演示用户', ownteamName: '演示团队' } as Gpas2UserInfo
@@ -189,4 +192,61 @@ test('project status reports the sample types every project has planned', async 
   // A team without a project may upload any of the four types.
   exists = false
   assert.deepEqual(await types(), ['clinic', 'media', 'environment', 'lab'])
+})
+
+const sampleBrief = readFileSync(new URL('../../tests/fixtures/gpas-brief.json', import.meta.url), 'utf8')
+
+test('brief parsing keeps a top-3 summary per category, from a once- or twice-encoded string', () => {
+  for (const raw of [sampleBrief, JSON.stringify(sampleBrief), JSON.parse(sampleBrief)]) {
+    const brief = parseBrief(raw)!
+    assert.deepEqual(brief.categories.map((category) => [category.name, category.speciesCount, category.top.length]), [
+      ['细菌', 188, 3], ['病毒', 4, 3], ['真菌', 5, 3], ['动物等', 0, 0],
+    ])
+    assert.deepEqual(brief.categories[0].top[0], {
+      cnName: '空肠普雷沃菌', enName: 'Prevotella jejuni', taxId: '1177574', abundancePct: 36.3, hazard: 3,
+    })
+    assert.equal(brief.totalReads, 38959015)
+    assert.equal(brief.dataVolume, 10677513218)
+    assert.deepEqual(brief.tools, ['Guardian'])
+  }
+  // More species than the summary keeps: highest abundance first, at most three.
+  const many = JSON.parse(sampleBrief)
+  many.microbialInfo[0].topInfos.push(
+    { taxCnName: '甲', abundance: '50%', hazardIndex: 1 },
+    { taxCnName: '乙', abundance: '1%', hazardIndex: 0 },
+  )
+  assert.deepEqual(parseBrief(many)!.categories[0].top.map((item) => item.cnName), ['甲', '空肠普雷沃菌', '产黑色普雷沃菌'])
+  for (const bad of ['', 'not json', '{"code":"500","microbialInfo":[]}', '{"code":"0","microbialInfo":"x"}', null, 42]) {
+    assert.equal(parseBrief(bad), null, String(bad))
+  }
+})
+
+test('file list tool returns one analysis card per sample and wording rules for the model', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ code: 200, dataPage: { totalData: 2, dataList: [
+    { isPair: true, file1: gpasFile('f-1', { lastDaulBriefAnalysis: sampleBrief }), file2: gpasFile('f-2') },
+    { isPair: false, file1: gpasFile('f-3', { briefAnalysis: 'broken', analysisStatus: 'running' }) },
+  ] } }))
+  const service = new GpasService(config)
+  const tool = createGpasTools(service).find((item) => item.id === 'file.list')!
+  const context = { profile, cookie: 'session=mine', client: service.client }
+  const data = await tool.run(context, tool.input.parse({}))
+
+  const part = tool.toReply(data, context).part
+  assert.equal(part.files?.length, 2)
+  assert.equal(part.files![0].paired, true)
+  assert.deepEqual(part.files![0].files.map((file) => file.fileId), ['f-1', 'f-2'])
+  assert.equal(part.files![0].brief?.categories[0].speciesCount, 188)
+  assert.equal(part.files![1].brief, null)
+  assert.equal(gpasPartSchema.safeParse(part).success, true)
+
+  const model = tool.toModel(data) as { note: string; samples: Array<{ brief: { categories: Array<Record<string, unknown>> } | null }> }
+  assert.match(model.note, /前 topN/)
+  assert.match(model.note, /不是只检出这几种/)
+  assert.deepEqual(model.samples[0].brief!.categories[0], {
+    name: '细菌', speciesCount: 188, topN: 3, maxHazard: 3,
+    top: ['空肠普雷沃菌 36.3% 危害3', '产黑色普雷沃菌 24% 危害3', '乳脂马杜拉放线菌 3.6% 危害0'],
+  })
+  assert.equal(model.samples[1].brief, null)
+  // The raw brief string never reaches the model.
+  assert.doesNotMatch(JSON.stringify(model), /microbialInfo|tool_code/)
 })

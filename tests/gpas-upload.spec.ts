@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 
 const chatId = 'c9345da6-998b-4462-a539-2d803f184e25'
 const timestamp = '2026-10-07T00:00:00.000Z'
@@ -167,4 +168,74 @@ test('a single planned sample type is selected automatically', async ({ page }) 
   await fileInput(page).setInputFiles([upload('a.fq', fastq('A', null))])
   await expect(page.getByRole('radio', { name: '实验室样本' })).toHaveAttribute('aria-checked', 'true')
   await expect(page.getByRole('button', { name: '发送' })).toBeEnabled()
+})
+
+const rawBrief = JSON.parse(readFileSync(new URL('./fixtures/gpas-brief.json', import.meta.url), 'utf8'))
+type RawCategory = { microbialType: string; microbialName: string; microbialNum: number; maxHazandIndex: number; topInfos: Array<Record<string, any>> | null }
+const toBrief = (categories: RawCategory[]) => ({
+  categories: categories.map((category) => ({
+    type: category.microbialType, name: category.microbialName, speciesCount: category.microbialNum, maxHazard: category.maxHazandIndex,
+    top: (category.topInfos ?? []).map((item) => ({
+      cnName: item.taxCnName, enName: item.taxEnName, taxId: item.taxId, abundancePct: Number.parseFloat(item.abundance), hazard: item.hazardIndex,
+    })),
+  })),
+  totalReads: 38959015, dataVolume: 10677513218, tools: ['Guardian'],
+})
+const card = (fileId: string, brief: unknown) => ({
+  groupId: 'g-1', paired: true, files: [{ fileId, fileName: `${fileId}_R1.fq.gz`, sizeBytes: 8 * 1024 ** 3 }, { fileId: `${fileId}-2`, fileName: `${fileId}_R2.fq.gz`, sizeBytes: 7 * 1024 ** 3 }],
+  sampleType: 'clinic', status: 'uploaded', analysisStatus: brief ? 'success' : 'running', metaStatus: 'missing', uploadTime: '2026-01-06 20:54:10', brief,
+})
+
+async function showCards(page: Page, cards: unknown[]) {
+  await mockApis(page, () => ({ status: 200 }))
+  await page.route(`**/ai-chatbot/api/conversations/${chatId}`, (route) => route.fulfill({ json: {
+    id: chatId, title: '上传', chatType: 'general', status: 'active', createdAt: timestamp, updatedAt: timestamp,
+    pageInfo: { hasMore: false, beforeSeq: null }, activeGeneration: null,
+    messages: [
+      { id: 'e9345da6-998b-4462-a539-000000000001', seq: 1, role: 'user', status: 'completed', content: '查一下', parts: [], createdAt: timestamp, vote: null, executionSteps: [] },
+      { id: 'e9345da6-998b-4462-a539-000000000002', seq: 2, role: 'assistant', status: 'completed', content: '这批文件的分析摘要如下。',
+        parts: [{ type: 'text', order: 0, text: '这批文件的分析摘要如下。' }, { type: 'gpas', order: 1, files: cards }],
+        createdAt: timestamp, vote: null, executionSteps: [] },
+    ],
+  } }))
+  await page.goto(`/ai-chatbot/${chatId}`)
+  await expect(page.getByTestId('gpas-file-card').first()).toBeVisible()
+}
+
+test('analysis cards describe the brief as a per-category top-3 summary', async ({ page }) => {
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo)), card('s2', null)])
+  const first = page.getByTestId('gpas-file-card').first()
+  await expect(first.getByTestId('gpas-brief-category')).toHaveCount(3)
+  await expect(first).toContainText('细菌 · 检出 188 种')
+  await expect(first.getByText('丰度前 3', { exact: true })).toHaveCount(3)
+  await expect(first.getByTestId('gpas-brief-rest').first()).toContainText('其余 185 种')
+  await expect(first).toContainText('未检出：动物等')
+  await expect(first.getByRole('img', { name: '危害等级 3' }).first()).toBeVisible()
+  await expect(first).toContainText('38.96M Reads')
+  await expect(first).toContainText('26/01/06 20:54')
+  await expect(page.getByText(/Count\/mL/)).toHaveCount(0)
+  // No category share exists in the data, so none is shown.
+  await expect(first.getByText(/细菌 \(\d/)).toHaveCount(0)
+  await expect(page.getByTestId('gpas-file-card').nth(1)).toContainText('暂无分析摘要')
+})
+
+test('more than five detected categories fold into one "其他" block', async ({ page }) => {
+  const names = ['细菌', '病毒', '真菌', '古菌', '寄生虫', '动物等', '其他真核']
+  const categories = names.map((name, index) => ({
+    microbialType: `t${index}`, microbialName: name, microbialNum: 70 - index * 10, maxHazandIndex: 1,
+    topInfos: [{ taxCnName: `${name}甲`, taxEnName: '', taxId: String(index), abundance: '40%', hazardIndex: 1 }],
+  }))
+  await showCards(page, [card('s1', toBrief(categories))])
+  const blocks = page.getByTestId('gpas-brief-category')
+  await expect(blocks).toHaveCount(5)
+  await expect(blocks.last()).toContainText('其他 · 3 类')
+  await expect(blocks.last()).toContainText('寄生虫 · 检出 30 种')
+  await expect(blocks.last()).toContainText('其他真核 · 检出 10 种')
+})
+
+test('analysis cards fit a phone-width screen', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 })
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo))])
+  const overflow = await page.getByTestId('gpas-file-card').first().evaluate((element) => element.scrollWidth - element.clientWidth)
+  expect(overflow).toBeLessThanOrEqual(0)
 })

@@ -144,3 +144,18 @@ test('sealed generation credentials are bound to one user and generation', () =>
   assert.throws(() => openCredential(sealed, key, 'u1:g2:generation'))
   assert.throws(() => openCredential(sealed, key, 'u2:g1:generation'))
 })
+
+test('file list tool forwards its analysis cards to the user', async (t) => {
+  const file = { fileId: 'f-1', fileName: 'a.fq', status: 'uploaded', briefAnalysis: '{"code":"0","microbialInfo":[]}' }
+  t.mock.method(globalThis, 'fetch', fakeGpas({
+    '/user/info': { code: 200, data: { userId: 'user-a', ownteamId: 'team-a', status: 0 } },
+    '/file/dual/merge/list': { code: 200, dataPage: { totalData: 1, dataList: [{ isPair: false, file1: file }] } },
+  }))
+  const set = toolbox().select(['file.list'])!
+  const session = new AgentSession(config, user, 'session=a', new AbortController().signal)
+  const result = await set.execute({ call_id: 'c1', name: 'file__list', arguments: '{"fileIds":["f-1"]}' }, session)
+  assert.equal(result.ok, true)
+  assert.equal(result.part?.files?.[0].files[0].fileId, 'f-1')
+  assert.deepEqual(result.part?.files?.[0].brief?.categories, [])
+  assert.match(set.instructions(), /丰度前 N/)
+})

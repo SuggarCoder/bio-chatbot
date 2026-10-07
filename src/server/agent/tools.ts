@@ -126,6 +126,7 @@ export class AgentToolSet {
       '- 需要业务数据时先调用工具，再基于结果用中文作答；与业务无关的问题直接回答，不调用工具。',
       '- 准备确认类工具（如首次初始化项目）只会在回复下方展示表单，必须由用户在表单中确认提交；不要声称已经完成创建。',
       '- 用户消息带有 GPAS 文件上传结果时，先调用上传文件列表工具查询这批 fileId，再基于返回的状态作答，不要只复述上传进度。',
+      '- 上传文件列表的结果会以卡片展示在回复下方，只需简短解读；分析摘要只含各类别丰度前几位的物种，要说“丰度前 N”“共检出 X 种”，不要说成只检出这些，也不要推算类别之间的占比。',
       '- 工具返回 error 时如实告知用户原因，不要反复调用同一工具。',
       ...(limits ? ['以下业务不支持或有限制，用户问到时按此说明：', limits] : []),
     ].join('\n')
@@ -166,7 +167,8 @@ export class AgentToolSet {
         toolId: spec.id,
         title: spec.title,
         args: args.data as Record<string, unknown>,
-        ...(reply.part.form ? { part: reply.part } : {}),
+        // Forms and file cards are shown to the user under the reply.
+        ...(reply.part.form || reply.part.files?.length ? { part: reply.part } : {}),
       }
     } catch (error) {
       if (session.signal.aborted) throw error

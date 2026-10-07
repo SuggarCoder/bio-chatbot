@@ -57,6 +57,7 @@ import { recordStreamOperation } from '../../features/chatbot/streamMetrics'
 import { FASTQ_ACCEPT } from '../../features/gpasUpload/fastqPairing'
 import { createGpasUploadController, uploadFallbackContent } from '../../features/gpasUpload/uploadController'
 import { UploadedFilesSummary, UploadTray } from '../../features/gpasUpload/UploadTray'
+import { FileAnalysisCards } from '../../features/gpasUpload/FileAnalysisCards'
 import type { GpasUploadBatch } from '../../features/chatbot/chatApi'
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
@@ -1714,7 +1715,12 @@ function StaticMessageParts(props: {
             />
           )
         : part.type === 'gpas'
-          ? <Show when={part.form}>{(form) => <ProjectInitForm form={form()} messageId={props.message.id} disabled={props.disabled} onSubmit={props.onProjectSubmit} />}</Show>
+          ? (
+              <>
+                <Show when={part.form}>{(form) => <ProjectInitForm form={form()} messageId={props.message.id} disabled={props.disabled} onSubmit={props.onProjectSubmit} />}</Show>
+                <Show when={part.files}>{(files) => <Show when={files().length > 0}><FileAnalysisCards cards={files()} /></Show>}</Show>
+              </>
+            )
           : part.type === 'gpas_upload'
             ? <UploadedFilesSummary batch={part.batch} />
             : <StaticMarkdown text={part.text} />}

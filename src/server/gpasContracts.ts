@@ -19,10 +19,51 @@ export const projectFormSchema = z.object({
   phone: z.string(),
   teamId: z.string().min(1),
 })
+const shortText = z.string().max(200)
+/**
+ * Parsed GPAS `briefAnalysis`: a summary only. `top` holds the species with
+ * the highest relative abundance *within* the category (at most 3); the
+ * category itself contains `speciesCount` species. There is no share
+ * between categories.
+ */
+export const fileBriefSchema = z.object({
+  categories: z.array(z.object({
+    type: shortText,
+    name: shortText,
+    speciesCount: z.number().int().nonnegative(),
+    maxHazard: z.number().int().min(0).max(9),
+    top: z.array(z.object({
+      cnName: shortText,
+      enName: shortText,
+      taxId: shortText,
+      abundancePct: z.number().min(0).max(100),
+      hazard: z.number().int().min(0).max(9),
+    })).max(3),
+  })).max(12),
+  totalReads: z.number().nonnegative().nullable(),
+  dataVolume: z.number().nonnegative().nullable(),
+  tools: z.array(shortText).max(5),
+})
+export const fileCardSchema = z.object({
+  groupId: shortText.nullable(),
+  paired: z.boolean(),
+  files: z.array(z.object({ fileId: shortText, fileName: z.string().max(255), sizeBytes: z.number().nonnegative().nullable() })).min(1).max(2),
+  sampleType: shortText.nullable(),
+  status: shortText.nullable(),
+  analysisStatus: shortText.nullable(),
+  metaStatus: shortText.nullable(),
+  uploadTime: shortText.nullable(),
+  brief: fileBriefSchema.nullable(),
+})
+export type FileBrief = z.infer<typeof fileBriefSchema>
+export type FileCard = z.infer<typeof fileCardSchema>
+
 export const gpasPartSchema = z.object({
   type: z.literal('gpas'),
   order: z.number().int().nonnegative(),
   form: projectFormSchema.optional(),
+  /** Uploaded file cards from the file list tool. */
+  files: z.array(fileCardSchema).max(20).optional(),
   capability: z.object({
     id: z.string().nullable(),
     intent: z.string(),
