@@ -40,16 +40,16 @@ const fallbackTones: Tone[] = [
 ]
 const otherTone = { block: '#e2e4e6', label: '#475155' }
 
-const toneFor = (type: string, index: number): Tone => tones[type] ?? fallbackTones[index % fallbackTones.length]
+export const toneFor = (type: string, index: number): Tone => tones[type] ?? fallbackTones[index % fallbackTones.length]
 
 const formatSize = (bytes: number) => {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(bytes >= 10 * 1024 ** 3 ? 0 : 1)}GB`
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)}MB`
   return `${Math.max(1, Math.round(bytes / 1024))}KB`
 }
-const formatReads = (reads: number) => reads >= 1e6 ? `${(reads / 1e6).toFixed(2)}M Reads` : `${reads.toLocaleString('zh-CN')} Reads`
-const formatVolume = (value: number) => value >= 1e9 ? `${(value / 1e9).toFixed(2)} G` : value >= 1e6 ? `${(value / 1e6).toFixed(2)} M` : String(value)
-const formatPercent = (value: number) => `${Number(value.toFixed(1))}%`
+export const formatReads = (reads: number) => reads >= 1e6 ? `${(reads / 1e6).toFixed(2)}M Reads` : `${reads.toLocaleString('zh-CN')} Reads`
+export const formatVolume = (value: number) => value >= 1e9 ? `${(value / 1e9).toFixed(2)} G` : value >= 1e6 ? `${(value / 1e6).toFixed(2)} M` : String(value)
+export const formatPercent = (value: number) => `${Number(value.toFixed(1))}%`
 const formatTime = (value: string) => {
   const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(value)
   return match ? `${match[1].slice(2)}/${match[2]}/${match[3]} ${match[4]}:${match[5]}` : value

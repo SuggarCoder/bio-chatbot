@@ -140,6 +140,15 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 回复完成后自动在右侧面板（复用 Artifact 侧栏）打开分析详情，之后可点回复中的入口卡片重新打开。面板由
 `src/client/features/gpasUpload/GpasResultPanel.tsx` 渲染：
 
+- 顶部统计（取自该样本卡片的 briefAnalysis，使用应用的青绿主题色）：检出物种总数与大类数、测序 Reads 与数据量、最高风险等级、
+  大类构成环形图（按检出种数占比，颜色与分析卡片的类别色一致）、类别内丰度 Top 3 物种。
+- 物种表格列：序号、生物学编号（`taxId`）、物种名称、定植特性、风险程度分级（`hazardIndex`，1–5 级）、覆盖度、可信度雷达。
+  面板宽度小于 460px 时生物学编号折到物种名下方，表格在自身容器内横向滚动。
+- 可信度雷达（`src/client/features/gpasUpload/evidenceRadar.ts`）：六个维度各归一化为 0–100，缺失记 0 并显示「—」：
+  物种自比对率 `selfAlignRatio`（×100）、基因组覆盖度（比例，20% 满分）、唯一匹配 Reads `onlyMatching`（对数，100 reads 满分）、
+  基因组均一度 `unifPvalue`（−log10 P，指数饱和 1−e^(−x/6.6)）、样本内物种丰度 `abundance`（百分数，对数，1% 满分）、
+  物种混淆度 `ani95SpeciesNums`（100/(1+n)）。表格内为无标注小图，点击打开完整雷达（原始值标注与明细表）。
+  面积颜色按 `hazardIndex` 分 5 级渐变（`hazardGradients`），风险分级胶囊用同一色阶。
 - tabs 为「全部」加该样本卡片中检出的大类（`microbialType` 作为 `speciesType`），找不到卡片时只有「全部」。
 - 每个 tab、每一页只在显示时请求一次并缓存；加载时显示骨架屏，失败可重试。
 - 翻页和切 tab 请求 `GET /ai-chatbot/api/gpas/file/results`，服务端以当前会话身份执行同一个 `file.result` 工具；
@@ -167,3 +176,5 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 14. `merge/list` 的 `fileName` 是精确匹配还是模糊匹配（服务端已按文件名精确过滤）；文件行上是否有 `analysisId`，且即为 `file/result/list` 的 `taskId`。
 15. `file/result/list` 的 `speciesType` 取值是否与 brief 的 `microbialType`（bacteria/viral/fungi…）一致；`coverage` 的格式（百分比字符串或小数）。
 16. `file/result/list` 是否按会话 Cookie 校验 taskId 属于当前团队（taskId 来自用户或模型输入）。
+17. result 行上是否都有 `taxId`、`hazardIndex`、`selfAlignRatio`、`onlyMatching`、`unifPvalue`、`abundance`、`ani95SpeciesNums`；
+    `unifPvalue` 是否已是 −log10 值，`abundance` 是否为百分数，`coverage` 是比例还是百分比（当前 ≤1 视为比例）。

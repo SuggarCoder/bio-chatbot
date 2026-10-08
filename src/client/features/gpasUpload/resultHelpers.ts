@@ -8,6 +8,11 @@ export function coveragePct(value: string): number | null {
   return Math.min(100, Math.max(0, pct))
 }
 
+/** The briefAnalysis of the card whose analysisId is `taskId`. */
+export function resultBrief(cards: readonly FileCard[], taskId: string) {
+  return cards.find((item) => item.analysisId === taskId)?.brief ?? null
+}
+
 /** Category tabs for a task, from its analysis card (detected categories only). */
 export function resultCategories(cards: readonly FileCard[], taskId: string) {
   const card = cards.find((item) => item.analysisId === taskId)

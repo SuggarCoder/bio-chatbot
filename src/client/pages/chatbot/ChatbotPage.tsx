@@ -58,7 +58,7 @@ import { FASTQ_ACCEPT } from '../../features/gpasUpload/fastqPairing'
 import { createGpasUploadController, uploadFallbackContent } from '../../features/gpasUpload/uploadController'
 import { UploadedFilesSummary, UploadTray } from '../../features/gpasUpload/UploadTray'
 import { FileAnalysisCards, GpasResultEntry } from '../../features/gpasUpload/FileAnalysisCards'
-import { resultCategories } from '../../features/gpasUpload/resultHelpers'
+import { resultBrief, resultCategories } from '../../features/gpasUpload/resultHelpers'
 import { fileResultRequestText } from '../../../server/gpasContracts'
 import type { GpasUploadBatch } from '../../features/chatbot/chatApi'
 import { InputDialog } from '../../shared/ui/InputDialog'
@@ -2370,7 +2370,7 @@ function SessionConversationView(props: { conversationId: string }) {
   const openResult = (taskId: string) => {
     const cards = (conversation()?.messages ?? []).flatMap((message) =>
       message.parts.flatMap((part) => part.type === 'gpas' ? part.files ?? [] : []))
-    artifactStore.openGpasResult({ taskId, categories: resultCategories(cards, taskId) })
+    artifactStore.openGpasResult({ taskId, categories: resultCategories(cards, taskId), brief: resultBrief(cards, taskId) })
   }
   const viewDetail = (taskId: string) => {
     const active = conversation()

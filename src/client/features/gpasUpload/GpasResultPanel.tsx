@@ -1,79 +1,117 @@
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { FILE_RESULT_PAGE_SIZE, type FileResultPage, type FileResultRow } from '../../../server/gpasContracts'
 import { fetchGpasFileResults } from '../chatbot/chatApi'
 import type { GpasResultSelection } from '../artifacts/artifactStore'
+import { BriefStats } from './BriefStats'
+import { EvidenceRadarDialog, MiniRadar } from './EvidenceRadar'
+import { hazardGradient } from './evidenceRadar'
 import { coveragePct } from './resultHelpers'
 
 const ALL = ''
 const SKELETON_ROWS = 8
+/** Below this width the 生物学编号 column folds under the species name. */
+const NARROW_WIDTH = 460
+const COLUMNS = ['序号', '生物学编号', '物种名称', '定植特性', '风险程度分级', '覆盖度', '可信度雷达']
 
-function SkeletonRows() {
+function SkeletonRows(props: { narrow: boolean }) {
   return (
-    <ul class="divide-y divide-slate-100" aria-hidden="true" data-testid="gpas-result-skeleton">
+    <tbody aria-hidden="true" data-testid="gpas-result-skeleton">
       <For each={Array.from({ length: SKELETON_ROWS })}>
         {() => (
-          <li class="flex items-center gap-3 px-4 py-3">
-            <span class="gpas-skeleton h-2.5 w-2.5 shrink-0 rounded-full" />
-            <span class="min-w-0 flex-1 space-y-1.5">
-              <span class="gpas-skeleton block h-3.5 w-2/5" />
-              <span class="gpas-skeleton block h-3 w-3/5" />
-            </span>
-            <span class="gpas-skeleton h-3 w-16 shrink-0" />
-          </li>
+          <tr class="border-b border-slate-100">
+            <td class="px-2 py-3"><span class="gpas-skeleton mx-auto block h-3 w-4" /></td>
+            <Show when={!props.narrow}><td class="px-2 py-3"><span class="gpas-skeleton block h-3 w-12" /></td></Show>
+            <td class="px-2 py-3">
+              <span class="gpas-skeleton block h-3.5 w-24" />
+              <span class="gpas-skeleton mt-1.5 block h-3 w-32" />
+            </td>
+            <td class="px-2 py-3"><span class="gpas-skeleton block h-4 w-10 rounded-full" /></td>
+            <td class="px-2 py-3"><span class="gpas-skeleton block h-5 w-12 rounded-full" /></td>
+            <td class="px-2 py-3"><span class="gpas-skeleton ml-auto block h-3 w-10" /><span class="gpas-skeleton ml-auto mt-1.5 block h-1 w-14" /></td>
+            <td class="px-2 py-2"><span class="gpas-skeleton mx-auto block h-10 w-10 rounded-xl" /></td>
+          </tr>
         )}
       </For>
-    </ul>
+    </tbody>
   )
 }
 
-function ResultRow(props: { row: FileResultRow; categoryName: (type: string) => string }) {
+function HazardPill(props: { level: number | null }) {
+  const tone = () => hazardGradient(props.level)
+  return (
+    <Show when={props.level !== null && props.level > 0} fallback={<span class="text-slate-300">—</span>}>
+      <span
+        class="inline-flex flex-col items-center rounded-full px-2 py-0.5 text-white shadow-sm"
+        style={{ 'background-image': `linear-gradient(135deg, ${tone().from}, ${tone().to})` }}
+        title={`危害等级 ${props.level}`}
+        data-testid="gpas-hazard-pill"
+      >
+        <span class="text-[11px] font-semibold leading-4">{tone().label}</span>
+        <span class="text-[8px] leading-3 tracking-tight" aria-hidden="true">{'★'.repeat(Math.min(5, props.level!))}</span>
+      </span>
+    </Show>
+  )
+}
+
+function ResultRow(props: { row: FileResultRow; index: number; narrow: boolean; categoryName: (type: string) => string; onRadar: () => void }) {
   const pct = () => coveragePct(props.row.coverage)
   return (
-    <li class="flex items-start gap-3 px-4 py-3 transition-colors hover:bg-slate-50/80" data-testid="gpas-result-row">
-      <span
-        class="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ring-2 ring-white"
-        style={{ 'background-color': props.row.color ?? '#94a3b8' }}
-        aria-hidden="true"
-      />
-      <div class="min-w-0 flex-1">
-        <div class="flex min-w-0 items-baseline gap-2">
-          <span class="truncate text-sm font-semibold text-slate-800" title={props.row.taxCname}>{props.row.taxCname || '—'}</span>
-          <Show when={props.row.colonization}>
-            <span class="shrink-0 rounded-full bg-amber-50 px-1.5 py-px text-[10px] font-medium text-amber-700 ring-1 ring-amber-200/70" title={props.row.colonizationE || undefined}>
-              {props.row.colonization}
-            </span>
-          </Show>
+    <tr class="border-b border-slate-100 transition-colors odd:bg-white even:bg-slate-50/40 hover:bg-teal-50/40" data-testid="gpas-result-row">
+      <td class="px-2 py-2.5 text-center text-xs font-medium tabular-nums text-slate-400" data-testid="gpas-result-index">{props.index}</td>
+      <Show when={!props.narrow}>
+        <td class="px-2 py-2.5 font-mono text-[11px] text-slate-500">{props.row.taxId || '—'}</td>
+      </Show>
+      <td class="min-w-0 max-w-0 px-2 py-2.5">
+        <div class="flex min-w-0 items-center gap-1.5">
+          <span class="h-2 w-2 shrink-0 rounded-full" style={{ 'background-color': props.row.color ?? '#cbd5e1' }} aria-hidden="true" />
+          <span class="truncate text-[13px] font-semibold text-slate-800" title={props.row.taxCname}>{props.row.taxCname || '—'}</span>
         </div>
         <Show when={props.row.taxEname && props.row.taxEname !== props.row.taxCname}>
-          <p class="truncate text-xs italic text-slate-500" title={props.row.taxEname}>{props.row.taxEname}</p>
+          <p class="truncate pl-3.5 text-[11px] italic text-slate-400" title={props.row.taxEname}>{props.row.taxEname}</p>
         </Show>
-        <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-400">
-          <Show when={props.row.speciesType}>
-            <span class="rounded bg-slate-100 px-1.5 py-px font-medium text-slate-600">{props.categoryName(props.row.speciesType)}</span>
-          </Show>
-          <Show when={props.row.barcodeId}>
-            <span>Barcode {props.row.barcodeId}</span>
-          </Show>
+        <p class="truncate pl-3.5 text-[10px] text-slate-400">
+          {props.categoryName(props.row.speciesType)}
+          <Show when={props.narrow && props.row.taxId}> · <span class="font-mono">{props.row.taxId}</span></Show>
+        </p>
+      </td>
+      <td class="px-2 py-2.5">
+        <Show when={props.row.colonization} fallback={<span class="text-slate-300">—</span>}>
+          <span class="inline-block max-w-full truncate rounded-full bg-teal-50 px-2 py-0.5 text-[11px] font-medium text-teal-700 ring-1 ring-teal-100" title={props.row.colonizationE || props.row.colonization}>
+            {props.row.colonization}
+          </span>
+        </Show>
+      </td>
+      <td class="px-2 py-2.5 text-center"><HazardPill level={props.row.hazardIndex} /></td>
+      <td class="px-2 py-2.5 text-right">
+        <span class="inline-flex items-center gap-1 text-xs font-semibold tabular-nums text-slate-700">
+          {props.row.coverage || '—'}
           <Show when={props.row.coverageUrl}>
             {(url) => (
-              <a class="inline-flex items-center gap-0.5 text-teal-700 hover:underline" href={url()} target="_blank" rel="noopener noreferrer">
-                <span aria-hidden="true" class="i-lucide-chart-area h-3 w-3" />覆盖度图
+              <a class="text-slate-400 hover:text-teal-700" href={url()} target="_blank" rel="noopener noreferrer" aria-label="覆盖度图" title="覆盖度图">
+                <span aria-hidden="true" class="i-lucide-external-link h-3 w-3" />
               </a>
             )}
           </Show>
-        </div>
-      </div>
-      <div class="w-20 shrink-0 text-right">
-        <span class="text-xs font-semibold tabular-nums text-slate-700">{props.row.coverage || '—'}</span>
+        </span>
         <Show when={pct() !== null}>
-          <span class="mt-1 block h-1 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
-            <span class="block h-full rounded-full bg-teal-500/80" style={{ width: `${pct()}%` }} />
+          <span class="ml-auto mt-1 block h-1 w-14 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+            <span class="block h-full rounded-full" style={{ width: `${pct()}%`, 'background-image': 'linear-gradient(90deg, #6a9ea2, #2c7378)' }} />
           </span>
         </Show>
-        <span class="mt-0.5 block text-[10px] text-slate-400">覆盖度</span>
-      </div>
-    </li>
+      </td>
+      <td class="px-1.5 py-1.5 text-center">
+        <button
+          type="button"
+          class="rounded-xl p-0.5 transition hover:bg-white hover:shadow-md hover:ring-1 hover:ring-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+          aria-label={`查看 ${props.row.taxCname} 证据雷达`}
+          onClick={props.onRadar}
+          data-testid="gpas-mini-radar"
+        >
+          <MiniRadar row={props.row} />
+        </button>
+      </td>
+    </tr>
   )
 }
 
@@ -92,7 +130,24 @@ export function GpasResultPanel(props: { selection: GpasResultSelection }) {
   const [loading, setLoading] = createSignal(false)
   const [error, setError] = createSignal('')
   const [retry, setRetry] = createSignal(0)
+  const [radar, setRadar] = createSignal<{ row: FileResultRow; index: number }>()
+  const [narrow, setNarrow] = createSignal(false)
   let controller: AbortController | undefined
+  let root: HTMLDivElement | undefined
+  onMount(() => {
+    if (!root || typeof ResizeObserver === 'undefined') return
+    let frame = 0
+    // Deferred so the column change never re-enters the observer loop.
+    const observer = new ResizeObserver(([entry]) => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => setNarrow(entry.contentRect.width < NARROW_WIDTH))
+    })
+    observer.observe(root)
+    onCleanup(() => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+    })
+  })
 
   const page = () => pages[tab()] ?? 1
   const key = () => `${tab()}|${page()}`
@@ -131,8 +186,9 @@ export function GpasResultPanel(props: { selection: GpasResultSelection }) {
   const totalPage = () => meta[tab()]?.totalPage ?? 0
 
   return (
-    <div class="flex min-h-full flex-col bg-white" data-testid="gpas-result-panel">
-      <div class="sticky top-0 z-10 border-b border-slate-100 bg-white/95 px-3 pt-3 backdrop-blur">
+    <div ref={root} class="flex min-h-full flex-col bg-slate-50" data-testid="gpas-result-panel">
+      <Show when={props.selection.brief}>{(brief) => <BriefStats brief={brief()} />}</Show>
+      <div class="sticky top-0 z-20 h-12 border-b border-slate-100 bg-slate-50/95 px-3 pt-2 backdrop-blur">
         <div class="gpas-scrollbar -mx-1 flex gap-1 overflow-x-auto px-1 pb-2" role="tablist" aria-label="物种大类">
           <For each={tabs()}>
             {(item) => (
@@ -140,7 +196,7 @@ export function GpasResultPanel(props: { selection: GpasResultSelection }) {
                 type="button"
                 role="tab"
                 aria-selected={tab() === item.type}
-                class={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 ${tab() === item.type ? 'bg-teal-700 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200/80 hover:text-slate-800'}`}
+                class={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 ${tab() === item.type ? 'bg-teal-700 text-white shadow-sm' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:text-slate-900'}`}
                 onClick={() => setTab(item.type)}
               >
                 {item.name}
@@ -153,40 +209,82 @@ export function GpasResultPanel(props: { selection: GpasResultSelection }) {
         </div>
       </div>
 
-      <div class="min-h-0 flex-1" role="tabpanel" aria-busy={loading()}>
+      <div class="min-h-0 flex-1 px-3 pt-2" role="tabpanel" aria-busy={loading()}>
         <Show
-          when={!loading() || current()}
-          fallback={<SkeletonRows />}
+          when={!error()}
+          fallback={
+            <div class="flex flex-col items-center gap-3 px-6 py-12 text-center">
+              <p class="text-sm text-slate-500">{error()}</p>
+              <button type="button" class="rounded-full bg-white px-4 py-1.5 text-xs font-medium text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50" onClick={() => setRetry((value) => value + 1)}>
+                重试
+              </button>
+            </div>
+          }
         >
-          <Show
-            when={!error()}
-            fallback={
-              <div class="flex flex-col items-center gap-3 px-6 py-12 text-center">
-                <p class="text-sm text-slate-500">{error()}</p>
-                <button type="button" class="rounded-full bg-slate-100 px-4 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200" onClick={() => setRetry((value) => value + 1)}>
-                  重试
-                </button>
-              </div>
-            }
-          >
-            <Show when={current()} keyed>
-              {(result) => (
-                <Show
-                  when={result.rows.length > 0}
-                  fallback={<p class="px-6 py-12 text-center text-sm text-slate-500">该类别暂无分析结果</p>}
-                >
-                  <ul class="gpas-fade-in divide-y divide-slate-100">
-                    <For each={result.rows}>{(row) => <ResultRow row={row} categoryName={categoryName} />}</For>
-                  </ul>
+          {/* Phones scroll the table sideways instead of crushing the name column. */}
+          <div class={`rounded-2xl bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-100 ${narrow() ? 'gpas-scrollbar overflow-x-auto' : ''}`}>
+            <table class={`w-full table-fixed border-collapse text-left ${narrow() ? 'min-w-[420px]' : ''}`} data-testid="gpas-result-table">
+              <colgroup>
+                <col class="w-9" />
+                <Show when={!narrow()}><col class="w-[68px]" /></Show>
+                <col />
+                <col class="w-[64px]" />
+                <col class="w-[60px]" />
+                <col class="w-[74px]" />
+                <col class="w-[56px]" />
+              </colgroup>
+              <thead>
+                <tr class="border-b border-slate-100 text-[11px] font-semibold text-slate-400">
+                  <For each={COLUMNS.filter((name) => !narrow() || name !== '生物学编号')}>
+                    {(name) => (
+                      <th
+                        scope="col"
+                        class={`${narrow() ? '' : 'sticky top-12 z-10 backdrop-blur'} whitespace-nowrap bg-white/95 px-2 py-2.5 ${name === '覆盖度' ? 'text-right' : name === '序号' || name === '风险程度分级' || name === '可信度雷达' ? 'text-center' : ''}`}
+                      >
+                        {name === '风险程度分级' ? '风险分级' : name === '可信度雷达' ? '可信度' : name}
+                      </th>
+                    )}
+                  </For>
+                </tr>
+              </thead>
+              <Show when={!loading() || current()} fallback={<SkeletonRows narrow={narrow()} />}>
+                <Show when={current()} keyed>
+                  {(result) => (
+                    <Show
+                      when={result.rows.length > 0}
+                      fallback={<tbody><tr><td colSpan={narrow() ? 6 : 7} class="px-6 py-12 text-center text-sm text-slate-500">该类别暂无分析结果</td></tr></tbody>}
+                    >
+                      <tbody class="gpas-fade-in">
+                        <For each={result.rows}>
+                          {(row, index) => {
+                            const number = () => (result.page - 1) * result.pageSize + index() + 1
+                            return (
+                              <ResultRow
+                                row={row}
+                                index={number()}
+                                narrow={narrow()}
+                                categoryName={categoryName}
+                                onRadar={() => setRadar({ row, index: number() })}
+                              />
+                            )
+                          }}
+                        </For>
+                      </tbody>
+                    </Show>
+                  )}
                 </Show>
-              )}
-            </Show>
-          </Show>
+              </Show>
+            </table>
+          </div>
         </Show>
       </div>
 
+      <Show when={radar()} keyed>
+        {(item) => <EvidenceRadarDialog row={item.row} index={item.index} onClose={() => setRadar(undefined)} />}
+      </Show>
+
       <Show when={totalPage() > 0}>
-        <div class="sticky bottom-0 flex items-center justify-between gap-2 border-t border-slate-100 bg-white/95 px-4 py-2.5 text-xs text-slate-500 backdrop-blur">
+        <div class="sticky bottom-0 mt-2 flex items-center justify-between gap-2 border-t border-slate-100 bg-slate-50/95 px-4 py-2.5 text-xs text-slate-500 backdrop-blur">
           <span class="tabular-nums">共 {meta[tab()]?.total ?? 0} 条</span>
           <div class="flex items-center gap-1">
             <button

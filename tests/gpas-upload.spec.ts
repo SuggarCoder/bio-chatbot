@@ -243,7 +243,8 @@ const resultRow = (index: number, speciesType: string, page: number) => ({
   id: `${speciesType}-${page}-${index}`, taskId: 'task-1', speciesType: speciesType || 'bacteria',
   taxCname: `物种${page}-${index}`, taxEname: `Species ${page}-${index}`, coverage: `${(index * 3.7).toFixed(1)}%`,
   coverageUrl: index === 0 ? 'https://gpas.example/cov.png' : null, colonization: index === 0 ? '定植' : '', colonizationE: '',
-  color: '#2c7378', barcodeId: 'B01',
+  color: '#2c7378', barcodeId: 'B01', taxId: String(1177574 + index), hazardIndex: index % 6, coverageValue: (index * 3.7) / 100,
+  selfAlignRatio: 1, onlyMatching: 10 + index * 20, unifPvalue: 12.94, abundance: index === 0 ? 0.005 : index * 0.2, ani95SpeciesNums: index % 3,
 })
 
 test('"查看详情" asks for the analysis detail and the panel pages each category on demand', async ({ page }) => {
@@ -287,6 +288,35 @@ test('"查看详情" asks for the analysis detail and the panel pages each categ
   await expect(panel.getByRole('tab')).toHaveText(['全部', '细菌', '病毒', '真菌'])
   await expect(panel.getByTestId('gpas-result-skeleton')).toBeVisible()
   await expect(panel.getByTestId('gpas-result-row')).toHaveCount(20)
+  // Statistics from the card's briefAnalysis.
+  await expect(panel.getByTestId('gpas-stat-species')).toContainText('197')
+  await expect(panel.getByTestId('gpas-stat-legend')).toContainText('细菌')
+  await expect(panel.getByTestId('gpas-stat-legend')).toContainText('95.4%')
+  // The species table.
+  await expect(panel.getByRole('columnheader')).toHaveText(['序号', '生物学编号', '物种名称', '定植特性', '风险分级', '覆盖度', '可信度'])
+  await expect(panel.getByTestId('gpas-result-index').first()).toHaveText('1')
+  await expect(panel.getByTestId('gpas-result-row').nth(3)).toContainText('1177577')
+  await expect(panel.getByTestId('gpas-hazard-pill').first()).toContainText('1 级')
+  if (process.env.SHOTS) {
+    await page.waitForTimeout(400)
+    await page.screenshot({ path: `${process.env.SHOTS}/table.png` })
+  }
+
+  // The mini radar opens the full evidence radar.
+  await panel.getByRole('button', { name: '查看 物种1-0 证据雷达' }).click()
+  const dialog = page.getByRole('dialog', { name: '物种1-0 物种证据雷达' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByTestId('gpas-evidence-radar')).toContainText('DETECTED', { ignoreCase: true })
+  await expect(dialog.getByTestId('gpas-radar-value')).toHaveText(['1', '0', '10', '12.94', '<0.01%', '0'])
+  for (const name of ['物种自比对率', '基因组覆盖度', '唯一匹配 Reads', '基因组均一度', '样本内物种丰度', '物种混淆度']) {
+    await expect(dialog.getByText(name).first()).toBeVisible()
+  }
+  if (process.env.SHOTS) {
+    await dialog.screenshot({ path: `${process.env.SHOTS}/radar.png` })
+  }
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: '查看 物种1-0 证据雷达' })).toBeFocused()
   await expect(panel.getByRole('tab', { name: /全部/ })).toContainText('45')
   await expect(panel.getByTestId('gpas-result-page')).toHaveText('1 / 3')
   await expect(panel.getByRole('link', { name: '覆盖度图' })).toHaveAttribute('rel', 'noopener noreferrer')
@@ -296,6 +326,7 @@ test('"查看详情" asks for the analysis detail and the panel pages each categ
   await expect(panel.getByTestId('gpas-result-skeleton')).toBeVisible()
   await expect(panel.getByTestId('gpas-result-page')).toHaveText('2 / 3')
   await expect(panel.getByText('物种2-0', { exact: true })).toBeVisible()
+  await expect(panel.getByTestId('gpas-result-index').first()).toHaveText('21')
 
   await panel.getByRole('tab', { name: '病毒' }).click()
   await expect(panel.getByTestId('gpas-result-row')).toHaveCount(3)
@@ -321,4 +352,40 @@ test('cards without an analysis id have no detail button', async ({ page }) => {
   await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo))])
   await expect(page.getByTestId('gpas-file-card')).toHaveCount(1)
   await expect(page.getByTestId('gpas-view-detail')).toHaveCount(0)
+})
+
+test('the analysis detail panel fits a phone-width screen', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 })
+  await mockApis(page, () => ({ status: 200 }))
+  await page.route(`**/ai-chatbot/api/conversations/${chatId}`, (route) => route.fulfill({ json: {
+    id: chatId, title: '详情', chatType: 'general', status: 'active', createdAt: timestamp, updatedAt: timestamp,
+    pageInfo: { hasMore: false, beforeSeq: null }, activeGeneration: null,
+    messages: [
+      { id: 'e9345da6-998b-4462-a539-000000000001', seq: 1, role: 'user', status: 'completed', content: '查看样本:task-1分析详情', parts: [], createdAt: timestamp, vote: null, executionSteps: [] },
+      { id: 'e9345da6-998b-4462-a539-000000000002', seq: 2, role: 'assistant', status: 'completed', content: '详情如下。',
+        parts: [
+          { type: 'text', order: 0, text: '详情如下。' },
+          { type: 'gpas', order: 1, files: [card('s1', toBrief(rawBrief.microbialInfo), 'task-1')], result: { taskId: 'task-1', total: 3 } },
+        ],
+        createdAt: timestamp, vote: null, executionSteps: [] },
+    ],
+  } }))
+  await page.route('**/ai-chatbot/api/gpas/file/results**', (route) => route.fulfill({ json: {
+    taskId: 'task-1', speciesType: null, page: 1, pageSize: 20, total: 3, totalPage: 1,
+    rows: Array.from({ length: 3 }, (_, index) => resultRow(index, '', 1)),
+  } }))
+  await page.goto(`/ai-chatbot/${chatId}`)
+  await page.getByTestId('gpas-result-entry').click()
+  const panel = page.getByTestId('gpas-result-panel')
+  await expect(panel.getByTestId('gpas-result-row')).toHaveCount(3)
+  await expect(panel.getByTestId('gpas-brief-stats')).toBeVisible()
+  // Narrow: the 生物学编号 column folds under the name; the table scrolls inside its own box.
+  await expect(panel.getByRole('columnheader')).toHaveCount(6)
+  await expect(panel.getByTestId('gpas-result-row').first()).toContainText('1177574')
+  const overflow = await panel.evaluate((element) => element.scrollWidth - element.clientWidth)
+  expect(overflow).toBeLessThanOrEqual(0)
+  if (process.env.SHOTS) {
+    await page.waitForTimeout(600)
+    await page.screenshot({ path: `${process.env.SHOTS}/panel-mobile.png` })
+  }
 })

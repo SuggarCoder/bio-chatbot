@@ -6,6 +6,7 @@ import {
   restoreArtifactVersion,
 } from './artifactApi'
 import { shouldRevealCommittedArtifact } from './streamingParts'
+import type { FileBrief } from '../../../server/gpasContracts'
 import type { ArtifactClientEntity, ArtifactDraftClientState, ArtifactMimeType } from './types'
 
 /** A sample's analysis detail shown in the panel instead of an artifact. */
@@ -13,6 +14,8 @@ export type GpasResultSelection = {
   taskId: string
   /** Category tabs (speciesType + label) from the sample's analysis card. */
   categories: Array<{ type: string; name: string }>
+  /** The sample's briefAnalysis, for the statistics header. */
+  brief: FileBrief | null
 }
 
 type ArtifactStoreState = {

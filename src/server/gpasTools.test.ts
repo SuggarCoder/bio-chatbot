@@ -290,6 +290,7 @@ test('file result tool pages one task through the session and keeps safe fields 
       dataList: [
         { id: 'r1', taskId: 'task-1', speciesType: 'bacteria', taxCname: '空肠普雷沃菌', taxEname: 'Prevotella jejuni', coverage: '12.5%',
           coverageUrl: 'https://gpas.example/cov/1.png', colonization: '定植', colonizationE: 'colonized', color: '#2c7378', barcodeId: 'B01',
+          taxId: 1177574, hazardIndex: '3', selfAlignRatio: 1, onlyMatching: '10', unifPvalue: 12.94, abundance: '0.005%', ani95SpeciesNums: 0,
           createTime: '2026-01-01', updateTime: '2026-01-02', secret: 'x' },
         { id: 2, speciesType: 'bacteria', taxCname: '', taxEname: 'Unnamed', coverage: 3, coverageUrl: 'javascript:alert(1)',
           colonization: null, colonizationE: null, color: 'red;background:url(x)', barcodeId: null },
@@ -309,15 +310,24 @@ test('file result tool pages one task through the session and keeps safe fields 
   assert.deepEqual(data.rows[0], {
     id: 'r1', speciesType: 'bacteria', taxCname: '空肠普雷沃菌', taxEname: 'Prevotella jejuni', coverage: '12.5%',
     coverageUrl: 'https://gpas.example/cov/1.png', colonization: '定植', colonizationE: 'colonized', color: '#2c7378', barcodeId: 'B01',
+    taxId: '1177574', hazardIndex: 3, coverageValue: 0.125,
+    selfAlignRatio: 1, onlyMatching: 10, unifPvalue: 12.94, abundance: 0.005, ani95SpeciesNums: 0,
   })
   // Unsafe links and colors are dropped; a missing Chinese name falls back to the Latin one.
   assert.equal(data.rows[1].coverageUrl, null)
   assert.equal(data.rows[1].color, null)
   assert.equal(data.rows[1].taxCname, 'Unnamed')
+  // Missing evidence stays null rather than becoming zero.
+  assert.equal(data.rows[1].hazardIndex, null)
+  assert.equal(data.rows[1].selfAlignRatio, null)
+  assert.equal(data.rows[1].coverageValue, 0.03)
 
   const model = tool.toModel(data) as { page: number; rows: Array<Record<string, unknown>> }
   assert.equal(model.page, 2)
-  assert.deepEqual(Object.keys(model.rows[0]).sort(), ['barcodeId', 'colonization', 'colonizationE', 'coverage', 'speciesType', 'taxCname', 'taxEname'])
+  assert.deepEqual(Object.keys(model.rows[0]).sort(), [
+    'abundance', 'ani95SpeciesNums', 'colonization', 'colonizationE', 'coverage', 'hazardIndex', 'onlyMatching',
+    'selfAlignRatio', 'speciesType', 'taxCname', 'taxEname', 'taxId', 'unifPvalue',
+  ])
   assert.doesNotMatch(JSON.stringify(model), /session=mine|secret|cov\/1\.png/)
 
   const reply = tool.toReply(data, context)

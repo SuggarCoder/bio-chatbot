@@ -92,6 +92,19 @@ export const fileResultRowSchema = z.object({
   /** Only #hex or rgb() colors survive parsing. */
   color: shortText.nullable(),
   barcodeId: shortText,
+  /** 生物学编号. */
+  taxId: shortText,
+  hazardIndex: z.number().int().min(0).max(9).nullable(),
+  /** Coverage as a fraction (0.05 = 5%), for the evidence radar. */
+  coverageValue: z.number().nonnegative().nullable(),
+  // Evidence radar inputs, raw as GPAS reports them.
+  selfAlignRatio: z.number().nullable(),
+  onlyMatching: z.number().nullable(),
+  /** −log10 P of the genome uniformity test. */
+  unifPvalue: z.number().nullable(),
+  /** In-sample abundance, in percent. */
+  abundance: z.number().nullable(),
+  ani95SpeciesNums: z.number().nullable(),
 })
 export const fileResultPageSchema = z.object({
   taskId: taskIdSchema,
