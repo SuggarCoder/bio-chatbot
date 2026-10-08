@@ -11,6 +11,7 @@ import {
   type Component,
   type ParentComponent,
   type ParentProps,
+  untrack,
 } from 'solid-js'
 import collapseUrl from '../../assets/images/collapse.svg'
 import gpasUrl from '../../assets/images/gpas.svg'
@@ -56,7 +57,9 @@ import { recordStreamOperation } from '../../features/chatbot/streamMetrics'
 import { FASTQ_ACCEPT } from '../../features/gpasUpload/fastqPairing'
 import { createGpasUploadController, uploadFallbackContent } from '../../features/gpasUpload/uploadController'
 import { UploadedFilesSummary, UploadTray } from '../../features/gpasUpload/UploadTray'
-import { FileAnalysisCards } from '../../features/gpasUpload/FileAnalysisCards'
+import { FileAnalysisCards, GpasResultEntry } from '../../features/gpasUpload/FileAnalysisCards'
+import { resultCategories } from '../../features/gpasUpload/resultHelpers'
+import { fileResultRequestText } from '../../../server/gpasContracts'
 import type { GpasUploadBatch } from '../../features/chatbot/chatApi'
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
@@ -1579,6 +1582,8 @@ function ChatMessageBubble(props: {
   onVote: (vote: 'up' | 'down' | null) => Promise<void>
   onRegenerate: () => Promise<void>
   onProjectSubmit: (input: import('../../features/chatbot/chatApi').ProjectInput) => Promise<void>
+  onViewDetail: (taskId: string) => void
+  onOpenResult: (taskId: string) => void
 }) {
   const isUser = () => props.message.role === 'user'
   const [visualComplete, setVisualComplete] = createSignal(
@@ -1653,7 +1658,7 @@ function ChatMessageBubble(props: {
             <Show
               when={liveGenerationId()}
               keyed
-              fallback={<StaticMessageParts message={props.message} disabled={props.generationActive} onProjectSubmit={props.onProjectSubmit} />}
+              fallback={<StaticMessageParts message={props.message} disabled={props.generationActive} onProjectSubmit={props.onProjectSubmit} onViewDetail={props.onViewDetail} onOpenResult={props.onOpenResult} />}
             >
               {(generationId) => (
                 <Show
@@ -1696,6 +1701,8 @@ function StaticMessageParts(props: {
   message: ChatMessage
   disabled: boolean
   onProjectSubmit: (input: import('../../features/chatbot/chatApi').ProjectInput) => Promise<void>
+  onViewDetail: (taskId: string) => void
+  onOpenResult: (taskId: string) => void
 }) {
   const parts = () => props.message.parts.length > 0
     ? props.message.parts
@@ -1717,7 +1724,8 @@ function StaticMessageParts(props: {
           ? (
               <>
                 <Show when={part.form}>{(form) => <ProjectInitForm form={form()} messageId={props.message.id} disabled={props.disabled} onSubmit={props.onProjectSubmit} />}</Show>
-                <Show when={part.files}>{(files) => <Show when={files().length > 0}><FileAnalysisCards cards={files()} /></Show>}</Show>
+                <Show when={part.files}>{(files) => <Show when={files().length > 0}><FileAnalysisCards cards={files()} onViewDetail={props.onViewDetail} detailDisabled={props.disabled} /></Show>}</Show>
+                <Show when={part.result}>{(result) => <GpasResultEntry taskId={result().taskId} total={result().total} onOpen={props.onOpenResult} />}</Show>
               </>
             )
           : part.type === 'gpas_upload'
@@ -2356,6 +2364,34 @@ function SessionConversationView(props: { conversationId: string }) {
     }
   })
 
+  // Analysis detail: the card button asks for it as a chat message, and the
+  // reply's result part opens the side panel (automatically for that request).
+  const [pendingDetailTaskId, setPendingDetailTaskId] = createSignal<string>()
+  const openResult = (taskId: string) => {
+    const cards = (conversation()?.messages ?? []).flatMap((message) =>
+      message.parts.flatMap((part) => part.type === 'gpas' ? part.files ?? [] : []))
+    artifactStore.openGpasResult({ taskId, categories: resultCategories(cards, taskId) })
+  }
+  const viewDetail = (taskId: string) => {
+    const active = conversation()
+    if (!active || active.requestPending || active.activeGeneration) return
+    const question = chatStore.appendUserMessage(props.conversationId, fileResultRequestText(taskId))
+    if (!question?.clientMessageId) return
+    setPendingDetailTaskId(taskId)
+    shouldStickToBottom = true
+    void runAssistantReply(props.conversationId, question.content, question.clientMessageId, undefined, chatStore)
+  }
+  createEffect(() => {
+    const taskId = pendingDetailTaskId()
+    if (!taskId) return
+    const done = (conversation()?.messages ?? []).some((message) => message.role === 'assistant' &&
+      message.status === 'done' &&
+      message.parts.some((part) => part.type === 'gpas' && part.result?.taskId === taskId))
+    if (!done) return
+    setPendingDetailTaskId(undefined)
+    untrack(() => openResult(taskId))
+  })
+
   const sendFollowUp = (uploads?: GpasUploadBatch) => {
     const content = conversation()?.draft.trim() || (uploads ? uploadFallbackContent(uploads) : '')
 
@@ -2639,6 +2675,8 @@ function SessionConversationView(props: { conversationId: string }) {
                             onVisibleProgress={followVisibleOutput}
                             onVote={(vote) => updateVote(message, vote)}
                             onRegenerate={() => regenerate(message)}
+                            onViewDetail={viewDetail}
+                            onOpenResult={openResult}
                             onProjectSubmit={async (input) => {
                               if (activeConversation().requestPending || activeConversation().activeGeneration) throw new Error('请等待当前回复完成。')
                               const question = chatStore.appendUserMessage(props.conversationId, '确认初始化项目')

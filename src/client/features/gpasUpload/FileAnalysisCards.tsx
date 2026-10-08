@@ -185,7 +185,9 @@ function FoldedBlock(props: { categories: Category[]; share: (category: Category
   )
 }
 
-function AnalysisCard(props: { card: FileCard }) {
+type DetailProps = { onViewDetail?: (taskId: string) => void; detailDisabled?: boolean }
+
+function AnalysisCard(props: { card: FileCard } & DetailProps) {
   const size = () => {
     const sizes = props.card.files.map((file) => file.sizeBytes)
     return sizes.every((value) => value !== null) ? sizes.reduce((sum, value) => sum! + value!, 0)! : null
@@ -195,7 +197,8 @@ function AnalysisCard(props: { card: FileCard }) {
 
   return (
     <article class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200" data-testid="gpas-file-card">
-      <header class="bg-slate-50 px-4 py-3">
+      <header class="flex items-start gap-3 bg-slate-50 px-4 py-3">
+        <div class="min-w-0 flex-1">
         <h3 class="text-sm font-semibold text-teal-700">病原体分类分布</h3>
         <p class="mt-0.5 text-[11px] text-slate-500">
           <Show when={props.card.brief} fallback="暂无分析摘要">
@@ -207,6 +210,20 @@ function AnalysisCard(props: { card: FileCard }) {
             )}
           </Show>
         </p>
+        </div>
+        <Show when={props.card.analysisId && props.onViewDetail}>
+          <button
+            type="button"
+            class="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-teal-700 ring-1 ring-teal-200 transition hover:bg-teal-50 hover:ring-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={props.detailDisabled}
+            title={props.detailDisabled ? '请等待当前回复完成' : undefined}
+            onClick={() => props.onViewDetail!(props.card.analysisId!)}
+            data-testid="gpas-view-detail"
+          >
+            查看详情
+            <span aria-hidden="true" class="i-lucide-chevron-right h-3.5 w-3.5" />
+          </button>
+        </Show>
       </header>
 
       <div class="px-3 py-3">
@@ -274,10 +291,31 @@ function AnalysisCard(props: { card: FileCard }) {
 }
 
 /** Analysis summary cards returned by the file list tool, one per sample. */
-export function FileAnalysisCards(props: { cards: FileCard[] }) {
+export function FileAnalysisCards(props: { cards: FileCard[] } & DetailProps) {
   return (
     <div class="my-2 space-y-3" data-testid="gpas-file-cards">
-      <For each={props.cards}>{(card) => <AnalysisCard card={card} />}</For>
+      <For each={props.cards}>
+        {(card) => <AnalysisCard card={card} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} />}
+      </For>
     </div>
+  )
+}
+
+/** Entry to a sample's analysis detail; opens the side panel. */
+export function GpasResultEntry(props: { taskId: string; total: number; onOpen: (taskId: string) => void }) {
+  return (
+    <button
+      type="button"
+      class="my-3 flex w-full max-w-xl items-center gap-3 rounded-2xl border border-gray-300 bg-gray-50/60 p-4 text-left transition hover:border-gray-300 hover:bg-gray-50"
+      onClick={() => props.onOpen(props.taskId)}
+      data-testid="gpas-result-entry"
+    >
+      <span class="i-lucide-list-tree h-5 w-5 shrink-0 text-teal-700" />
+      <span class="min-w-0 flex-1">
+        <span class="block truncate text-sm font-semibold text-slate-800">样本 {props.taskId} 分析详情</span>
+        <span class="block truncate text-xs text-slate-500">共 {props.total} 条物种结果 · 按大类分页查看</span>
+      </span>
+      <span class="i-lucide-chevron-right h-4 w-4 text-slate-400" />
+    </button>
   )
 }

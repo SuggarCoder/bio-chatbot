@@ -8,11 +8,19 @@ import {
 import { shouldRevealCommittedArtifact } from './streamingParts'
 import type { ArtifactClientEntity, ArtifactDraftClientState, ArtifactMimeType } from './types'
 
+/** A sample's analysis detail shown in the panel instead of an artifact. */
+export type GpasResultSelection = {
+  taskId: string
+  /** Category tabs (speciesType + label) from the sample's analysis card. */
+  categories: Array<{ type: string; name: string }>
+}
+
 type ArtifactStoreState = {
   artifactsById: Record<string, ArtifactClientEntity>
   draftsByStreamId: Record<string, ArtifactDraftClientState>
   visibleConversationId: string | null
   activeArtifactId: string | null
+  activeGpasResult: GpasResultSelection | null
   activeStreamId: string | null
   activeVersion: number | null
   isPanelOpen: boolean
@@ -27,6 +35,7 @@ const [artifactState, setArtifactState] = createStore<ArtifactStoreState>({
   draftsByStreamId: {},
   visibleConversationId: null,
   activeArtifactId: null,
+  activeGpasResult: null,
   activeStreamId: null,
   activeVersion: null,
   isPanelOpen: false,
@@ -46,6 +55,7 @@ type PanelChangeCause = 'artifact-start' | 'artifact-commit' | 'user'
 function clearPanelSelection() {
   setArtifactState({
     activeArtifactId: null,
+    activeGpasResult: null,
     activeStreamId: null,
     activeVersion: null,
     activeTab: 'preview',
@@ -141,6 +151,7 @@ export const artifactStore = {
       clearSelectionAfterClose = false
       setArtifactState({
         activeArtifactId: input.artifactId,
+        activeGpasResult: null,
         activeStreamId: null,
         activeVersion: input.version,
         isPanelOpen: true,
@@ -162,6 +173,7 @@ export const artifactStore = {
     setArtifactState('panelInteractionRevision', (value) => value + 1)
     setArtifactState({
       activeArtifactId: artifactId,
+      activeGpasResult: null,
       activeStreamId: null,
       isPanelOpen: true,
       activeVersion: version ?? artifactState.artifactsById[artifactId]?.currentVersion ?? null,
@@ -191,6 +203,18 @@ export const artifactStore = {
       setArtifactState('artifactsById', artifactId, 'language', loaded.language ?? undefined)
       setArtifactState('artifactsById', artifactId, 'loadedVersion', desiredVersion)
     }
+  },
+  openGpasResult(selection: GpasResultSelection) {
+    clearSelectionAfterClose = false
+    setArtifactState('panelInteractionRevision', (value) => value + 1)
+    setArtifactState({
+      activeArtifactId: null,
+      activeGpasResult: selection,
+      activeStreamId: null,
+      activeVersion: null,
+      activeTab: 'preview',
+      isPanelOpen: true,
+    })
   },
   async loadHistory(artifactId: string) {
     const versions = await fetchArtifactVersions(artifactId)

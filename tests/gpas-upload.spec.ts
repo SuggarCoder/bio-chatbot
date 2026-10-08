@@ -181,9 +181,9 @@ const toBrief = (categories: RawCategory[]) => ({
   })),
   totalReads: 38959015, dataVolume: 10677513218, tools: ['Guardian'],
 })
-const card = (fileId: string, brief: unknown) => ({
+const card = (fileId: string, brief: unknown, analysisId: string | null = null) => ({
   groupId: 'g-1', paired: true, files: [{ fileId, fileName: `${fileId}_R1.fq.gz`, sizeBytes: 8 * 1024 ** 3 }, { fileId: `${fileId}-2`, fileName: `${fileId}_R2.fq.gz`, sizeBytes: 7 * 1024 ** 3 }],
-  sampleType: 'clinic', status: 'uploaded', analysisStatus: brief ? 'success' : 'running', metaStatus: 'missing', uploadTime: '2026-01-06 20:54:10', brief,
+  sampleType: 'clinic', status: 'uploaded', analysisStatus: brief ? 'success' : 'running', metaStatus: 'missing', uploadTime: '2026-01-06 20:54:10', analysisId, brief,
 })
 
 async function showCards(page: Page, cards: unknown[]) {
@@ -237,4 +237,88 @@ test('analysis cards fit a phone-width screen', async ({ page }) => {
   await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo))])
   const overflow = await page.getByTestId('gpas-file-card').first().evaluate((element) => element.scrollWidth - element.clientWidth)
   expect(overflow).toBeLessThanOrEqual(0)
+})
+
+const resultRow = (index: number, speciesType: string, page: number) => ({
+  id: `${speciesType}-${page}-${index}`, taskId: 'task-1', speciesType: speciesType || 'bacteria',
+  taxCname: `物种${page}-${index}`, taxEname: `Species ${page}-${index}`, coverage: `${(index * 3.7).toFixed(1)}%`,
+  coverageUrl: index === 0 ? 'https://gpas.example/cov.png' : null, colonization: index === 0 ? '定植' : '', colonizationE: '',
+  color: '#2c7378', barcodeId: 'B01',
+})
+
+test('"查看详情" asks for the analysis detail and the panel pages each category on demand', async ({ page }) => {
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo), 'task-1')])
+  const queries: Array<Record<string, string>> = []
+  await page.route('**/ai-chatbot/api/gpas/file/results**', async (route) => {
+    const query = Object.fromEntries(new URL(route.request().url()).searchParams)
+    queries.push(query)
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const pageNumber = Number(query.page)
+    const speciesType = query.speciesType ?? ''
+    const total = speciesType ? 3 : 45
+    const count = speciesType ? 3 : pageNumber < 3 ? 20 : 5
+    await route.fulfill({ json: {
+      taskId: 'task-1', speciesType: speciesType || null, page: pageNumber, pageSize: 20, total, totalPage: Math.ceil(total / 20),
+      rows: Array.from({ length: count }, (_, index) => resultRow(index, speciesType, pageNumber)),
+    } })
+  })
+  const sent: string[] = []
+  await page.route('**/ai-chatbot/api/conversations/*/messages', async (route) => {
+    const body = route.request().postDataJSON()
+    sent.push(body.content)
+    const message = (id: string, role: string, content: string, extra: unknown[] = []) => ({
+      id, seq: 3, role, status: 'completed', content, parts: [{ type: 'text', order: 0, text: content }, ...extra],
+      createdAt: timestamp, vote: null, executionSteps: [],
+    })
+    await route.fulfill({ status: 202, json: { id: 'ticket-1', status: 'succeeded', error: null, result: {
+      kind: 'business',
+      userMessage: message('e9345da6-998b-4462-a539-000000000003', 'user', body.content),
+      assistantMessage: message('e9345da6-998b-4462-a539-000000000004', 'assistant', '样本 task-1 共检出 45 条物种结果。',
+        [{ type: 'gpas', order: 1, result: { taskId: 'task-1', total: 45 } }]),
+    } } })
+  })
+
+  await page.getByTestId('gpas-view-detail').click()
+  await expect.poll(() => sent).toEqual(['查看样本:task-1分析详情'])
+
+  // The reply opens the panel; tabs are the card's detected categories.
+  const panel = page.getByTestId('gpas-result-panel')
+  await expect(panel).toBeVisible()
+  await expect(panel.getByRole('tab')).toHaveText(['全部', '细菌', '病毒', '真菌'])
+  await expect(panel.getByTestId('gpas-result-skeleton')).toBeVisible()
+  await expect(panel.getByTestId('gpas-result-row')).toHaveCount(20)
+  await expect(panel.getByRole('tab', { name: /全部/ })).toContainText('45')
+  await expect(panel.getByTestId('gpas-result-page')).toHaveText('1 / 3')
+  await expect(panel.getByRole('link', { name: '覆盖度图' })).toHaveAttribute('rel', 'noopener noreferrer')
+  expect(queries).toEqual([{ taskId: 'task-1', page: '1', pageSize: '20' }])
+
+  await panel.getByRole('button', { name: '下一页' }).click()
+  await expect(panel.getByTestId('gpas-result-skeleton')).toBeVisible()
+  await expect(panel.getByTestId('gpas-result-page')).toHaveText('2 / 3')
+  await expect(panel.getByText('物种2-0', { exact: true })).toBeVisible()
+
+  await panel.getByRole('tab', { name: '病毒' }).click()
+  await expect(panel.getByTestId('gpas-result-row')).toHaveCount(3)
+  await expect(panel.getByTestId('gpas-result-page')).toHaveText('1 / 1')
+
+  // Pages already seen come from the cache.
+  await panel.getByRole('tab', { name: /全部/ }).click()
+  await expect(panel.getByTestId('gpas-result-page')).toHaveText('2 / 3')
+  expect(queries).toEqual([
+    { taskId: 'task-1', page: '1', pageSize: '20' },
+    { taskId: 'task-1', page: '2', pageSize: '20' },
+    { taskId: 'task-1', speciesType: 'viral', page: '1', pageSize: '20' },
+  ])
+
+  // The entry card reopens the panel after it is closed.
+  await page.getByRole('button', { name: 'Close Artifact panel' }).click()
+  await expect(panel).toHaveCount(0)
+  await page.getByTestId('gpas-result-entry').click()
+  await expect(page.getByTestId('gpas-result-panel')).toBeVisible()
+})
+
+test('cards without an analysis id have no detail button', async ({ page }) => {
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo))])
+  await expect(page.getByTestId('gpas-file-card')).toHaveCount(1)
+  await expect(page.getByTestId('gpas-view-detail')).toHaveCount(0)
 })

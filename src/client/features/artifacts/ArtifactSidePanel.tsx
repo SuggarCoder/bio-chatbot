@@ -13,6 +13,7 @@ import {
   type Component,
 } from 'solid-js'
 import { Tooltip } from '../../shared/ui/Tooltip'
+import { GpasResultPanel } from '../gpasUpload/GpasResultPanel'
 import { ArtifactSourceView } from './ArtifactSourceView'
 import { artifactStore } from './artifactStore'
 import { artifactRenderers, UnsupportedArtifactRenderer } from './renderers'
@@ -41,7 +42,8 @@ export const ArtifactSidePanel: Component = () => {
     ? state.artifactsById[state.activeArtifactId]
     : undefined)
   const type = () => artifact()?.type
-  const title = () => artifact()?.title ?? 'Artifact'
+  const gpasResult = () => state.activeGpasResult
+  const title = () => gpasResult() ? `样本 ${gpasResult()!.taskId} 分析详情` : artifact()?.title ?? 'Artifact'
   const version = () => state.activeVersion ?? artifact()?.currentVersion ?? 1
   const renderer = createMemo(() => {
     const current = type()
@@ -390,15 +392,25 @@ export const ArtifactSidePanel: Component = () => {
               </div>
             </Show>
 
-            <button
-              type="button"
-              class="min-w-0 flex-1 rounded-lg px-1 py-1 text-left transition hover:bg-white/70"
-              aria-expanded={historyOpen()}
-              onClick={() => setHistoryOpen((value) => !value)}
+            <Show
+              when={!gpasResult()}
+              fallback={
+                <div class="min-w-0 flex-1 px-1 py-1">
+                  <h2 class="truncate text-sm font-semibold text-slate-900">{title()}</h2>
+                  <p class="truncate text-[11px] font-medium text-slate-500">物种明细 · 按大类分页</p>
+                </div>
+              }
             >
-              <h2 class="truncate text-sm font-semibold text-slate-900">{title()}</h2>
-              <p class="truncate text-[11px] font-medium text-slate-500">Version {version()}</p>
-            </button>
+              <button
+                type="button"
+                class="min-w-0 flex-1 rounded-lg px-1 py-1 text-left transition hover:bg-white/70"
+                aria-expanded={historyOpen()}
+                onClick={() => setHistoryOpen((value) => !value)}
+              >
+                <h2 class="truncate text-sm font-semibold text-slate-900">{title()}</h2>
+                <p class="truncate text-[11px] font-medium text-slate-500">Version {version()}</p>
+              </button>
+            </Show>
 
             <div class="flex shrink-0 items-center gap-1">
               <Show when={isDesktop()}>
@@ -423,6 +435,7 @@ export const ArtifactSidePanel: Component = () => {
                   </button>
                 </Tooltip>
               </Show>
+              <Show when={!gpasResult()}>
               <Tooltip content="Download" placement="bottom">
                 <button
                   type="button"
@@ -433,6 +446,7 @@ export const ArtifactSidePanel: Component = () => {
                   <span class="i-lucide-download h-4 w-4" />
                 </button>
               </Tooltip>
+              </Show>
               <Tooltip content="Close" placement="bottom">
                 <button
                   type="button"
@@ -504,7 +518,10 @@ export const ArtifactSidePanel: Component = () => {
             </Show>
           </nav>
           <div class="gpas-scrollbar scrollbar-fade min-h-0 flex-1 overflow-auto bg-slate-50">
-            <Show when={artifact()} keyed>
+            <Show when={gpasResult()} keyed>
+              {(selection) => <GpasResultPanel selection={selection} />}
+            </Show>
+            <Show when={!gpasResult() && artifact()} keyed>
               {(activeArtifact) => (
                 <Switch>
                   <Match when={state.activeTab === 'preview'}>

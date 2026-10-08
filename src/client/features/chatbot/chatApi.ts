@@ -1,4 +1,4 @@
-import type { GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput, SampleKey } from '../../../server/gpasContracts'
+import type { FileResultPage, FileResultQuery, GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput, SampleKey } from '../../../server/gpasContracts'
 export type { GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput } from '../../../server/gpasContracts'
 
 const API_BASE = `${import.meta.env?.BASE_URL ?? '/ai-chatbot/'}api`
@@ -212,6 +212,15 @@ export function fetchCurrentUser() {
 /** Sample types the team can upload, from the GPAS project status tool. */
 export function fetchUploadSampleTypes() {
   return requestJson<{ initialized: boolean; types: SampleKey[] }>('/gpas/upload/sample-types')
+}
+
+/** One page of a sample's analysis detail, via the server's file.result tool. */
+export function fetchGpasFileResults(query: FileResultQuery, signal?: AbortSignal) {
+  const params = new URLSearchParams({ taskId: query.taskId })
+  if (query.speciesType) params.set('speciesType', query.speciesType)
+  if (query.page) params.set('page', String(query.page))
+  if (query.pageSize) params.set('pageSize', String(query.pageSize))
+  return requestJson<FileResultPage>(`/gpas/file/results?${params}`, { signal })
 }
 
 export async function fetchChats() {

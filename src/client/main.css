@@ -464,3 +464,48 @@
     }
   }
   
+
+.gpas-skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: .375rem;
+  background: rgb(226 232 240 / .7);
+}
+
+.gpas-skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / .65), transparent);
+  animation: gpas-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.gpas-fade-in {
+  animation: gpas-fade-in .22s ease-out;
+}
+
+@keyframes gpas-skeleton-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes gpas-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gpas-skeleton::after,
+  .gpas-fade-in {
+    animation: none;
+  }
+}

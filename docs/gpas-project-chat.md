@@ -113,9 +113,9 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 `uploads` 由客户端上报，只作为模型上下文，服务端不会据此对 GPAS 做任何写操作。
 
 带上传结果的消息总会向助手提供 `file.list` 工具（`GET file/dual/merge/list`，参数放在查询串，服务端用会话 Cookie 和
-当前团队 `ownTeamId` 查询）。助手按这批上传成功的 `fileId` 查询，并用表格展示文件状态、质检、分析和元信息状态，
-而不是复述上传进度。接口不支持按 fileId 过滤，因此按接口默认排序（`-update_time, -create_time`）取最新一页（50 条）在服务端筛选，
-未找到的 fileId 作为“可能仍在入库”返回。用户之后也可以直接问“我上传的文件”。
+当前团队 `ownTeamId` 查询）。助手按这批上传成功的**文件名**（`fileNames`）查询并展示它们的状态和分析结果，
+而不是复述上传进度：每个文件名请求一次 `fileName=<名称>`（每次 10 条），只保留文件名完全相同的行，双端两个文件名命中同一样本时合并。
+未找到的文件名作为“可能仍在入库”返回。用户之后也可以直接问“我上传的文件”。
 
 `file.list` 的结果以“病原体分类分布”卡片展示在助手回复下方（每个样本一张，双端合并），由
 `src/client/features/gpasUpload/FileAnalysisCards.tsx` 渲染，数据来自解析后的 `briefAnalysis`（`parseBrief`）：
@@ -128,6 +128,22 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 - 检出类别最多显示 5 块，超过时按检出种数取前 4 块，其余合并为“其他”；未检出的类别列在“未检出”一行。
 - ★ 数量为 `hazardIndex`。brief 缺失或无法解析时，卡片只显示文件信息和分析状态。
 - 模型只拿到精简数据和措辞规则（“丰度前 N”“共检出 X 种”），原始 brief 字符串不交给模型。
+- 卡片 header 右侧的「查看详情」（卡片有 `analysisId` 时显示）发送一条消息“查看样本:{taskId}分析详情”，
+  taskId 即 `analysisId`；这条消息总会向助手提供 `file.result` 工具（`withDetailTool`）。
+
+### 样本分析详情（`file.result`）
+
+`file.result` 工具调用 `GET file/result/list`（`taskId`、可选 `speciesType`、`page`、`pageSize`，默认每页 20 条），
+与其它 GPAS 工具一致：服务端用会话 Cookie 请求上游，字段白名单后的当页数据交给模型（不含颜色、覆盖度图链接和内部 id），
+回复附带 `result` part（taskId、总数）。`coverageUrl` 只保留 http(s) 链接，`color` 只保留 `#hex`/`rgb()`。
+
+回复完成后自动在右侧面板（复用 Artifact 侧栏）打开分析详情，之后可点回复中的入口卡片重新打开。面板由
+`src/client/features/gpasUpload/GpasResultPanel.tsx` 渲染：
+
+- tabs 为「全部」加该样本卡片中检出的大类（`microbialType` 作为 `speciesType`），找不到卡片时只有「全部」。
+- 每个 tab、每一页只在显示时请求一次并缓存；加载时显示骨架屏，失败可重试。
+- 翻页和切 tab 请求 `GET /ai-chatbot/api/gpas/file/results`，服务端以当前会话身份执行同一个 `file.result` 工具；
+  浏览器不直接访问 GPAS，这些数据也不进入模型上下文（用户问到其它页时模型可带 `page`/`speciesType` 再调用工具）。
 
 ### 远端验收清单
 
@@ -148,3 +164,6 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 11. 各类别的 `topInfos` 实际最多返回几条（卡片最多展示 5 条）。
 12. `dataVolume` 的单位（当前显示为“数据量 10.68 G”）；`hazardIndex` 的取值范围（当前按 0–5 颗星显示）。
 13. `metaStatus`、`analysisStatus` 的取值与中文含义（当前原样显示）。
+14. `merge/list` 的 `fileName` 是精确匹配还是模糊匹配（服务端已按文件名精确过滤）；文件行上是否有 `analysisId`，且即为 `file/result/list` 的 `taskId`。
+15. `file/result/list` 的 `speciesType` 取值是否与 brief 的 `microbialType`（bacteria/viral/fungi…）一致；`coverage` 的格式（百分比字符串或小数）。
+16. `file/result/list` 是否按会话 Cookie 校验 taskId 属于当前团队（taskId 来自用户或模型输入）。
