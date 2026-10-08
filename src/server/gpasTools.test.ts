@@ -223,8 +223,10 @@ test('brief parsing keeps a top-5 summary per category, from a once- or twice-en
 })
 
 test('file list tool returns one analysis card per sample and wording rules for the model', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () => Response.json({ code: 200, dataPage: { totalData: 2, dataList: [
-    { isPair: true, file1: gpasFile('f-1'), file2: gpasFile('f-2', { briefAnalysis: sampleBrief }) },
+  // The same pair listed twice, R2/R1 without analysis first, collapses into one R1/R2 card.
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ code: 200, dataPage: { totalData: 3, dataList: [
+    { isPair: true, file1: gpasFile('f-2', { analysisStatus: 'noanalysis' }), file2: gpasFile('f-1') },
+    { isPair: true, file1: gpasFile('f-1', { briefAnalysis: sampleBrief }), file2: gpasFile('f-2') },
     { isPair: false, file1: gpasFile('f-3', { briefAnalysis: 'broken', analysisStatus: 'running' }) },
   ] } }))
   const service = new GpasService(config)
@@ -232,6 +234,8 @@ test('file list tool returns one analysis card per sample and wording rules for 
   const context = { profile, cookie: 'session=mine', client: service.client }
   const data = await tool.run(context, tool.input.parse({}))
 
+  assert.equal(data.total, 2)
+  assert.equal(data.rows.length, 2)
   const part = tool.toReply(data, context).part
   assert.equal(part.files?.length, 2)
   assert.equal(part.files![0].paired, true)

@@ -114,6 +114,26 @@ function briefFor(files: ListFile[]): FileBrief | null {
   return null
 }
 
+type ListRow = { paired: boolean; groupId: string | null; files: ListFile[] }
+
+/**
+ * merge/list can return the same pair twice (R1/R2 and R2/R1), often with
+ * the analysis on only one of them. Rows with the same files collapse into
+ * one, keeping a row that has a readable brief; pair files are ordered by name.
+ */
+export function mergeDuplicateRows(rows: ListRow[]): ListRow[] {
+  const merged = new Map<string, ListRow>()
+  for (const row of rows) {
+    const key = row.files.map((file) => file.fileId).sort().join('\n')
+    const kept = merged.get(key)
+    if (!kept || (!briefFor(kept.files) && briefFor(row.files))) merged.set(key, row)
+  }
+  return [...merged.values()].map((row) => ({
+    ...row,
+    files: [...row.files].sort((a, b) => a.fileName.localeCompare(b.fileName)),
+  }))
+}
+
 function toCard(row: { paired: boolean; groupId: string | null; files: ListFile[] }): FileCard {
   const [first] = row.files
   return {
@@ -192,16 +212,17 @@ export const fileListTool = defineGpasTool({
         ownTeamId: profile.ownteamId,
       },
     }, listSchema)
-    const rows = data.dataPage.dataList
+    const listed = data.dataPage.dataList
       .map((row) => ({
         paired: row.isPair,
         groupId: row.file1.groupId ?? row.file2?.groupId ?? null,
         files: [row.file1, ...(row.file2 ? [row.file2] : [])],
       }))
       .filter((row) => !lookup || row.files.some((file) => lookup.has(file.fileId)))
+    const rows = mergeDuplicateRows(listed)
     const found = new Set(rows.flatMap((row) => row.files.map((file) => file.fileId)))
     return {
-      total: lookup ? rows.length : data.dataPage.totalData,
+      total: lookup ? rows.length : data.dataPage.totalData - (listed.length - rows.length),
       rows: rows.map((row) => ({ ...row, files: row.files.map(pick) })),
       cards: rows.slice(0, 20).map(toCard),
       missingFileIds: lookup ? [...lookup].filter((id) => !found.has(id)) : [],
