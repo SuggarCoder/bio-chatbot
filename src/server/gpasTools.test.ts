@@ -196,7 +196,7 @@ test('project status reports the sample types every project has planned', async 
 
 const sampleBrief = readFileSync(new URL('../../tests/fixtures/gpas-brief.json', import.meta.url), 'utf8')
 
-test('brief parsing keeps a top-3 summary per category, from a once- or twice-encoded string', () => {
+test('brief parsing keeps a top-5 summary per category, from a once- or twice-encoded string', () => {
   for (const raw of [sampleBrief, JSON.stringify(sampleBrief), JSON.parse(sampleBrief)]) {
     const brief = parseBrief(raw)!
     assert.deepEqual(brief.categories.map((category) => [category.name, category.speciesCount, category.top.length]), [
@@ -209,13 +209,14 @@ test('brief parsing keeps a top-3 summary per category, from a once- or twice-en
     assert.equal(brief.dataVolume, 10677513218)
     assert.deepEqual(brief.tools, ['Guardian'])
   }
-  // More species than the summary keeps: highest abundance first, at most three.
+  // More species than the summary keeps: highest abundance first, at most five.
   const many = JSON.parse(sampleBrief)
   many.microbialInfo[0].topInfos.push(
     { taxCnName: '甲', abundance: '50%', hazardIndex: 1 },
     { taxCnName: '乙', abundance: '1%', hazardIndex: 0 },
+    { taxCnName: '丙', abundance: '0.5%', hazardIndex: 0 },
   )
-  assert.deepEqual(parseBrief(many)!.categories[0].top.map((item) => item.cnName), ['甲', '空肠普雷沃菌', '产黑色普雷沃菌'])
+  assert.deepEqual(parseBrief(many)!.categories[0].top.map((item) => item.cnName), ['甲', '空肠普雷沃菌', '产黑色普雷沃菌', '乳脂马杜拉放线菌', '乙'])
   for (const bad of ['', 'not json', '{"code":"500","microbialInfo":[]}', '{"code":"0","microbialInfo":"x"}', null, 42]) {
     assert.equal(parseBrief(bad), null, String(bad))
   }
@@ -223,7 +224,7 @@ test('brief parsing keeps a top-3 summary per category, from a once- or twice-en
 
 test('file list tool returns one analysis card per sample and wording rules for the model', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => Response.json({ code: 200, dataPage: { totalData: 2, dataList: [
-    { isPair: true, file1: gpasFile('f-1', { lastDaulBriefAnalysis: sampleBrief }), file2: gpasFile('f-2') },
+    { isPair: true, file1: gpasFile('f-1'), file2: gpasFile('f-2', { briefAnalysis: sampleBrief }) },
     { isPair: false, file1: gpasFile('f-3', { briefAnalysis: 'broken', analysisStatus: 'running' }) },
   ] } }))
   const service = new GpasService(config)
@@ -243,7 +244,7 @@ test('file list tool returns one analysis card per sample and wording rules for 
   assert.match(model.note, /前 topN/)
   assert.match(model.note, /不是只检出这几种/)
   assert.deepEqual(model.samples[0].brief!.categories[0], {
-    name: '细菌', speciesCount: 188, topN: 3, maxHazard: 3,
+    name: '细菌', speciesCount: 188, sharePct: 95.4, topN: 3, maxHazard: 3,
     top: ['空肠普雷沃菌 36.3% 危害3', '产黑色普雷沃菌 24% 危害3', '乳脂马杜拉放线菌 3.6% 危害0'],
   })
   assert.equal(model.samples[1].brief, null)

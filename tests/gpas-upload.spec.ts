@@ -202,20 +202,19 @@ async function showCards(page: Page, cards: unknown[]) {
   await expect(page.getByTestId('gpas-file-card').first()).toBeVisible()
 }
 
-test('analysis cards describe the brief as a per-category top-3 summary', async ({ page }) => {
+test('analysis cards describe the brief as a per-category top-5 summary with species shares', async ({ page }) => {
   await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo)), card('s2', null)])
   const first = page.getByTestId('gpas-file-card').first()
   await expect(first.getByTestId('gpas-brief-category')).toHaveCount(3)
-  await expect(first).toContainText('细菌 · 检出 188 种')
+  await expect(first).toContainText('细菌 · 检出 188 种 · 占比 95.4%')
+  await expect(first).toContainText('病毒 · 检出 4 种 · 占比 2%')
   await expect(first.getByText('丰度前 3', { exact: true })).toHaveCount(3)
-  await expect(first.getByTestId('gpas-brief-rest').first()).toContainText('其余 185 种')
+  await expect(first.getByTestId('gpas-brief-rest').first()).toContainText('其它 185 种')
   await expect(first).toContainText('未检出：动物等')
   await expect(first.getByRole('img', { name: '危害等级 3' }).first()).toBeVisible()
   await expect(first).toContainText('38.96M Reads')
   await expect(first).toContainText('26/01/06 20:54')
   await expect(page.getByText(/Count\/mL/)).toHaveCount(0)
-  // No category share exists in the data, so none is shown.
-  await expect(first.getByText(/细菌 \(\d/)).toHaveCount(0)
   await expect(page.getByTestId('gpas-file-card').nth(1)).toContainText('暂无分析摘要')
 })
 
@@ -228,9 +227,9 @@ test('more than five detected categories fold into one "其他" block', async ({
   await showCards(page, [card('s1', toBrief(categories))])
   const blocks = page.getByTestId('gpas-brief-category')
   await expect(blocks).toHaveCount(5)
-  await expect(blocks.last()).toContainText('其他 · 3 类')
-  await expect(blocks.last()).toContainText('寄生虫 · 检出 30 种')
-  await expect(blocks.last()).toContainText('其他真核 · 检出 10 种')
+  await expect(blocks.last()).toContainText('其他 · 3 类 · 占比 21.4%')
+  await expect(blocks.last()).toContainText('寄生虫 · 检出 30 种 · 10.7%')
+  await expect(blocks.last()).toContainText('其他真核 · 检出 10 种 · 3.6%')
 })
 
 test('analysis cards fit a phone-width screen', async ({ page }) => {

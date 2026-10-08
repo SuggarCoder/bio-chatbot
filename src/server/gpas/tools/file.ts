@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { AuthenticationError } from '../../auth.js'
 import { textCell } from '../../gpas.js'
-import { fileBriefSchema, sampleKeys, sampleLabel, type FileBrief, type FileCard, type SampleKey } from '../../gpasContracts.js'
+import { categorySharePct, fileBriefSchema, sampleKeys, sampleLabel, type FileBrief, type FileCard, type SampleKey } from '../../gpasContracts.js'
 import { defineGpasTool } from '../defineTool.js'
 
 const text = z.string().nullish().transform((value) => value ?? null)
@@ -17,7 +17,6 @@ const fileSchema = z.object({
   analysisStatus: text,
   metaStatus: text,
   briefAnalysis: z.unknown().optional(),
-  lastDaulBriefAnalysis: z.unknown().optional(),
   uploadTime: text,
 }).passthrough()
 const listSchema = z.object({
@@ -40,7 +39,7 @@ export type UploadedFileRow = { paired: boolean; groupId: string | null; files: 
 export type UploadedFileList = { total: number; rows: UploadedFileRow[]; cards: FileCard[]; missingFileIds: string[] }
 
 /** Species kept per category; the brief is a summary, not the full result. */
-export const BRIEF_TOP_SPECIES = 3
+export const BRIEF_TOP_SPECIES = 5
 const MAX_CATEGORIES = 12
 
 const numeric = z.union([z.number(), z.string()]).nullish().transform((value) => {
@@ -105,13 +104,11 @@ export function parseBrief(raw: unknown): FileBrief | null {
 }
 
 type ListFile = z.infer<typeof fileSchema>
-function briefFor(files: ListFile[], paired: boolean): FileBrief | null {
-  // Assumption (remote check): a pair's combined analysis is lastDaulBriefAnalysis.
-  const sources = paired
-    ? [files[0]?.lastDaulBriefAnalysis, ...files.map((file) => file.briefAnalysis)]
-    : files.map((file) => file.briefAnalysis)
-  for (const source of sources) {
-    const brief = parseBrief(source)
+// Both ends of a pair carry the same analysis as a single-end file, so the
+// first readable briefAnalysis stands for the whole sample.
+function briefFor(files: ListFile[]): FileBrief | null {
+  for (const file of files) {
+    const brief = parseBrief(file.briefAnalysis)
     if (brief) return brief
   }
   return null
@@ -128,7 +125,7 @@ function toCard(row: { paired: boolean; groupId: string | null; files: ListFile[
     analysisStatus: first.analysisStatus,
     metaStatus: first.metaStatus,
     uploadTime: first.uploadTime,
-    brief: briefFor(row.files, row.paired),
+    brief: briefFor(row.files),
   }
 }
 
@@ -140,6 +137,7 @@ function briefForModel(brief: FileBrief | null) {
     categories: brief.categories.map((category) => ({
       name: category.name,
       speciesCount: category.speciesCount,
+      sharePct: categorySharePct(category.speciesCount, brief.categories),
       topN: category.top.length,
       maxHazard: category.maxHazard,
       top: category.top.map((item) => `${item.cnName} ${item.abundancePct}% 危害${item.hazard}`),
@@ -169,7 +167,7 @@ export const fileListTool = defineGpasTool({
   id: 'file.list', domain: 'file', title: '上传文件列表', effect: 'read',
   description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态。传入 fileIds 时只返回这些文件（用于展示刚上传的一批文件）。',
   examples: ['我上传的文件', '刚才上传的测序数据状态', '查一下质检结果', '我的文件列表', '上传的文件分析完了吗'],
-  policy: '可以查询当前团队上传文件的列表、状态与分析摘要（各类别丰度前 3 的物种），结果以卡片展示；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。',
+  policy: '可以查询当前团队上传文件的列表、状态与分析摘要（各类别丰度前 5 的物种及其它、各类别检出种数占比），结果以卡片展示；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。',
   input: z.object({
     fileIds: z.array(z.string().min(1).max(128)).max(20).optional(),
     fileName: filter,
@@ -213,7 +211,8 @@ export const fileListTool = defineGpasTool({
     total: data.total,
     missingFileIds: data.missingFileIds,
     note: '结果已以卡片展示在回复下方，只需简短解读，不要逐条罗列。brief 为分析摘要：top 是该类别内相对丰度前 topN 的物种，'
-      + '该类别共检出 speciesCount 种，不是只检出这几种；abundance 为类别内相对丰度，类别之间没有占比数据，不要推算。',
+      + '该类别共检出 speciesCount 种，不是只检出这几种；abundance 为类别内相对丰度。'
+      + 'sharePct 是该类别检出种数占全部检出种数的比例，要说“种数占比”，不是丰度或 reads 占比。',
     samples: data.cards.map((card, index) => ({
       files: data.rows[index].files.map((file) => ({ fileId: file.fileId, fileName: file.fileName, qcStatus: file.qcStatus })),
       paired: card.paired,

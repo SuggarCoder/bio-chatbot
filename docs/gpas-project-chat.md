@@ -120,9 +120,10 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 `file.list` 的结果以“病原体分类分布”卡片展示在助手回复下方（每个样本一张，双端合并），由
 `src/client/features/gpasUpload/FileAnalysisCards.tsx` 渲染，数据来自解析后的 `briefAnalysis`（`parseBrief`）：
 
-- brief 只是摘要：每个类别只保留类别内相对丰度前 3 的物种，并标注“检出 X 种 · 丰度前 N”，
-  剩余部分显示为“其余 N 种”。`abundance` 是类别内的相对丰度，数据中没有类别之间的占比，
-  因此类别块等宽排列，不标类别百分比。
+- brief 只是摘要：每个类别只保留类别内相对丰度前 5 的物种，并标注“检出 X 种 · 占比 Y% · 丰度前 N”，
+  剩余部分显示为“其它 N 种”。`abundance` 是类别内的相对丰度；数据中没有类别之间的丰度占比，
+  类别占比按检出种数计算（该类别检出种数 / 全部检出种数，`categorySharePct`），类别块仍等宽排列。
+- 单端与双端文件的分析结果一致，双端样本只展示一份：取第一个可解析的 `briefAnalysis`。
 - 检出类别最多显示 5 块，超过时按检出种数取前 4 块，其余合并为“其他”；未检出的类别列在“未检出”一行。
 - ★ 数量为 `hazardIndex`。brief 缺失或无法解析时，卡片只显示文件信息和分析状态。
 - 模型只拿到精简数据和措辞规则（“丰度前 N”“共检出 X 种”），原始 brief 字符串不交给模型。
@@ -143,6 +144,6 @@ generation 查询；不记录 Cookie 或工具返回的数据。
    文件行上是否有 `qcStatus` 字段，状态取值是否需要翻译成中文（见 `src/server/gpas/tools/file.ts`）。
 9. 刚上传完成的文件能否立即出现在 `merge/list` 中；若有延迟，助手会提示部分文件“可能仍在入库”。
 10. `summary/submit/info` 在多项目团队下 `projectPlanInfo` 的实际形状（当前同时接受对象或对象数组）。
-11. 双端样本的分析摘要取 `lastDaulBriefAnalysis` 还是各文件的 `briefAnalysis`（当前优先前者）。
+11. 各类别的 `topInfos` 实际最多返回几条（卡片最多展示 5 条）。
 12. `dataVolume` 的单位（当前显示为“数据量 10.68 G”）；`hazardIndex` 的取值范围（当前按 0–5 颗星显示）。
 13. `metaStatus`、`analysisStatus` 的取值与中文含义（当前原样显示）。

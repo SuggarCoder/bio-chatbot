@@ -22,9 +22,9 @@ export const projectFormSchema = z.object({
 const shortText = z.string().max(200)
 /**
  * Parsed GPAS `briefAnalysis`: a summary only. `top` holds the species with
- * the highest relative abundance *within* the category (at most 3); the
- * category itself contains `speciesCount` species. There is no share
- * between categories.
+ * the highest relative abundance *within* the category (at most 5); the
+ * category itself contains `speciesCount` species. The data has no
+ * abundance share between categories, only species counts.
  */
 export const fileBriefSchema = z.object({
   categories: z.array(z.object({
@@ -38,7 +38,7 @@ export const fileBriefSchema = z.object({
       taxId: shortText,
       abundancePct: z.number().min(0).max(100),
       hazard: z.number().int().min(0).max(9),
-    })).max(3),
+    })).max(5),
   })).max(12),
   totalReads: z.number().nonnegative().nullable(),
   dataVolume: z.number().nonnegative().nullable(),
@@ -56,6 +56,15 @@ export const fileCardSchema = z.object({
   brief: fileBriefSchema.nullable(),
 })
 export type FileBrief = z.infer<typeof fileBriefSchema>
+
+/**
+ * A category's share of all detected species, in percent (one decimal).
+ * Based on species counts: the brief has no abundance across categories.
+ */
+export function categorySharePct(speciesCount: number, categories: readonly { speciesCount: number }[]) {
+  const total = categories.reduce((sum, category) => sum + category.speciesCount, 0)
+  return total > 0 ? Math.round((speciesCount / total) * 1000) / 10 : 0
+}
 export type FileCard = z.infer<typeof fileCardSchema>
 
 export const gpasPartSchema = z.object({

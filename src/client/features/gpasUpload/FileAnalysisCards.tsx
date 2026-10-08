@@ -1,5 +1,5 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js'
-import { sampleKeys, sampleLabel, type FileBrief, type FileCard, type SampleKey } from '../../../server/gpasContracts'
+import { categorySharePct, sampleKeys, sampleLabel, type FileBrief, type FileCard, type SampleKey } from '../../../server/gpasContracts'
 import { layoutTreemap } from './treemap'
 
 /** Category blocks shown per card; more categories fold into "其他". */
@@ -11,17 +11,17 @@ type Tone = { block: string; label: string; tiles: Array<{ bg: string; fg: strin
 const tones: Record<string, Tone> = {
   bacteria: {
     block: '#b9ced2', label: '#28525a',
-    tiles: [{ bg: '#2c7378', fg: '#fff' }, { bg: '#4f9095', fg: '#fff' }, { bg: '#5b8389', fg: '#fff' }],
+    tiles: [{ bg: '#2c7378', fg: '#fff' }, { bg: '#4f9095', fg: '#fff' }, { bg: '#5b8389', fg: '#fff' }, { bg: '#3d666b', fg: '#fff' }, { bg: '#6a9ea2', fg: '#fff' }],
     rest: { bg: '#dbe7e9', fg: '#28525a' },
   },
   viral: {
     block: '#d5d7d8', label: '#3f4b4d',
-    tiles: [{ bg: '#7d9293', fg: '#fff' }, { bg: '#93a9ab', fg: '#fff' }, { bg: '#6f8586', fg: '#fff' }],
+    tiles: [{ bg: '#7d9293', fg: '#fff' }, { bg: '#93a9ab', fg: '#fff' }, { bg: '#6f8586', fg: '#fff' }, { bg: '#5f7374', fg: '#fff' }, { bg: '#889c9d', fg: '#fff' }],
     rest: { bg: '#e8eaea', fg: '#3f4b4d' },
   },
   fungi: {
     block: '#ece6df', label: '#5b4e3f',
-    tiles: [{ bg: '#8c7a63', fg: '#fff' }, { bg: '#a3927b', fg: '#fff' }, { bg: '#7a6b57', fg: '#fff' }],
+    tiles: [{ bg: '#8c7a63', fg: '#fff' }, { bg: '#a3927b', fg: '#fff' }, { bg: '#7a6b57', fg: '#fff' }, { bg: '#685b4a', fg: '#fff' }, { bg: '#978670', fg: '#fff' }],
     rest: { bg: '#f6f2ed', fg: '#5b4e3f' },
   },
 }
@@ -29,12 +29,12 @@ const tones: Record<string, Tone> = {
 const fallbackTones: Tone[] = [
   {
     block: '#d3d8e6', label: '#34405e',
-    tiles: [{ bg: '#55658f', fg: '#fff' }, { bg: '#6d7da6', fg: '#fff' }, { bg: '#4a597f', fg: '#fff' }],
+    tiles: [{ bg: '#55658f', fg: '#fff' }, { bg: '#6d7da6', fg: '#fff' }, { bg: '#4a597f', fg: '#fff' }, { bg: '#3f4c6e', fg: '#fff' }, { bg: '#61719a', fg: '#fff' }],
     rest: { bg: '#e9ecf3', fg: '#34405e' },
   },
   {
     block: '#e3d6dc', label: '#5a3446',
-    tiles: [{ bg: '#8d5a70', fg: '#fff' }, { bg: '#a3707f', fg: '#fff' }, { bg: '#7b4d61', fg: '#fff' }],
+    tiles: [{ bg: '#8d5a70', fg: '#fff' }, { bg: '#a3707f', fg: '#fff' }, { bg: '#7b4d61', fg: '#fff' }, { bg: '#694153', fg: '#fff' }, { bg: '#986577', fg: '#fff' }],
     rest: { bg: '#f2eaee', fg: '#5a3446' },
   },
 ]
@@ -80,7 +80,7 @@ const TREEMAP_HEIGHT = 160
 // Narrow blocks stack rows, which need a little more height.
 const treemapHeight = (width: number) => width < 200 ? 200 : TREEMAP_HEIGHT
 
-function CategoryBlock(props: { category: Category; index: number }) {
+function CategoryBlock(props: { category: Category; index: number; sharePct: number }) {
   const tone = () => toneFor(props.category.type, props.index)
   // Real container width decides the split direction and how much text fits.
   const [width, setWidth] = createSignal(320)
@@ -109,7 +109,9 @@ function CategoryBlock(props: { category: Category; index: number }) {
       data-testid="gpas-brief-category"
     >
       <header class="mb-1.5 flex items-center justify-between gap-2 px-1 text-xs">
-        <span class="min-w-0 truncate font-semibold">{props.category.name} · 检出 {props.category.speciesCount} 种</span>
+        <span class="min-w-0 truncate font-semibold" title="种数占比：该类别检出种数 / 全部检出种数">
+          {props.category.name} · 检出 {props.category.speciesCount} 种 · 占比 {formatPercent(props.sharePct)}
+        </span>
         <Show when={props.category.top.length > 0}>
           <span class="shrink-0 opacity-80">丰度前 {props.category.top.length}</span>
         </Show>
@@ -140,12 +142,12 @@ function CategoryBlock(props: { category: Category; index: number }) {
                     style={{ 'background-color': colors.bg, color: colors.fg }}
                     title={item
                       ? `${item.cnName}${item.enName ? `（${item.enName}）` : ''} · 类别内相对丰度 ${formatPercent(item.abundancePct)}${item.taxId ? ` · taxId ${item.taxId}` : ''}${item.hazard ? ` · 危害等级 ${item.hazard}` : ''}`
-                      : `其余 ${restCount()} 种，合计约 ${formatPercent(restPct())}`}
+                      : `其它 ${restCount()} 种，合计约 ${formatPercent(restPct())}`}
                     data-testid={isRest ? 'gpas-brief-rest' : 'gpas-brief-species'}
                   >
-                    <Show when={fit() !== 'dot'} fallback={<span class="sr-only">{item ? item.cnName : `其余 ${restCount()} 种`}</span>}>
+                    <Show when={fit() !== 'dot'} fallback={<span class="sr-only">{item ? item.cnName : `其它 ${restCount()} 种`}</span>}>
                       <span class={`min-w-0 font-semibold ${fit() === 'full' ? 'line-clamp-2' : 'truncate'}`}>
-                        {item ? item.cnName : `其余 ${restCount()} 种`}
+                        {item ? item.cnName : `其它 ${restCount()} 种`}
                       </span>
                     </Show>
                     <Show when={fit() === 'full' && item}>
@@ -165,17 +167,18 @@ function CategoryBlock(props: { category: Category; index: number }) {
   )
 }
 
-function FoldedBlock(props: { categories: Category[] }) {
+function FoldedBlock(props: { categories: Category[]; share: (category: Category) => number }) {
+  const sharePct = () => Math.round(props.categories.reduce((sum, category) => sum + props.share(category), 0) * 10) / 10
   return (
     <section
       class="flex min-w-0 flex-[1_1_160px] flex-col rounded-xl p-2"
       style={{ 'background-color': otherTone.block, color: otherTone.label }}
       data-testid="gpas-brief-category"
     >
-      <header class="mb-1.5 px-1 text-xs font-semibold">其他 · {props.categories.length} 类</header>
+      <header class="mb-1.5 px-1 text-xs font-semibold">其他 · {props.categories.length} 类 · 占比 {formatPercent(sharePct())}</header>
       <ul class="space-y-1 px-1 text-xs">
         <For each={props.categories}>
-          {(category) => <li class="truncate">{category.name} · 检出 {category.speciesCount} 种</li>}
+          {(category) => <li class="truncate">{category.name} · 检出 {category.speciesCount} 种 · {formatPercent(props.share(category))}</li>}
         </For>
       </ul>
     </section>
@@ -188,6 +191,7 @@ function AnalysisCard(props: { card: FileCard }) {
     return sizes.every((value) => value !== null) ? sizes.reduce((sum, value) => sum! + value!, 0)! : null
   }
   const groups = () => props.card.brief ? groupCategories(props.card.brief.categories) : null
+  const share = (category: Category) => categorySharePct(category.speciesCount, props.card.brief?.categories ?? [])
 
   return (
     <article class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200" data-testid="gpas-file-card">
@@ -197,7 +201,7 @@ function AnalysisCard(props: { card: FileCard }) {
           <Show when={props.card.brief} fallback="暂无分析摘要">
             {(brief) => (
               <>
-                分析摘要 · 每类展示类别内相对丰度前 3 位物种 · ★ 为危害等级
+                分析摘要 · 每类展示类别内相对丰度前 5 位物种及其它 · 类别占比按检出种数计算 · ★ 为危害等级
                 <Show when={brief().tools.length}> · {brief().tools.join('、')}</Show>
               </>
             )}
@@ -221,9 +225,9 @@ function AnalysisCard(props: { card: FileCard }) {
                 fallback={<p class="px-1 text-xs text-slate-500">分析摘要中未检出微生物。</p>}
               >
                 <div class="flex flex-wrap gap-2">
-                  <For each={group().shown}>{(category, index) => <CategoryBlock category={category} index={index()} />}</For>
+                  <For each={group().shown}>{(category, index) => <CategoryBlock category={category} index={index()} sharePct={share(category)} />}</For>
                   <Show when={group().folded.length > 0}>
-                    <FoldedBlock categories={group().folded} />
+                    <FoldedBlock categories={group().folded} share={share} />
                   </Show>
                 </div>
               </Show>
