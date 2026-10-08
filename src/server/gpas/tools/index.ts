@@ -1,6 +1,7 @@
 import type { GpasService } from '../../gpas.js'
 import { assertUniqueToolIds, type GpasToolSpec } from '../defineTool.js'
 import { fileListTool } from './file.js'
+import { fileResultTool } from './fileResult.js'
 import { createProjectTools } from './project.js'
 import { userProfileTool } from './user.profile.js'
 
@@ -10,7 +11,7 @@ import { userProfileTool } from './user.profile.js'
  * add a contract test. The loop, queue and isolation rules need no change.
  */
 export function createGpasTools(service: GpasService): readonly GpasToolSpec<any, any>[] {
-  const tools = [userProfileTool, ...createProjectTools(service), fileListTool]
+  const tools = [userProfileTool, ...createProjectTools(service), fileListTool, fileResultTool]
   assertUniqueToolIds(tools)
   return tools
 }

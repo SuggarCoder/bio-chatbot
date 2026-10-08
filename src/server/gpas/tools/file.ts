@@ -28,8 +28,8 @@ const listSchema = z.object({
   }).passthrough(),
 })
 
-/** Rows of a fileId lookup are taken from the newest page; a batch is at most 10 files. */
-const LOOKUP_PAGE_SIZE = 50
+/** Rows fetched per file name; the API may match names loosely, exact names are kept. */
+const NAME_LOOKUP_PAGE_SIZE = 10
 const filter = z.string().trim().min(1).max(200).optional()
 
 const pick = (file: z.infer<typeof fileSchema>) => ({
@@ -38,7 +38,7 @@ const pick = (file: z.infer<typeof fileSchema>) => ({
   metaStatus: file.metaStatus, uploadTime: file.uploadTime,
 })
 export type UploadedFileRow = { paired: boolean; groupId: string | null; files: ReturnType<typeof pick>[] }
-export type UploadedFileList = { total: number; rows: UploadedFileRow[]; cards: FileCard[]; missingFileIds: string[] }
+export type UploadedFileList = { total: number; rows: UploadedFileRow[]; cards: FileCard[]; missingFileNames: string[] }
 
 /** Species kept per category; the brief is a summary, not the full result. */
 export const BRIEF_TOP_SPECIES = 5
@@ -158,6 +158,7 @@ function toCard(row: { paired: boolean; groupId: string | null; files: ListFile[
     analysisStatus: first.analysisStatus,
     metaStatus: first.metaStatus,
     uploadTime: first.uploadTime,
+    analysisId: row.files.find((file) => file.analysisId)?.analysisId ?? null,
     brief: briefFor(row.files),
   }
 }
@@ -182,7 +183,7 @@ const sampleText = (value: string | null) =>
   value && (sampleKeys as readonly string[]).includes(value) ? sampleLabel(value as SampleKey) : value
 
 export function fileListReply(data: UploadedFileList): string {
-  if (data.rows.length === 0 && data.missingFileIds.length === 0) return '没有查询到上传文件。'
+  if (data.rows.length === 0 && data.missingFileNames.length === 0) return '没有查询到上传文件。'
   const lines = data.rows.flatMap((row) => row.files.map((file, index) => `| ${[
     file.fileName, row.paired ? `双端 R${index + 1}` : '单端', sampleText(file.sampleType),
     file.status, file.qcStatus, file.analysisStatus, file.metaStatus, file.uploadTime,
@@ -190,19 +191,19 @@ export function fileListReply(data: UploadedFileList): string {
   const table = lines.length
     ? `| 文件名 | 单/双端 | 样本类型 | 状态 | 质检 | 分析 | 元信息 | 上传时间 |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n${lines.join('\n')}`
     : ''
-  const missing = data.missingFileIds.length
-    ? `\n\n以下文件暂未出现在列表中，可能仍在入库，请稍后再查：${data.missingFileIds.map(textCell).join('、')}`
+  const missing = data.missingFileNames.length
+    ? `\n\n以下文件暂未出现在列表中，可能仍在入库，请稍后再查：${data.missingFileNames.map(textCell).join('、')}`
     : ''
   return `${table}${missing}`.trim()
 }
 
 export const fileListTool = defineGpasTool({
   id: 'file.list', domain: 'file', title: '上传文件列表', effect: 'read',
-  description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态。传入 fileIds 时只返回这些文件（用于展示刚上传的一批文件）。',
+  description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态。传入 fileNames 时按文件名查询并只返回这些文件（用于展示刚上传的一批文件的分析结果）。',
   examples: ['我上传的文件', '刚才上传的测序数据状态', '查一下质检结果', '我的文件列表', '上传的文件分析完了吗'],
   policy: '可以查询当前团队上传文件的列表、状态与分析摘要（各类别丰度前 5 的物种及其它、各类别检出种数占比），结果以卡片展示；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。',
   input: z.object({
-    fileIds: z.array(z.string().min(1).max(128)).max(20).optional(),
+    fileNames: z.array(z.string().trim().min(1).max(255)).max(20).optional(),
     fileName: filter,
     status: filter,
     qcStatus: filter,
@@ -212,43 +213,54 @@ export const fileListTool = defineGpasTool({
   }),
   run: async ({ profile, cookie, client }, args) => {
     if (!profile.ownteamId) throw new AuthenticationError('当前用户未关联团队，无法查询文件。', 422, 'team_missing')
-    const lookup = args.fileIds?.length ? new Set(args.fileIds) : null
-    const { fileIds: _ids, page, pageSize, ...filters } = args
+    const ownTeamId = profile.ownteamId
+    const names = [...new Set(args.fileNames ?? [])]
+    const { fileNames: _names, page, pageSize, ...filters } = args
     // GET with query parameters. orderBy is left to the API default
     // (-update_time, -create_time), which already lists new uploads first.
-    const data = await client.read(cookie, {
+    const list = (query: Record<string, string | number | undefined>) => client.read(cookie, {
       operation: 'file_merge_list', label: '上传文件列表查询', method: 'GET', path: 'file/dual/merge/list',
-      query: {
-        ...filters,
-        page: lookup ? 1 : page ?? 1,
-        pageSize: lookup ? LOOKUP_PAGE_SIZE : pageSize ?? 20,
-        ownTeamId: profile.ownteamId,
-      },
+      query: { ...query, ownTeamId },
     }, listSchema)
-    const listed = data.dataPage.dataList
-      .map((row) => ({
-        paired: row.isPair,
-        groupId: row.file1.groupId ?? row.file2?.groupId ?? null,
-        files: [row.file1, ...(row.file2 ? [row.file2] : [])],
-      }))
-      .filter((row) => !lookup || row.files.some((file) => lookup.has(file.fileId)))
+    const toRows = (data: z.infer<typeof listSchema>) => data.dataPage.dataList.map((row) => ({
+      paired: row.isPair,
+      groupId: row.file1.groupId ?? row.file2?.groupId ?? null,
+      files: [row.file1, ...(row.file2 ? [row.file2] : [])],
+    }))
+
+    if (names.length) {
+      // One query per uploaded file name; both ends of a pair find the same sample.
+      const pages = await Promise.all(names.map((fileName) => list({ fileName, page: 1, pageSize: NAME_LOOKUP_PAGE_SIZE })))
+      const wanted = new Set(names)
+      const rows = mergeDuplicateRows(pages.flatMap(toRows).filter((row) => row.files.some((file) => wanted.has(file.fileName))))
+      const found = new Set(rows.flatMap((row) => row.files.map((file) => file.fileName)))
+      return {
+        total: rows.length,
+        rows: rows.map((row) => ({ ...row, files: row.files.map(pick) })),
+        cards: rows.slice(0, 20).map(toCard),
+        missingFileNames: names.filter((name) => !found.has(name)),
+      }
+    }
+
+    const data = await list({ ...filters, page: page ?? 1, pageSize: pageSize ?? 20 })
+    const listed = toRows(data)
     const rows = mergeDuplicateRows(listed)
-    const found = new Set(rows.flatMap((row) => row.files.map((file) => file.fileId)))
     return {
-      total: lookup ? rows.length : data.dataPage.totalData - (listed.length - rows.length),
+      total: data.dataPage.totalData - (listed.length - rows.length),
       rows: rows.map((row) => ({ ...row, files: row.files.map(pick) })),
       cards: rows.slice(0, 20).map(toCard),
-      missingFileIds: lookup ? [...lookup].filter((id) => !found.has(id)) : [],
+      missingFileNames: [],
     }
   },
   toModel: (data) => ({
     total: data.total,
-    missingFileIds: data.missingFileIds,
+    missingFileNames: data.missingFileNames,
     note: '结果已以卡片展示在回复下方，只需简短解读，不要逐条罗列。brief 为分析摘要：top 是该类别内相对丰度前 topN 的物种，'
       + '该类别共检出 speciesCount 种，不是只检出这几种；abundance 为类别内相对丰度。'
       + 'sharePct 是该类别检出种数占全部检出种数的比例，要说“种数占比”，不是丰度或 reads 占比。',
     samples: data.cards.map((card, index) => ({
       files: data.rows[index].files.map((file) => ({ fileId: file.fileId, fileName: file.fileName, qcStatus: file.qcStatus })),
+      taskId: card.analysisId,
       paired: card.paired,
       sampleType: card.sampleType,
       status: card.status,

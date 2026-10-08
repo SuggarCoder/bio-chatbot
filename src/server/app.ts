@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { AuthenticationError, loadProfile, resolveCurrentUser } from './auth.js'
 import { GpasUpstreamError } from './gpas.js'
 import { createCapabilityRuntime, type CapabilityRuntime } from './capabilities/runtime.js'
-import { gpasUploadBatchSchema, projectInputSchema, type SampleKey } from './gpasContracts.js'
+import { fileResultQuerySchema, fileResultRequestPattern, gpasUploadBatchSchema, projectInputSchema, type FileResultPage, type FileResultQuery, type SampleKey } from './gpasContracts.js'
 import { createGpasTools } from './gpas/tools/index.js'
 import {
   redisKey,
@@ -75,6 +75,12 @@ const API_BASE = '/ai-chatbot/api'
  */
 export function withUploadTools(ids: string[], catalog: readonly string[], hasUploads: boolean): string[] {
   return hasUploads && catalog.includes('file.list') && !ids.includes('file.list') ? [...ids, 'file.list'] : ids
+}
+/** "查看样本:{taskId}分析详情" always reaches the analysis detail tool. */
+export function withDetailTool(ids: string[], catalog: readonly string[], content: string): string[] {
+  return fileResultRequestPattern.test(content) && catalog.includes('file.result') && !ids.includes('file.result')
+    ? [...ids, 'file.result']
+    : ids
 }
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -393,6 +399,15 @@ export async function buildApp(
     const cookie = request.headers.cookie
     const data = await projectStatusTool.run({ profile, cookie, client: gpas.client }, {}) as { initialized: boolean; sampleTypes: SampleKey[] }
     return { initialized: data.initialized, types: data.sampleTypes }
+  })
+
+  // The analysis detail panel pages through the same file.result tool the
+  // agent uses, with the session's identity; the browser never calls GPAS.
+  const fileResultTool = createGpasTools(gpas).find((tool) => tool.id === 'file.result')!
+  app.get<{ Querystring: FileResultQuery }>(`${API_BASE}/gpas/file/results`, { schema: httpSchemas.fileResults }, async (request) => {
+    const query = fileResultQuerySchema.parse(request.query)
+    const profile = await loadProfile(request, config)
+    return fileResultTool.run({ profile, cookie: request.headers.cookie, client: gpas.client }, query) as Promise<FileResultPage>
   })
 
   app.get<{
@@ -1101,7 +1116,7 @@ export async function buildApp(
       artifactId: artifactId || undefined,
       supersedesGenerationId: supersedesGenerationId || undefined,
       uploads,
-      agentToolIds: withUploadTools(await selectAgentToolIds(content), agentToolCatalog, Boolean(uploads)),
+      agentToolIds: withDetailTool(withUploadTools(await selectAgentToolIds(content), agentToolCatalog, Boolean(uploads)), agentToolCatalog, content),
       cookie,
     })
   }, () => app.log.warn('Durable ingress storage temporarily unavailable'))

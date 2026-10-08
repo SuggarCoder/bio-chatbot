@@ -54,10 +54,10 @@ test('capability catalog lists agent tools plus refusal policies', () => {
   const registry = createGpasCapabilities(new GpasService(config))
   const ids = registry.descriptions().map((item) => item.id)
   assert.deepEqual(ids, [
-    'user.profile', 'project.progress', 'project.status', 'project.initialize', 'file.list',
+    'user.profile', 'project.progress', 'project.status', 'project.initialize', 'file.list', 'file.result',
     'project.reinitialize', 'system.unavailable',
   ])
-  assert.deepEqual(registry.toolIds(), ['user.profile', 'project.progress', 'project.status', 'project.initialize', 'file.list'])
+  assert.deepEqual(registry.toolIds(), ['user.profile', 'project.progress', 'project.status', 'project.initialize', 'file.list', 'file.result'])
   // Descriptions never expose handlers or tool internals.
   for (const item of registry.descriptions()) {
     assert.equal('execute' in item, false)
@@ -115,7 +115,7 @@ const gpasFile = (fileId: string, overrides: Record<string, unknown> = {}) => ({
   hash: 'private-hash', ownUserId: 'someone', ...overrides,
 })
 
-test('file list tool queries the session team and keeps only the requested batch', async (t) => {
+test('file list tool looks up the uploaded batch by file name', async (t) => {
   const queries: Array<Record<string, string>> = []
   t.mock.method(globalThis, 'fetch', async (url: URL, init: RequestInit) => {
     assert.equal(url.pathname, '/api/gpas2/v1/file/dual/merge/list')
@@ -123,34 +123,42 @@ test('file list tool queries the session team and keeps only the requested batch
     assert.equal(init.body, undefined)
     assert.equal(new Headers(init.headers).get('cookie'), 'session=mine')
     queries.push(Object.fromEntries(url.searchParams))
+    // The name filter may match loosely: a similar name comes back too.
+    const name = url.searchParams.get('fileName')
+    const dataList = name === 'f-9.fq.gz' ? [] : [
+      { isPair: true, file1: gpasFile('f-1', { analysisId: 'task-1' }), file2: gpasFile('f-2', { metaStatus: 'complete' }) },
+      { isPair: false, file1: gpasFile('old', { groupId: null, fileName: `copy-${name}` }) },
+    ]
     return Response.json({ code: 200, message: 'ok', maxPageSize: 100, dataPage: {
-      currentCnt: 3, page: 1, pageSize: 50, totalData: 3, totalPage: 1,
-      dataList: [
-        { isPair: true, file1: gpasFile('f-1'), file2: gpasFile('f-2', { metaStatus: 'complete' }) },
-        { isPair: false, file1: gpasFile('old', { groupId: null }) },
-      ],
+      currentCnt: dataList.length, page: 1, pageSize: 10, totalData: dataList.length, totalPage: 1, dataList,
     } })
   })
   const service = new GpasService(config)
   const tool = createGpasTools(service).find((item) => item.id === 'file.list')!
   const context = { profile, cookie: 'session=mine', client: service.client }
-  const data = await tool.run(context, tool.input.parse({ fileIds: ['f-1', 'f-2', 'f-9'] })) as {
-    total: number; rows: Array<{ paired: boolean; files: Array<Record<string, unknown>> }>; missingFileIds: string[]
+  const data = await tool.run(context, tool.input.parse({ fileNames: ['f-1.fq.gz', 'f-2.fq.gz', 'f-9.fq.gz', 'f-1.fq.gz'] })) as {
+    total: number; rows: Array<{ paired: boolean; files: Array<Record<string, unknown>> }>
+    cards: Array<{ analysisId: string | null }>; missingFileNames: string[]
   }
 
-  assert.deepEqual(queries[0], { page: '1', pageSize: '50', ownTeamId: 'team-test' })
+  // One query per distinct name.
+  assert.deepEqual(queries.map((query) => query.fileName), ['f-1.fq.gz', 'f-2.fq.gz', 'f-9.fq.gz'])
+  assert.deepEqual(queries[0], { fileName: 'f-1.fq.gz', page: '1', pageSize: '10', ownTeamId: 'team-test' })
+  // Both ends found the same pair; loosely matched names are dropped.
   assert.equal(data.total, 1)
   assert.equal(data.rows[0].paired, true)
   assert.deepEqual(data.rows[0].files.map((file) => file.fileId), ['f-1', 'f-2'])
-  assert.deepEqual(data.missingFileIds, ['f-9'])
-  const model = JSON.stringify(tool.toModel(data))
+  assert.equal(data.cards[0].analysisId, 'task-1')
+  assert.deepEqual(data.missingFileNames, ['f-9.fq.gz'])
+  const model = tool.toModel(data) as { samples: Array<{ taskId: string | null }> }
+  assert.equal(model.samples[0].taskId, 'task-1')
   // Only allowlisted fields reach the model.
-  assert.doesNotMatch(model, /private-hash|someone|session=mine/)
+  assert.doesNotMatch(JSON.stringify(model), /private-hash|someone|session=mine/)
 
   const reply = tool.toReply(data, context).content
   assert.match(reply, /\| f-1\.fq\.gz \| 双端 R1 \| 临床样本 \| uploaded \|/)
   assert.match(reply, /\| f-2\.fq\.gz \| 双端 R2 \|/)
-  assert.match(reply, /暂未出现在列表中.*f-9/)
+  assert.match(reply, /暂未出现在列表中.*f-9\.fq\.gz/)
 })
 
 test('file list tool forwards filters and rejects malformed pages', async (t) => {
@@ -268,4 +276,56 @@ test('file list tool returns one analysis card per sample and wording rules for 
   assert.equal(model.samples[1].brief, null)
   // The raw brief string never reaches the model.
   assert.doesNotMatch(JSON.stringify(model), /microbialInfo|tool_code/)
+})
+
+test('file result tool pages one task through the session and keeps safe fields only', async (t) => {
+  const queries: Array<Record<string, string>> = []
+  t.mock.method(globalThis, 'fetch', async (url: URL, init: RequestInit) => {
+    assert.equal(url.pathname, '/api/gpas2/v1/file/result/list')
+    assert.equal(init.method, 'GET')
+    assert.equal(new Headers(init.headers).get('cookie'), 'session=mine')
+    queries.push(Object.fromEntries(url.searchParams))
+    return Response.json({ code: 200, message: 'ok', dataPage: {
+      currentCnt: 2, page: 2, pageSize: 20, totalData: 42, totalPage: 3,
+      dataList: [
+        { id: 'r1', taskId: 'task-1', speciesType: 'bacteria', taxCname: '空肠普雷沃菌', taxEname: 'Prevotella jejuni', coverage: '12.5%',
+          coverageUrl: 'https://gpas.example/cov/1.png', colonization: '定植', colonizationE: 'colonized', color: '#2c7378', barcodeId: 'B01',
+          createTime: '2026-01-01', updateTime: '2026-01-02', secret: 'x' },
+        { id: 2, speciesType: 'bacteria', taxCname: '', taxEname: 'Unnamed', coverage: 3, coverageUrl: 'javascript:alert(1)',
+          colonization: null, colonizationE: null, color: 'red;background:url(x)', barcodeId: null },
+      ],
+    } })
+  })
+  const service = new GpasService(config)
+  const tool = createGpasTools(service).find((item) => item.id === 'file.result')!
+  const context = { profile, cookie: 'session=mine', client: service.client }
+  const data = await tool.run(context, tool.input.parse({ taskId: 'task-1', speciesType: 'bacteria', page: 2 })) as {
+    total: number; totalPage: number; rows: Array<Record<string, unknown>>
+  }
+
+  assert.deepEqual(queries[0], { taskId: 'task-1', speciesType: 'bacteria', page: '2', pageSize: '20' })
+  assert.equal(data.total, 42)
+  assert.equal(data.totalPage, 3)
+  assert.deepEqual(data.rows[0], {
+    id: 'r1', speciesType: 'bacteria', taxCname: '空肠普雷沃菌', taxEname: 'Prevotella jejuni', coverage: '12.5%',
+    coverageUrl: 'https://gpas.example/cov/1.png', colonization: '定植', colonizationE: 'colonized', color: '#2c7378', barcodeId: 'B01',
+  })
+  // Unsafe links and colors are dropped; a missing Chinese name falls back to the Latin one.
+  assert.equal(data.rows[1].coverageUrl, null)
+  assert.equal(data.rows[1].color, null)
+  assert.equal(data.rows[1].taxCname, 'Unnamed')
+
+  const model = tool.toModel(data) as { page: number; rows: Array<Record<string, unknown>> }
+  assert.equal(model.page, 2)
+  assert.deepEqual(Object.keys(model.rows[0]).sort(), ['barcodeId', 'colonization', 'colonizationE', 'coverage', 'speciesType', 'taxCname', 'taxEname'])
+  assert.doesNotMatch(JSON.stringify(model), /session=mine|secret|cov\/1\.png/)
+
+  const reply = tool.toReply(data, context)
+  assert.deepEqual(reply.part.result, { taskId: 'task-1', total: 42 })
+  assert.equal(gpasPartSchema.safeParse(reply.part).success, true)
+  assert.match(reply.content, /共检出 42 条/)
+
+  for (const bad of [{}, { taskId: '../x' }, { taskId: 't', pageSize: 51 }, { taskId: 't', speciesType: 'a b' }]) {
+    assert.equal(tool.input.safeParse(bad).success, false, JSON.stringify(bad))
+  }
 })

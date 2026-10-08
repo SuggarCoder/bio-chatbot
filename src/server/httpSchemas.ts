@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { gpasPartSchema, gpasUploadBatchSchema, gpasUploadPartSchema, projectInputSchema, sampleKeys } from './gpasContracts.js'
+import { fileResultPageSchema, fileResultQuerySchema, gpasPartSchema, gpasUploadBatchSchema, gpasUploadPartSchema, projectInputSchema, sampleKeys } from './gpasContracts.js'
 
 const jsonSchema = (schema: z.ZodType) => z.toJSONSchema(schema, {
   target: 'draft-7',
@@ -236,6 +236,13 @@ export const httpSchemas = {
   uploadSampleTypes: {
     response: {
       200: jsonSchema(z.object({ initialized: z.boolean(), types: z.array(z.enum(sampleKeys)) })),
+      ...errorResponses,
+    },
+  },
+  fileResults: {
+    querystring: jsonSchema(fileResultQuerySchema),
+    response: {
+      200: jsonSchema(fileResultPageSchema),
       ...errorResponses,
     },
   },

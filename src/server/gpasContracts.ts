@@ -53,6 +53,8 @@ export const fileCardSchema = z.object({
   analysisStatus: shortText.nullable(),
   metaStatus: shortText.nullable(),
   uploadTime: shortText.nullable(),
+  /** GPAS analysis id; file/result/list takes it as `taskId`. */
+  analysisId: shortText.nullable(),
   brief: fileBriefSchema.nullable(),
 })
 export type FileBrief = z.infer<typeof fileBriefSchema>
@@ -67,12 +69,55 @@ export function categorySharePct(speciesCount: number, categories: readonly { sp
 }
 export type FileCard = z.infer<typeof fileCardSchema>
 
+/** Analysis task id accepted by file/result/list (the file list's analysisId). */
+export const taskIdSchema = z.string().trim().min(1).max(128).regex(/^[\w.:-]+$/)
+export const FILE_RESULT_PAGE_SIZE = 20
+export const fileResultQuerySchema = z.object({
+  taskId: taskIdSchema,
+  speciesType: z.string().trim().min(1).max(64).regex(/^[\w-]+$/).optional(),
+  page: z.number().int().min(1).max(10_000).optional(),
+  pageSize: z.number().int().min(1).max(50).optional(),
+})
+/** One species row of file/result/list, normalized for the UI and the model. */
+export const fileResultRowSchema = z.object({
+  id: shortText,
+  speciesType: shortText,
+  taxCname: shortText,
+  taxEname: shortText,
+  coverage: shortText,
+  /** Only http(s) links survive parsing. */
+  coverageUrl: z.string().max(2048).nullable(),
+  colonization: shortText,
+  colonizationE: shortText,
+  /** Only #hex or rgb() colors survive parsing. */
+  color: shortText.nullable(),
+  barcodeId: shortText,
+})
+export const fileResultPageSchema = z.object({
+  taskId: taskIdSchema,
+  speciesType: shortText.nullable(),
+  page: z.number().int().min(1),
+  pageSize: z.number().int().min(1),
+  total: z.number().int().nonnegative(),
+  totalPage: z.number().int().nonnegative(),
+  rows: z.array(fileResultRowSchema).max(50),
+})
+export type FileResultQuery = z.infer<typeof fileResultQuerySchema>
+
+/** The message the card's "查看详情" button sends; the server pins file.result for it. */
+export const fileResultRequestText = (taskId: string) => `查看样本:${taskId}分析详情`
+export const fileResultRequestPattern = /^\s*查看样本\s*[:：]\s*[\w.:-]+\s*分析详情\s*$/
+export type FileResultRow = z.infer<typeof fileResultRowSchema>
+export type FileResultPage = z.infer<typeof fileResultPageSchema>
+
 export const gpasPartSchema = z.object({
   type: z.literal('gpas'),
   order: z.number().int().nonnegative(),
   form: projectFormSchema.optional(),
   /** Uploaded file cards from the file list tool. */
   files: z.array(fileCardSchema).max(20).optional(),
+  /** Entry to a sample's analysis detail, opened in the side panel. */
+  result: z.object({ taskId: taskIdSchema, total: z.number().int().nonnegative() }).optional(),
   capability: z.object({
     id: z.string().nullable(),
     intent: z.string(),
@@ -143,14 +188,14 @@ export function renderUploadContext(batch: GpasUploadBatch): string {
     return `${index + 1}. ${fields.join('｜')}`
   })
   const uploaded = batch.items.filter(item => item.status === 'uploaded').length
-  const fileIds = batch.items.flatMap(item => item.status === 'uploaded' && item.fileId ? [item.fileId] : [])
+  const fileNames = batch.items.flatMap(item => item.status === 'uploaded' ? [item.name] : [])
   return [
     '[GPAS 文件上传结果（由客户端上报）]',
     `样本类型：${sampleLabel(batch.sampleType)}（${batch.sampleType}）`,
     `共 ${batch.items.length} 个文件，成功 ${uploaded} 个。`,
     ...lines,
-    fileIds.length
-      ? `说明：请先调用 file.list 工具（fileIds=${JSON.stringify(fileIds)}）查询这批文件在 GPAS 中的状态，并用表格展示返回结果；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。`
+    fileNames.length
+      ? `说明：请先调用 file.list 工具（fileNames=${JSON.stringify(fileNames)}）按文件名查询这批文件在 GPAS 中的状态和分析结果；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。`
       : '说明：本批没有上传成功的文件；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。',
   ].join('\n')
 }
