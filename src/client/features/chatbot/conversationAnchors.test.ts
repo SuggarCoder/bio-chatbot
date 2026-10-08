@@ -6,7 +6,6 @@ import test from 'node:test'
 import {
   createQuestionAnchorLabel,
   findActiveConversationAnchor,
-  getConversationAnchorPosition,
   normalizeQuestionAnchorText,
   shouldShowConversationAnchors,
 } from './conversationAnchors'
@@ -31,13 +30,6 @@ test('conversation anchors only appear for long conversations with multiple ques
   assert.equal(shouldShowConversationAnchors(1200, 600, 2), false)
   assert.equal(shouldShowConversationAnchors(1600, 600, 1), false)
   assert.equal(shouldShowConversationAnchors(1600, 0, 4), false)
-})
-
-test('anchor positions are proportional and clamped to the available height', () => {
-  assert.equal(getConversationAnchorPosition(250, 1000), 0.25)
-  assert.equal(getConversationAnchorPosition(-20, 1000), 0)
-  assert.equal(getConversationAnchorPosition(1200, 1000), 1)
-  assert.equal(getConversationAnchorPosition(10, 0), 0)
 })
 
 test('active anchor follows the last question above the reading offset', () => {

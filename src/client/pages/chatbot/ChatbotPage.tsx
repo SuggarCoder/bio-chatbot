@@ -45,7 +45,6 @@ import {
 import {
   createQuestionAnchorLabel,
   findActiveConversationAnchor,
-  getConversationAnchorPosition,
   normalizeQuestionAnchorText,
   shouldShowConversationAnchors,
 } from '../../features/chatbot/conversationAnchors'
@@ -2060,10 +2059,6 @@ function SessionConversationView(props: { conversationId: string }) {
     nextOffsets.sort((left, right) => left.top - right.top)
     anchorElements = nextElements
     anchorOffsets = nextOffsets
-    const maxScrollTop = Math.max(
-      messageListRef.scrollHeight - messageListRef.clientHeight,
-      0,
-    )
     const messageListBounds = messageListRef.getBoundingClientRect()
     const nextViewport = {
       top: Math.max(Math.round(messageListBounds.top + 8), 8),
@@ -2093,10 +2088,6 @@ function SessionConversationView(props: { conversationId: string }) {
         id: anchor.id,
         label: createQuestionAnchorLabel(message.content),
         fullText,
-        position: getConversationAnchorPosition(
-          Math.max(anchor.top - 16, 0),
-          maxScrollTop,
-        ),
       }]
     })
 

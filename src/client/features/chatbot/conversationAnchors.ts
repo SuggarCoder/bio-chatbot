@@ -30,17 +30,6 @@ export function shouldShowConversationAnchors(
   )
 }
 
-export function getConversationAnchorPosition(
-  top: number,
-  maxScrollTop: number,
-) {
-  if (maxScrollTop <= 0) {
-    return 0
-  }
-
-  return Math.min(Math.max(top / maxScrollTop, 0), 1)
-}
-
 export function findActiveConversationAnchor(
   anchors: ConversationAnchorOffset[],
   scrollTop: number,

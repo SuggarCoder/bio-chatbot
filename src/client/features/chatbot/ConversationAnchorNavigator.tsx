@@ -10,7 +10,6 @@ export type ConversationAnchorItem = {
   id: string
   label: string
   fullText: string
-  position: number
 }
 
 type ConversationAnchorNavigatorProps = {
@@ -122,17 +121,18 @@ export function ConversationAnchorNavigator(
             setFocusOpen(nextOpen)
           }}
         >
-          <span class="pointer-events-none absolute inset-y-2 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-slate-300/45 transition-colors group-hover:bg-teal-500/35 group-focus-visible:bg-teal-500/45" />
-          <For each={props.anchors}>
-            {(anchor) => (
-              <span
-                class={`pointer-events-none absolute left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full transition-all ${anchor.id === props.activeId ? 'h-2.5 w-2.5 bg-teal-600' : 'h-1.5 w-1.5 bg-slate-400/65 group-hover:bg-slate-500'}`}
-                style={{
-                  top: `${Math.min(Math.max(anchor.position, 0.02), 0.98) * 100}%`,
-                }}
-              />
-            )}
-          </For>
+          <span
+            class="pointer-events-none absolute left-0 right-0 top-1/2 flex max-h-[calc(100%-1rem)] -translate-y-1/2 flex-col items-center justify-around"
+            style={{ height: `${props.anchors.length * 18}px` }}
+          >
+            <For each={props.anchors}>
+              {(anchor) => (
+                <span
+                  class={`shrink-0 rounded-full transition-all ${anchor.id === props.activeId ? 'h-2.5 w-2.5 bg-teal-600' : 'h-1.5 w-1.5 bg-slate-400/65 group-hover:bg-slate-500 group-focus-visible:bg-slate-500'}`}
+                />
+              )}
+            </For>
+          </span>
         </button>
 
         <Show when={isOpen()}>
