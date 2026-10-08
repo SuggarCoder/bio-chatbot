@@ -1,5 +1,5 @@
-import type { FileResultPage, FileResultQuery, GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput, SampleKey } from '../../../server/gpasContracts'
-export type { GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput } from '../../../server/gpasContracts'
+import type { FileResultPage, FileResultQuery, GpasDetailPart, GpasDetailRequest, GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput, SampleKey } from '../../../server/gpasContracts'
+export type { GpasDetailRequest, GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput } from '../../../server/gpasContracts'
 
 const API_BASE = `${import.meta.env?.BASE_URL ?? '/ai-chatbot/'}api`
 
@@ -30,6 +30,7 @@ export type ChatMessageDto = {
   parts: Array<
     | GpasPart
     | GpasUploadPart
+    | GpasDetailPart
     | { type: 'text'; order: number; text: string }
     | {
         type: 'artifact_ref'
@@ -322,6 +323,7 @@ export async function createGeneration(
     supersedesGenerationId?: string
     projectInput?: ProjectInput
     uploads?: GpasUploadBatch
+    detail?: GpasDetailRequest
   },
 ) {
   type Result = {
@@ -346,6 +348,7 @@ export async function createGeneration(
         supersedesGenerationId: input.supersedesGenerationId,
         projectInput: input.projectInput,
         uploads: input.uploads,
+        detail: input.detail,
       }),
     },
   ))

@@ -168,8 +168,8 @@ export class AgentToolSet {
         toolId: spec.id,
         title: spec.title,
         args: args.data as Record<string, unknown>,
-        // Forms and file cards are shown to the user under the reply.
-        ...(reply.part.form || reply.part.files?.length ? { part: reply.part } : {}),
+        // Forms, file cards and the analysis detail entry are shown under the reply.
+        ...(reply.part.form || reply.part.files?.length || reply.part.result ? { part: reply.part } : {}),
       }
     } catch (error) {
       if (session.signal.aborted) throw error

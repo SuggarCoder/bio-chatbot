@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { AuthenticationError, loadProfile, resolveCurrentUser } from './auth.js'
 import { GpasUpstreamError } from './gpas.js'
 import { createCapabilityRuntime, type CapabilityRuntime } from './capabilities/runtime.js'
-import { fileResultQuerySchema, fileResultRequestPattern, gpasUploadBatchSchema, projectInputSchema, type FileResultPage, type FileResultQuery, type SampleKey } from './gpasContracts.js'
+import { fileResultQuerySchema, gpasDetailRequestSchema, gpasUploadBatchSchema, projectInputSchema, type FileResultPage, type FileResultQuery, type SampleKey } from './gpasContracts.js'
 import { createGpasTools } from './gpas/tools/index.js'
 import {
   redisKey,
@@ -76,9 +76,9 @@ const API_BASE = '/ai-chatbot/api'
 export function withUploadTools(ids: string[], catalog: readonly string[], hasUploads: boolean): string[] {
   return hasUploads && catalog.includes('file.list') && !ids.includes('file.list') ? [...ids, 'file.list'] : ids
 }
-/** "查看样本:{taskId}分析详情" always reaches the analysis detail tool. */
-export function withDetailTool(ids: string[], catalog: readonly string[], content: string): string[] {
-  return fileResultRequestPattern.test(content) && catalog.includes('file.result') && !ids.includes('file.result')
+/** A card's analysis detail request always reaches the analysis detail tool. */
+export function withDetailTool(ids: string[], catalog: readonly string[], hasDetail: boolean): string[] {
+  return hasDetail && catalog.includes('file.result') && !ids.includes('file.result')
     ? [...ids, 'file.result']
     : ids
 }
@@ -1084,7 +1084,7 @@ export async function buildApp(
     const user = await syncUser(database, profile)
     if (user.id !== row.userId) throw new AuthenticationError('请求身份不匹配。', 403)
     const { chatId, requestId: clientMessageId } = row
-    const { content, artifactId, supersedesGenerationId, projectInput, uploads } = row.payload
+    const { content, artifactId, supersedesGenerationId, projectInput, uploads, detail } = row.payload
     await context.check()
     // Completed business replies (form confirmations) replay idempotently.
     const replay = await findBusinessExchange(database, user.id, chatId, clientMessageId)
@@ -1116,7 +1116,8 @@ export async function buildApp(
       artifactId: artifactId || undefined,
       supersedesGenerationId: supersedesGenerationId || undefined,
       uploads,
-      agentToolIds: withDetailTool(withUploadTools(await selectAgentToolIds(content), agentToolCatalog, Boolean(uploads)), agentToolCatalog, content),
+      detail,
+      agentToolIds: withDetailTool(withUploadTools(await selectAgentToolIds(content), agentToolCatalog, Boolean(uploads)), agentToolCatalog, Boolean(detail)),
       cookie,
     })
   }, () => app.log.warn('Durable ingress storage temporarily unavailable'))
@@ -1206,13 +1207,17 @@ export async function buildApp(
 
       const projectInput = body.projectInput === undefined ? undefined : projectInputSchema.parse(body.projectInput)
       const uploads = body.uploads === undefined ? undefined : gpasUploadBatchSchema.parse(body.uploads)
+      const detail = body.detail === undefined ? undefined : gpasDetailRequestSchema.parse(body.detail)
       if (projectInput && uploads) {
         return reply.code(400).send(errorBody(request, 'invalid_request', '项目表单确认不能同时附带上传文件。'))
+      }
+      if (detail && (projectInput || uploads)) {
+        return reply.code(400).send(errorBody(request, 'invalid_request', '查看分析详情不能同时附带表单或上传文件。'))
       }
       const rate = await consumeGenerationRateLimit(redis, config, user.id, 'capability')
       if (!rate.allowed) throw new GenerationRejectedError('请求过于频繁，请稍后重试。', 429, 'intent_rate_limited', rate.retryAfterMs)
       const ticket = await ingress.submit({ userId: user.id, chatId, requestId: clientMessageId,
-        payload: { content, artifactId: artifactId || undefined, supersedesGenerationId: supersedesGenerationId || undefined, projectInput, uploads },
+        payload: { content, artifactId: artifactId || undefined, supersedesGenerationId: supersedesGenerationId || undefined, projectInput, uploads, detail },
         cookie: request.headers.cookie ?? '', externalUserId: profile.userId, teamId: profile.ownteamId ?? '',
       })
       return reply.code(202).send(ticket)

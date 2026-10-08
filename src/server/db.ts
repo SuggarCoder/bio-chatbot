@@ -60,7 +60,7 @@ import {
 import type { MessagePart } from './db/schema.js'
 import type { Database } from './db/client.js'
 import { AuthenticationError } from './auth.js'
-import { gpasPartSchema, gpasUploadPartSchema, renderUploadContext, type GpasPart, type GpasUploadBatch } from './gpasContracts.js'
+import { gpasDetailPartSchema, gpasPartSchema, gpasUploadPartSchema, renderDetailContext, renderUploadContext, type GpasDetailRequest, type GpasPart, type GpasUploadBatch } from './gpasContracts.js'
 import type { BusinessReply } from './gpas.js'
 
 export {
@@ -290,6 +290,11 @@ export function mapMessage(
           if (parsed.success) parts.push(parsed.data)
           return
         }
+        if (part?.type === 'gpas_detail') {
+          const parsed = gpasDetailPartSchema.safeParse(part)
+          if (parsed.success) parts.push(parsed.data)
+          return
+        }
         if (part?.type === 'text' && typeof part.text === 'string') {
           parts.push({
             type: 'text' as const,
@@ -320,8 +325,8 @@ export function mapMessage(
     .filter((part) => part.type === 'text')
     .map((part) => part.text)
     .join('')
-  // Upload messages keep model-facing context in `content`; show the user's text.
-  const content = parts.some((part) => part.type === 'gpas_upload')
+  // Upload and detail messages keep model-facing context in `content`; show the user's text.
+  const content = parts.some((part) => part.type === 'gpas_upload' || part.type === 'gpas_detail')
     ? textContent()
     : row.content ?? textContent()
   const normalizedExecutionSteps = normalizeExecutionSteps(executionSteps)
@@ -1099,6 +1104,8 @@ export async function createGenerationStart(
     content: string
     /** Client-reported upload results; rendered into the model-facing content. */
     uploads?: GpasUploadBatch
+    /** Analysis detail request; its task id goes to the model context only. */
+    detail?: GpasDetailRequest
     generationId: string
     streamId: string
     requestId: string
@@ -1174,10 +1181,16 @@ export async function createGenerationStart(
           ? `${input.content}
 
 ${renderUploadContext(input.uploads)}`
-          : input.content,
+          : input.detail
+            ? `${input.content}
+
+${renderDetailContext(input.detail)}`
+            : input.content,
         parts: input.uploads
           ? [{ type: 'text', order: 0, text: input.content }, { type: 'gpas_upload', order: 1, batch: input.uploads }]
-          : [{ type: 'text', text: input.content }],
+          : input.detail
+            ? [{ type: 'text', order: 0, text: input.content }, { type: 'gpas_detail', order: 1, taskId: input.detail.taskId }]
+            : [{ type: 'text', text: input.content }],
         sharedText: input.content,
         clientMessageId: input.clientMessageId,
       })

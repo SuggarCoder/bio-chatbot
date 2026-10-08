@@ -59,8 +59,8 @@ import { createGpasUploadController, uploadFallbackContent } from '../../feature
 import { UploadedFilesSummary, UploadTray } from '../../features/gpasUpload/UploadTray'
 import { FileAnalysisCards, GpasResultEntry } from '../../features/gpasUpload/FileAnalysisCards'
 import { resultBrief, resultCategories } from '../../features/gpasUpload/resultHelpers'
-import { fileResultRequestText } from '../../../server/gpasContracts'
-import type { GpasUploadBatch } from '../../features/chatbot/chatApi'
+import { FILE_RESULT_REQUEST_TEXT } from '../../../server/gpasContracts'
+import type { GpasDetailRequest, GpasUploadBatch } from '../../features/chatbot/chatApi'
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
 import { PopupMenu, type PopupMenuEntry, type PopupMenuItem } from '../../shared/ui/PopupMenu'
@@ -334,6 +334,7 @@ async function runAssistantReply(
   chatStore: ReturnType<typeof useChatStore>,
   projectInput?: import('../../features/chatbot/chatApi').ProjectInput,
   uploads?: GpasUploadBatch,
+  detail?: GpasDetailRequest,
 ) {
   if (
     startingReplies.has(conversationId) ||
@@ -362,6 +363,7 @@ async function runAssistantReply(
         clientMessageId,
         projectInput,
         uploads,
+        detail,
         artifactId:
           artifactStore.state.visibleConversationId === conversationId &&
           artifactStore.state.isPanelOpen
@@ -395,6 +397,7 @@ async function runAssistantReply(
           clientMessageId,
           projectInput,
           uploads,
+          detail,
         },
       )
       if (projectInput) throw error
@@ -1730,7 +1733,9 @@ function StaticMessageParts(props: {
             )
           : part.type === 'gpas_upload'
             ? <UploadedFilesSummary batch={part.batch} />
-            : <StaticMarkdown text={part.text} />}
+            : part.type === 'gpas_detail'
+              ? null
+              : <StaticMarkdown text={part.text} />}
     </For>
   )
 }
@@ -2375,11 +2380,13 @@ function SessionConversationView(props: { conversationId: string }) {
   const viewDetail = (taskId: string) => {
     const active = conversation()
     if (!active || active.requestPending || active.activeGeneration) return
-    const question = chatStore.appendUserMessage(props.conversationId, fileResultRequestText(taskId))
+    // The analysis id goes in `detail`, never into the visible text.
+    const detail = { taskId }
+    const question = chatStore.appendUserMessage(props.conversationId, FILE_RESULT_REQUEST_TEXT, undefined, detail)
     if (!question?.clientMessageId) return
     setPendingDetailTaskId(taskId)
     shouldStickToBottom = true
-    void runAssistantReply(props.conversationId, question.content, question.clientMessageId, undefined, chatStore)
+    void runAssistantReply(props.conversationId, question.content, question.clientMessageId, undefined, chatStore, undefined, undefined, detail)
   }
   createEffect(() => {
     const taskId = pendingDetailTaskId()
@@ -2539,6 +2546,7 @@ function SessionConversationView(props: { conversationId: string }) {
         chatStore,
         undefined,
         retryRequest.uploads,
+        retryRequest.detail,
       )
       return
     }

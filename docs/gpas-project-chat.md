@@ -128,14 +128,15 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 - 检出类别最多显示 5 块，超过时按检出种数取前 4 块，其余合并为“其他”；未检出的类别列在“未检出”一行。
 - ★ 数量为 `hazardIndex`。brief 缺失或无法解析时，卡片只显示文件信息和分析状态。
 - 模型只拿到精简数据和措辞规则（“丰度前 N”“共检出 X 种”），原始 brief 字符串不交给模型。
-- 卡片 header 右侧的「查看详情」（卡片有 `analysisId` 时显示）发送一条消息“查看样本:{taskId}分析详情”，
-  taskId 即 `analysisId`；这条消息总会向助手提供 `file.result` 工具（`withDetailTool`）。
+- 卡片 header 右侧的「查看详情」（卡片有 `analysisId` 时显示）发送消息“通过分析ID查看样本详情”，
+  分析 ID 放在请求体 `detail.taskId`（与 `uploads` 相同的做法）：用户气泡只显示这句文字，ID 只出现在
+  `renderDetailContext` 追加给模型的上下文和 `gpas_detail` part 中。带 `detail` 的消息总会向助手提供 `file.result` 工具（`withDetailTool`）。
 
 ### 样本分析详情（`file.result`）
 
 `file.result` 工具调用 `GET file/result/list`（`taskId`、可选 `speciesType`、`page`、`pageSize`，默认每页 20 条），
 与其它 GPAS 工具一致：服务端用会话 Cookie 请求上游，字段白名单后的当页数据交给模型（不含颜色、覆盖度图链接和内部 id），
-回复附带 `result` part（taskId、总数）。`coverageUrl` 只保留 http(s) 链接，`color` 只保留 `#hex`/`rgb()`。
+回复附带 `result` part（taskId、总数；agent 会把含 `result` 的 part 转发到回复中）。模型被要求只用 1–2 句概括，不复述 taskId、不逐条列举物种。`coverageUrl` 只保留 http(s) 链接，`color` 只保留 `#hex`/`rgb()`。
 
 回复完成后自动在右侧面板（复用 Artifact 侧栏）打开分析详情，之后可点回复中的入口卡片重新打开。面板由
 `src/client/features/gpasUpload/GpasResultPanel.tsx` 渲染：

@@ -40,6 +40,7 @@ export type GenerationStartRetry = {
   clientMessageId: string
   projectInput?: import('./chatApi').ProjectInput
   uploads?: import('./chatApi').GpasUploadBatch
+  detail?: import('./chatApi').GpasDetailRequest
 }
 
 export type ActiveGeneration = {
@@ -116,6 +117,7 @@ type ChatStoreContextValue = {
     id: string,
     content: string,
     uploads?: import('./chatApi').GpasUploadBatch,
+    detail?: import('./chatApi').GpasDetailRequest,
   ) => ChatMessage | undefined
   confirmUserMessage: (id: string, message: ChatMessageDto) => void
   setRequestPending: (id: string, pending: boolean) => void
@@ -538,6 +540,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     id: string,
     content: string,
     uploads?: import('./chatApi').GpasUploadBatch,
+    detail?: import('./chatApi').GpasDetailRequest,
   ) => {
     const normalized = content.trim()
 
@@ -552,6 +555,9 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     )
     if (uploads) {
       message.parts = [...message.parts, { type: 'gpas_upload', order: 1, batch: uploads }]
+    }
+    if (detail) {
+      message.parts = [...message.parts, { type: 'gpas_detail', order: 1, taskId: detail.taskId }]
     }
 
     setState(

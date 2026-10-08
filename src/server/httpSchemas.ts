@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { fileResultPageSchema, fileResultQuerySchema, gpasPartSchema, gpasUploadBatchSchema, gpasUploadPartSchema, projectInputSchema, sampleKeys } from './gpasContracts.js'
+import { fileResultPageSchema, fileResultQuerySchema, gpasDetailPartSchema, gpasDetailRequestSchema, gpasPartSchema, gpasUploadBatchSchema, gpasUploadPartSchema, projectInputSchema, sampleKeys } from './gpasContracts.js'
 
 const jsonSchema = (schema: z.ZodType) => z.toJSONSchema(schema, {
   target: 'draft-7',
@@ -47,6 +47,7 @@ const chatSummary = z.object({
 const messagePart = z.discriminatedUnion('type', [
   gpasPartSchema,
   gpasUploadPartSchema,
+  gpasDetailPartSchema,
   z.object({
     type: z.literal('text'),
     order: z.number().int().nonnegative(),
@@ -289,6 +290,7 @@ export const httpSchemas = {
       supersedesGenerationId: uuid.optional(),
       projectInput: projectInputSchema.optional(),
       uploads: gpasUploadBatchSchema.optional(),
+      detail: gpasDetailRequestSchema.optional(),
     })),
     response: { 202: jsonSchema(z.object({ id: uuid, chatId: uuid, requestId: uuid, status: z.string(), result: z.unknown().nullable(), error: z.unknown().nullable() })), 201: jsonSchema(z.union([generationStart, z.object({
       kind: z.literal('business'),

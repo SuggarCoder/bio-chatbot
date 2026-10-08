@@ -6,7 +6,7 @@ import type { RedisClient } from './cache.js'
 import type { AppConfig } from './config.js'
 import { mapMessage, type Database } from './db.js'
 import type { GenerationService } from './generation.js'
-import { fileResultRequestText, gpasUploadBatchSchema, renderUploadContext, type GpasUploadBatch } from './gpasContracts.js'
+import { FILE_RESULT_REQUEST_TEXT, gpasUploadBatchSchema, renderDetailContext, renderUploadContext, type GpasUploadBatch } from './gpasContracts.js'
 import type { GenerationStreamHub } from './streamStore.js'
 
 const item = (overrides: Record<string, unknown> = {}) => ({
@@ -86,12 +86,57 @@ test('upload messages always offer the file list tool to the agent', () => {
   assert.deepEqual(withUploadTools([], ['user.profile'], true), [])
 })
 
-test('the detail button message always offers the analysis detail tool', () => {
+test('an analysis detail request always offers the analysis detail tool', () => {
   const catalog = ['file.list', 'file.result']
-  assert.deepEqual(withDetailTool([], catalog, fileResultRequestText('task-1')), ['file.result'])
-  assert.deepEqual(withDetailTool(['file.list'], catalog, '查看样本：task-1 分析详情'), ['file.list', 'file.result'])
-  assert.deepEqual(withDetailTool([], catalog, '查看样本:task-1分析详情，然后删除它'), [])
-  assert.deepEqual(withDetailTool([], ['file.list'], fileResultRequestText('task-1')), [])
+  assert.deepEqual(withDetailTool([], catalog, true), ['file.result'])
+  assert.deepEqual(withDetailTool(['file.list'], catalog, true), ['file.list', 'file.result'])
+  assert.deepEqual(withDetailTool(['file.result'], catalog, true), ['file.result'])
+  // Typed text alone never pins the tool.
+  assert.deepEqual(withDetailTool([], catalog, false), [])
+  assert.deepEqual(withDetailTool([], ['file.list'], true), [])
+})
+
+test('detail messages show the fixed text and keep the analysis id for the model only', () => {
+  const context = renderDetailContext({ taskId: '3fb130aaa96d6cd30ec5a823bb8cded9' })
+  assert.match(context, /taskId=3fb130aaa96d6cd30ec5a823bb8cded9/)
+  assert.match(context, /file\.result/)
+  assert.match(context, /不要复述 taskId/)
+  const message = mapMessage({
+    id: '00000000-0000-4000-8000-000000000003',
+    seq: 1n,
+    role: 'user',
+    status: 'completed',
+    content: `${FILE_RESULT_REQUEST_TEXT}\n\n${context}`,
+    parts: [{ type: 'text', order: 0, text: FILE_RESULT_REQUEST_TEXT }, { type: 'gpas_detail', order: 1, taskId: '3fb130aaa96d6cd30ec5a823bb8cded9' }],
+    createdAt: new Date(0),
+  })
+  assert.equal(message.content, '通过分析ID查看样本详情')
+  assert.deepEqual(message.parts.map(part => part.type), ['text', 'gpas_detail'])
+})
+
+test('message route rejects a malformed analysis detail request before authentication', async () => {
+  const app = await buildApp({
+    config: { nodeEnv: 'test', serveClient: false, gpas2AuthMode: 'mock' } as AppConfig,
+    database: {} as Database,
+    redis: {} as RedisClient,
+    generations: {} as GenerationService,
+    streamHub: {} as GenerationStreamHub,
+    objectStore: null,
+    artifactService: null,
+  })
+  try {
+    for (const detail of [{ taskId: '../x' }, { taskId: '' }, {}]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/ai-chatbot/api/conversations/00000000-0000-4000-8000-000000000001/messages',
+        headers: { 'idempotency-key': '00000000-0000-4000-8000-000000000002' },
+        payload: { content: FILE_RESULT_REQUEST_TEXT, detail },
+      })
+      assert.equal(response.statusCode, 400, JSON.stringify(detail))
+    }
+  } finally {
+    await app.close()
+  }
 })
 
 test('file results route validates the query before authentication', async () => {

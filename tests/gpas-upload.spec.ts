@@ -263,24 +263,27 @@ test('"查看详情" asks for the analysis detail and the panel pages each categ
       rows: Array.from({ length: count }, (_, index) => resultRow(index, speciesType, pageNumber)),
     } })
   })
-  const sent: string[] = []
+  const sent: Array<Record<string, unknown>> = []
   await page.route('**/ai-chatbot/api/conversations/*/messages', async (route) => {
     const body = route.request().postDataJSON()
-    sent.push(body.content)
+    sent.push({ content: body.content, detail: body.detail })
     const message = (id: string, role: string, content: string, extra: unknown[] = []) => ({
       id, seq: 3, role, status: 'completed', content, parts: [{ type: 'text', order: 0, text: content }, ...extra],
       createdAt: timestamp, vote: null, executionSteps: [],
     })
     await route.fulfill({ status: 202, json: { id: 'ticket-1', status: 'succeeded', error: null, result: {
       kind: 'business',
-      userMessage: message('e9345da6-998b-4462-a539-000000000003', 'user', body.content),
+      userMessage: message('e9345da6-998b-4462-a539-000000000003', 'user', body.content, [{ type: 'gpas_detail', order: 1, taskId: body.detail.taskId }]),
       assistantMessage: message('e9345da6-998b-4462-a539-000000000004', 'assistant', '样本 task-1 共检出 45 条物种结果。',
         [{ type: 'gpas', order: 1, result: { taskId: 'task-1', total: 45 } }]),
     } } })
   })
 
   await page.getByTestId('gpas-view-detail').click()
-  await expect.poll(() => sent).toEqual(['查看样本:task-1分析详情'])
+  // The analysis id travels in `detail`; the bubble shows only the fixed text.
+  await expect.poll(() => sent).toEqual([{ content: '通过分析ID查看样本详情', detail: { taskId: 'task-1' } }])
+  await expect(page.getByText('通过分析ID查看样本详情', { exact: true })).toBeVisible()
+  await expect(page.getByText(/task-1/).filter({ hasText: '查看' })).toHaveCount(0)
 
   // The reply opens the panel; tabs are the card's detected categories.
   const panel = page.getByTestId('gpas-result-panel')

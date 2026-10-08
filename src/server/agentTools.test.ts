@@ -153,9 +153,22 @@ test('file list tool forwards its analysis cards to the user', async (t) => {
   }))
   const set = toolbox().select(['file.list'])!
   const session = new AgentSession(config, user, 'session=a', new AbortController().signal)
-  const result = await set.execute({ call_id: 'c1', name: 'file__list', arguments: '{"fileIds":["f-1"]}' }, session)
+  const result = await set.execute({ call_id: 'c1', name: 'file__list', arguments: '{"fileNames":["a.fq"]}' }, session)
   assert.equal(result.ok, true)
   assert.equal(result.part?.files?.[0].files[0].fileId, 'f-1')
   assert.deepEqual(result.part?.files?.[0].brief?.categories, [])
   assert.match(set.instructions(), /丰度前 N/)
+})
+
+test('analysis detail tool forwards its result entry to the user', async (t) => {
+  t.mock.method(globalThis, 'fetch', fakeGpas({
+    '/user/info': { code: 200, data: { userId: 'user-a', ownteamId: 'team-a', status: 0 } },
+    '/file/result/list': { code: 200, dataPage: { page: 1, pageSize: 20, totalData: 198, totalPage: 10, dataList: [] } },
+  }))
+  const set = toolbox().select(['file.result'])!
+  const session = new AgentSession(config, user, 'session=a', new AbortController().signal)
+  const result = await set.execute({ call_id: 'c1', name: 'file__result', arguments: '{"taskId":"3fb130aaa96d6cd30ec5a823bb8cded9"}' }, session)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.part?.result, { taskId: '3fb130aaa96d6cd30ec5a823bb8cded9', total: 198 })
+  assert.match(result.output, /不要复述 taskId/)
 })

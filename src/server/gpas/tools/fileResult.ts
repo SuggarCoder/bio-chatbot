@@ -127,7 +127,7 @@ export const fileResultTool = defineGpasTool({
     pageSize: data.pageSize,
     total: data.total,
     totalPage: data.totalPage,
-    note: `这是第 ${data.page} 页；完整列表已在右侧面板展示，可按类别和分页查看。只需简短概括，其它页或其它类别可再次调用本工具（page / speciesType）。`,
+    note: `这是第 ${data.page} 页；完整列表已在右侧面板展示，可按类别和分页查看。回复只需 1–2 句简短概括，不要复述 taskId，不要逐条列举物种；用户追问其它页或其它类别时可再次调用本工具（page / speciesType）。`,
     rows: data.rows.map((row) => ({
       taxId: row.taxId, taxCname: row.taxCname, taxEname: row.taxEname, speciesType: row.speciesType,
       coverage: row.coverage, colonization: row.colonization, colonizationE: row.colonizationE, hazardIndex: row.hazardIndex,

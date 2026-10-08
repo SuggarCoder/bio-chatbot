@@ -117,9 +117,28 @@ export const fileResultPageSchema = z.object({
 })
 export type FileResultQuery = z.infer<typeof fileResultQuerySchema>
 
-/** The message the card's "查看详情" button sends; the server pins file.result for it. */
-export const fileResultRequestText = (taskId: string) => `查看样本:${taskId}分析详情`
-export const fileResultRequestPattern = /^\s*查看样本\s*[:：]\s*[\w.:-]+\s*分析详情\s*$/
+/**
+ * The card's "查看详情" sends this text; the analysis id travels in `detail`
+ * and reaches only the model context, never the visible message.
+ */
+export const FILE_RESULT_REQUEST_TEXT = '通过分析ID查看样本详情'
+export const gpasDetailRequestSchema = z.object({ taskId: taskIdSchema })
+export const gpasDetailPartSchema = z.object({
+  type: z.literal('gpas_detail'),
+  order: z.number().int().nonnegative(),
+  taskId: taskIdSchema,
+})
+export type GpasDetailRequest = z.infer<typeof gpasDetailRequestSchema>
+export type GpasDetailPart = z.infer<typeof gpasDetailPartSchema>
+
+/** Model-facing context appended to a detail request. */
+export function renderDetailContext(detail: GpasDetailRequest): string {
+  return [
+    '[样本分析详情请求（由客户端上报）]',
+    `taskId=${detail.taskId}`,
+    `说明：请调用 file.result 工具（taskId=${detail.taskId}）。完整物种列表会在右侧面板展示，回复只需 1–2 句简短概括（检出总数、值得关注的高风险物种），不要复述 taskId，不要逐条列举物种。`,
+  ].join('\n')
+}
 export type FileResultRow = z.infer<typeof fileResultRowSchema>
 export type FileResultPage = z.infer<typeof fileResultPageSchema>
 

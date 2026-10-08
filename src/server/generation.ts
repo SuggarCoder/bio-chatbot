@@ -85,7 +85,7 @@ import {
   type AgentFunctionCall,
   type AgentToolbox,
 } from './agent/tools.js'
-import type { GpasPart, GpasUploadBatch } from './gpasContracts.js'
+import type { GpasDetailRequest, GpasPart, GpasUploadBatch } from './gpasContracts.js'
 import { openCredential, sealCredential } from './ingress.js'
 
 type StartGenerationInput = {
@@ -99,6 +99,8 @@ type StartGenerationInput = {
   replacesMessageId?: string
   /** Client-reported GPAS upload results attached to the user message. */
   uploads?: GpasUploadBatch
+  /** Analysis detail request from a card; the task id stays out of the visible text. */
+  detail?: GpasDetailRequest
   /** Agent mode (create): tool ids selected at ingress and the raw GPAS cookie. */
   agentToolIds?: string[]
   cookie?: string
@@ -383,6 +385,7 @@ export class GenerationService {
             clientMessageId: input.clientMessageId,
             content: input.content,
             uploads: input.uploads,
+            detail: input.detail,
             generationId,
             streamId,
             requestId,
