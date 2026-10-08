@@ -10,7 +10,7 @@ import { GpasService } from './gpas.js'
 import { GpasClient } from './gpas/client.js'
 import { defineGpasTool, identityFieldPattern } from './gpas/defineTool.js'
 import { createGpasTools } from './gpas/tools/index.js'
-import { parseBrief } from './gpas/tools/file.js'
+import { mergeDuplicateRows, parseBrief } from './gpas/tools/file.js'
 import { gpasPartSchema } from './gpasContracts.js'
 
 const config = { gpas2AuthMode: 'upstream', gpas2UserInfoUrl: 'https://gpas.example.invalid:8058/api/gpas2/v1/user/info' } as AppConfig
@@ -222,10 +222,24 @@ test('brief parsing keeps a top-5 summary per category, from a once- or twice-en
   }
 })
 
+test('duplicate rows merge by groupId, then analysisId; single-end files by fileId', () => {
+  const row = (paired: boolean, files: Array<ReturnType<typeof gpasFile>>) =>
+    ({ paired, groupId: files[0].groupId as string | null, files }) as unknown as Parameters<typeof mergeDuplicateRows>[0][number]
+  const merged = mergeDuplicateRows([
+    row(true, [gpasFile('a2', { groupId: null, analysisId: 77 }), gpasFile('a1', { groupId: null, analysisId: 77 })]),
+    row(true, [gpasFile('b1', { groupId: null, analysisId: 77, briefAnalysis: sampleBrief }), gpasFile('b2', { groupId: null })]),
+    row(true, [gpasFile('c1', { groupId: null }), gpasFile('c2', { groupId: null })]),
+    row(false, [gpasFile('s1')]),
+    row(false, [gpasFile('s2')]),
+  ])
+  assert.deepEqual(merged.map((item) => item.files.map((file) => file.fileId)), [['b1', 'b2'], ['c1', 'c2'], ['s1'], ['s2']])
+})
+
 test('file list tool returns one analysis card per sample and wording rules for the model', async (t) => {
-  // The same pair listed twice, R2/R1 without analysis first, collapses into one R1/R2 card.
+  // The same pair (one groupId) listed twice, R2/R1 without analysis first and
+  // with other fileIds, collapses into one R1/R2 card.
   t.mock.method(globalThis, 'fetch', async () => Response.json({ code: 200, dataPage: { totalData: 3, dataList: [
-    { isPair: true, file1: gpasFile('f-2', { analysisStatus: 'noanalysis' }), file2: gpasFile('f-1') },
+    { isPair: true, file1: gpasFile('f-2b', { fileName: 'f-2.fq.gz', analysisStatus: 'noanalysis' }), file2: gpasFile('f-1b', { fileName: 'f-1.fq.gz' }) },
     { isPair: true, file1: gpasFile('f-1', { briefAnalysis: sampleBrief }), file2: gpasFile('f-2') },
     { isPair: false, file1: gpasFile('f-3', { briefAnalysis: 'broken', analysisStatus: 'running' }) },
   ] } }))

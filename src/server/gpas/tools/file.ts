@@ -6,10 +6,12 @@ import { categorySharePct, fileBriefSchema, sampleKeys, sampleLabel, type FileBr
 import { defineGpasTool } from '../defineTool.js'
 
 const text = z.string().nullish().transform((value) => value ?? null)
+const id = z.union([z.string(), z.number()]).nullish().transform((value) => value == null || value === '' ? null : String(value))
 const fileSchema = z.object({
   fileId: z.union([z.string().min(1), z.number()]).transform(String),
   fileName: z.string(),
-  groupId: text,
+  groupId: id,
+  analysisId: id,
   sampleType: text,
   size: z.number().nullish(),
   status: text,
@@ -117,14 +119,25 @@ function briefFor(files: ListFile[]): FileBrief | null {
 type ListRow = { paired: boolean; groupId: string | null; files: ListFile[] }
 
 /**
+ * A sample's identity: a pair by its groupId, else its analysisId; a
+ * single-end file (or a pair carrying neither) by its fileIds.
+ */
+function sampleKey(row: ListRow) {
+  const analysisId = row.files.find((file) => file.analysisId)?.analysisId
+  if (row.paired && row.groupId) return `group:${row.groupId}`
+  if (row.paired && analysisId) return `analysis:${analysisId}`
+  return `files:${row.files.map((file) => file.fileId).sort().join('\n')}`
+}
+
+/**
  * merge/list can return the same pair twice (R1/R2 and R2/R1), often with
- * the analysis on only one of them. Rows with the same files collapse into
+ * the analysis on only one of them. Rows of the same sample collapse into
  * one, keeping a row that has a readable brief; pair files are ordered by name.
  */
 export function mergeDuplicateRows(rows: ListRow[]): ListRow[] {
   const merged = new Map<string, ListRow>()
   for (const row of rows) {
-    const key = row.files.map((file) => file.fileId).sort().join('\n')
+    const key = sampleKey(row)
     const kept = merged.get(key)
     if (!kept || (!briefFor(kept.files) && briefFor(row.files))) merged.set(key, row)
   }
