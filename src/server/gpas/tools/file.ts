@@ -255,7 +255,7 @@ export const fileListTool = defineGpasTool({
   toModel: (data) => ({
     total: data.total,
     missingFileNames: data.missingFileNames,
-    note: '结果已以卡片展示在回复下方，只需简短解读，不要逐条罗列。brief 为分析摘要：top 是该类别内相对丰度前 topN 的物种，'
+    note: '结果已展示在回复下方（单个样本为卡片，多个样本为表格），只需简短解读，不要逐条罗列。brief 为分析摘要：top 是该类别内相对丰度前 topN 的物种，'
       + '该类别共检出 speciesCount 种，不是只检出这几种；abundance 为类别内相对丰度。'
       + 'sharePct 是该类别检出种数占全部检出种数的比例，要说“种数占比”，不是丰度或 reads 占比。'
       + 'taskId 只用于调用样本分析详情工具，不要展示给用户；称呼样本时用 sampleName。',

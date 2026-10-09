@@ -199,11 +199,11 @@ async function showCards(page: Page, cards: unknown[]) {
     ],
   } }))
   await page.goto(`/ai-chatbot/${chatId}`)
-  await expect(page.getByTestId('gpas-file-card').first()).toBeVisible()
+  await expect(page.getByTestId('gpas-file-cards').first()).toBeVisible()
 }
 
 test('analysis cards describe the brief as a per-category top-5 summary with species shares', async ({ page }) => {
-  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo)), card('s2', null)])
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo))])
   const first = page.getByTestId('gpas-file-card').first()
   await expect(first.getByTestId('gpas-brief-category')).toHaveCount(3)
   await expect(first).toContainText('细菌 · 检出 188 种 · 占比 95.4%')
@@ -215,7 +215,50 @@ test('analysis cards describe the brief as a per-category top-5 summary with spe
   await expect(first).toContainText('38.96M Reads')
   await expect(first).toContainText('26/01/06 20:54')
   await expect(page.getByText(/Count\/mL/)).toHaveCount(0)
-  await expect(page.getByTestId('gpas-file-card').nth(1)).toContainText('暂无分析摘要')
+})
+
+test('a single sample without a brief says so on its card', async ({ page }) => {
+  await showCards(page, [card('s2', null)])
+  await expect(page.getByTestId('gpas-file-card')).toContainText('暂无分析摘要')
+  await expect(page.getByTestId('gpas-file-table')).toHaveCount(0)
+})
+
+test('several samples are listed in one table with a composition bar per sample', async ({ page }) => {
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo), 'task-1'), card('s2', null)])
+  await expect(page.getByTestId('gpas-file-card')).toHaveCount(0)
+  const table = page.getByTestId('gpas-file-table')
+  await expect(table).toContainText('病原体分类分布 · 2 个样本')
+  await expect(table.getByRole('columnheader')).toHaveText(['样本', '物种组成', '检出种数', '最高风险', 'Reads', '操作'])
+  const rows = table.getByTestId('gpas-file-row')
+  await expect(rows).toHaveCount(2)
+  // Bacteria, viral, fungi in their fixed category order; 动物等 (0 species) has no segment.
+  const segments = rows.first().getByTestId('gpas-composition-segment')
+  await expect(segments).toHaveCount(3)
+  await expect(segments.first()).toHaveAttribute('title', '细菌 188 种 · 95.4%')
+  await expect(rows.first()).toContainText('197')
+  await expect(rows.first()).toContainText('3 级')
+  await expect(rows.first()).toContainText('38.96M')
+  await expect(rows.first().getByTestId('gpas-view-detail')).toBeVisible()
+  await expect(rows.nth(1)).toContainText('暂无分析摘要')
+  await expect(rows.nth(1).getByTestId('gpas-view-detail')).toHaveCount(0)
+  if (process.env.SHOTS) await table.screenshot({ path: `${process.env.SHOTS}/file-table.png` })
+
+  // The table's 查看详情 asks for the detail like the card does.
+  const sent: unknown[] = []
+  await page.route('**/ai-chatbot/api/conversations/*/messages', async (route) => {
+    sent.push(route.request().postDataJSON().detail)
+    await route.fulfill({ status: 500, json: {} })
+  })
+  await rows.first().getByTestId('gpas-view-detail').click()
+  await expect.poll(() => sent).toEqual([{ taskId: 'task-1' }])
+})
+
+test('the sample table fits a phone-width screen', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 })
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo), 'task-1'), card('s2', null)])
+  await expect(page.getByTestId('gpas-file-table')).toBeVisible()
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+  expect(overflow).toBeLessThanOrEqual(0)
 })
 
 test('more than five detected categories fold into one "其他" block', async ({ page }) => {

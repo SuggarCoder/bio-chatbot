@@ -1,5 +1,7 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js'
-import { categorySharePct, sampleKeys, sampleLabel, type FileBrief, type FileCard, type SampleKey } from '../../../server/gpasContracts'
+import { categorySharePct, sampleKeys, sampleLabel, sampleNameOf, type FileBrief, type FileCard, type SampleKey } from '../../../server/gpasContracts'
+import { hazardGradient } from './evidenceRadar'
+import { compositionSegments, type CompositionSegment } from './resultHelpers'
 import { layoutTreemap } from './treemap'
 
 /** Category blocks shown per card; more categories fold into "其他". */
@@ -211,20 +213,7 @@ function AnalysisCard(props: { card: FileCard } & DetailProps) {
           </Show>
         </p>
         </div>
-        <Show when={props.card.analysisId && props.onViewDetail}>
-          <button
-            type="button"
-            class="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-teal-700 ring-1 ring-teal-200 transition hover:bg-teal-50 hover:ring-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:cursor-not-allowed disabled:opacity-50"
-            // A loaded detail opens without a new request, even while a reply runs.
-            disabled={props.detailDisabled && !props.hasDetail?.(props.card.analysisId!)}
-            title={props.hasDetail?.(props.card.analysisId!) ? '打开已加载的分析详情' : props.detailDisabled ? '请等待当前回复完成' : undefined}
-            onClick={() => props.onViewDetail!(props.card.analysisId!)}
-            data-testid="gpas-view-detail"
-          >
-            查看详情
-            <span aria-hidden="true" class="i-lucide-chevron-right h-3.5 w-3.5" />
-          </button>
-        </Show>
+        <DetailButton card={props.card} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} hasDetail={props.hasDetail} />
       </header>
 
       <div class="px-3 py-3">
@@ -291,13 +280,169 @@ function AnalysisCard(props: { card: FileCard } & DetailProps) {
   )
 }
 
-/** Analysis summary cards returned by the file list tool, one per sample. */
+function DetailButton(props: { card: FileCard } & DetailProps) {
+  const loaded = () => props.hasDetail?.(props.card.analysisId!) ?? false
+  return (
+    <Show when={props.card.analysisId && props.onViewDetail}>
+      <button
+        type="button"
+        class="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-full bg-white px-2.5 py-1 text-xs font-medium text-teal-700 ring-1 ring-teal-200 transition hover:bg-teal-50 hover:ring-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={props.detailDisabled && !loaded()}
+        title={loaded() ? '打开已加载的分析详情' : props.detailDisabled ? '请等待当前回复完成' : undefined}
+        onClick={() => props.onViewDetail!(props.card.analysisId!)}
+        data-testid="gpas-view-detail"
+      >
+        查看详情
+        <span aria-hidden="true" class="i-lucide-chevron-right h-3.5 w-3.5" />
+      </button>
+    </Show>
+  )
+}
+
+/** One line of stacked segments: each category's share of detected species. */
+export function CompositionBar(props: { segments: CompositionSegment[] }) {
+  return (
+    <div class="flex h-2 w-full gap-[2px] overflow-hidden rounded-full bg-slate-100" role="img"
+      aria-label={props.segments.map((segment) => `${segment.name} ${segment.count} 种 ${formatPercent(segment.sharePct)}`).join('，')}
+      data-testid="gpas-composition-bar"
+    >
+      <For each={props.segments}>
+        {(segment) => (
+          <span
+            class="h-full min-w-[3px] first:rounded-l-full last:rounded-r-full"
+            style={{ 'flex-grow': String(Math.max(segment.sharePct, 0.01)), 'flex-basis': '0', 'background-color': segment.color }}
+            title={`${segment.name} ${segment.count} 种 · ${formatPercent(segment.sharePct)}`}
+            data-testid="gpas-composition-segment"
+          />
+        )}
+      </For>
+    </div>
+  )
+}
+
+function SampleRow(props: { card: FileCard } & DetailProps) {
+  const segments = () => compositionSegments(props.card.brief)
+  const species = () => segments().reduce((sum, segment) => sum + segment.count, 0)
+  const hazard = () => props.card.brief?.categories.reduce((max, category) => Math.max(max, category.maxHazard), 0) ?? 0
+  const tone = () => hazardGradient(hazard())
+  const labels = () => [...segments()].sort((a, b) => b.count - a.count).slice(0, 3)
+  const meta = () => [
+    props.card.paired ? '双端' : '单端',
+    sampleText(props.card.sampleType),
+    props.card.uploadTime ? formatTime(props.card.uploadTime) : null,
+  ].filter(Boolean).join(' · ')
+  return (
+    <tr class="border-t border-slate-100 align-middle transition-colors hover:bg-teal-50/30" data-testid="gpas-file-row">
+      <td class="py-2.5 pl-4 pr-2">
+        <p class="truncate text-[13px] font-semibold text-slate-800" title={props.card.files.map((file) => file.fileName).join('\n')}>
+          {sampleNameOf(props.card.files.map((file) => file.fileName))}
+        </p>
+        <p class="truncate text-[11px] text-slate-400">{meta()}</p>
+      </td>
+      <td class="px-2 py-2.5">
+        <Show
+          when={segments().length > 0}
+          fallback={<span class="text-xs text-slate-400">{props.card.analysisStatus ?? '未知'} · 暂无分析摘要</span>}
+        >
+          <CompositionBar segments={segments()} />
+          <p class="mt-1 flex min-w-0 flex-wrap gap-x-2 text-[11px] text-slate-500">
+            <For each={labels()}>
+              {(segment) => (
+                <span class="inline-flex items-center gap-1 whitespace-nowrap">
+                  <span class="h-1.5 w-1.5 rounded-full" style={{ 'background-color': segment.color }} aria-hidden="true" />
+                  {segment.name} {formatPercent(segment.sharePct)}
+                </span>
+              )}
+            </For>
+          </p>
+        </Show>
+      </td>
+      <td class="px-2 py-2.5 text-right text-xs font-semibold tabular-nums text-slate-700">{segments().length ? species().toLocaleString('zh-CN') : '—'}</td>
+      <td class="px-2 py-2.5 text-center">
+        <Show when={hazard() > 0} fallback={<span class="text-slate-300">—</span>}>
+          <span class="inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold text-white shadow-sm"
+            style={{ 'background-image': `linear-gradient(135deg, ${tone().from}, ${tone().to})` }}
+          >
+            {tone().label}
+          </span>
+        </Show>
+      </td>
+      <td class="whitespace-nowrap px-2 py-2.5 text-right text-xs tabular-nums text-slate-500">
+        {props.card.brief?.totalReads != null ? formatReads(props.card.brief.totalReads).replace(' Reads', '') : '—'}
+      </td>
+      <td class="py-2.5 pl-2 pr-4 text-right">
+        <DetailButton card={props.card} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} hasDetail={props.hasDetail} />
+      </td>
+    </tr>
+  )
+}
+
+/** Several samples: one compact row each, composition as a line bar. */
+function FileAnalysisTable(props: { cards: FileCard[] } & DetailProps) {
+  const legend = () => {
+    const seen = new Map<string, CompositionSegment>()
+    for (const card of props.cards) for (const segment of compositionSegments(card.brief)) if (!seen.has(segment.name)) seen.set(segment.name, segment)
+    return [...seen.values()]
+  }
+  return (
+    <article class="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200" data-testid="gpas-file-table">
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-1 bg-slate-50 px-4 py-3">
+        <div>
+          <h3 class="text-sm font-semibold text-teal-700">病原体分类分布 · {props.cards.length} 个样本</h3>
+          <p class="mt-0.5 text-[11px] text-slate-500">物种组成按各大类检出种数占比 · 风险为样本内最高危害等级</p>
+        </div>
+        <ul class="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-600" aria-label="大类图例">
+          <For each={legend()}>
+            {(segment) => (
+              <li class="inline-flex items-center gap-1">
+                <span class="h-2 w-2 rounded-full" style={{ 'background-color': segment.color }} aria-hidden="true" />
+                {segment.name}
+              </li>
+            )}
+          </For>
+        </ul>
+      </header>
+      <div class="gpas-scrollbar overflow-x-auto">
+        <table class="w-full min-w-[560px] table-fixed border-collapse text-left">
+          <colgroup>
+            <col class="w-[30%]" />
+            <col />
+            <col class="w-[64px]" />
+            <col class="w-[64px]" />
+            <col class="w-[64px]" />
+            <col class="w-[104px]" />
+          </colgroup>
+          <thead>
+            <tr class="text-[11px] font-semibold text-slate-400">
+              <th scope="col" class="py-2 pl-4 pr-2 font-semibold">样本</th>
+              <th scope="col" class="px-2 py-2 font-semibold">物种组成</th>
+              <th scope="col" class="px-2 py-2 text-right font-semibold">检出种数</th>
+              <th scope="col" class="px-2 py-2 text-center font-semibold">最高风险</th>
+              <th scope="col" class="px-2 py-2 text-right font-semibold">Reads</th>
+              <th scope="col" class="py-2 pl-2 pr-4"><span class="sr-only">操作</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <For each={props.cards}>
+              {(card) => <SampleRow card={card} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} hasDetail={props.hasDetail} />}
+            </For>
+          </tbody>
+        </table>
+      </div>
+    </article>
+  )
+}
+
+/** File list results: a card for a single sample, a table for several. */
 export function FileAnalysisCards(props: { cards: FileCard[] } & DetailProps) {
   return (
-    <div class="my-2 space-y-3" data-testid="gpas-file-cards">
-      <For each={props.cards}>
-        {(card) => <AnalysisCard card={card} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} hasDetail={props.hasDetail} />}
-      </For>
+    <div class="my-2" data-testid="gpas-file-cards">
+      <Show
+        when={props.cards.length > 1}
+        fallback={<For each={props.cards}>{(card) => <AnalysisCard card={card} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} hasDetail={props.hasDetail} />}</For>}
+      >
+        <FileAnalysisTable cards={props.cards} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} hasDetail={props.hasDetail} />
+      </Show>
     </div>
   )
 }
