@@ -403,3 +403,36 @@ test('the analysis detail panel fits a phone-width screen', async ({ page }) => 
     await page.screenshot({ path: `${process.env.SHOTS}/panel-mobile.png` })
   }
 })
+
+test('a typed sample-name request opens the detail panel when the reply lands, history does not', async ({ page }) => {
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo), 'task-1')])
+  await page.route('**/ai-chatbot/api/gpas/file/results**', (route) => route.fulfill({ json: {
+    taskId: 'task-1', speciesType: null, page: 1, pageSize: 20, total: 3, totalPage: 1,
+    rows: Array.from({ length: 3 }, (_, index) => resultRow(index, '', 1)),
+  } }))
+  await page.route('**/ai-chatbot/api/conversations/*/messages', async (route) => {
+    const body = route.request().postDataJSON()
+    const message = (id: string, role: string, content: string, extra: unknown[] = []) => ({
+      id, seq: 3, role, status: 'completed', content, parts: [{ type: 'text', order: 0, text: content }, ...extra],
+      createdAt: timestamp, vote: null, executionSteps: [],
+    })
+    expect(body.detail).toBeUndefined()
+    await route.fulfill({ status: 202, json: { id: 'ticket-2', status: 'succeeded', error: null, result: {
+      kind: 'business',
+      userMessage: message('e9345da6-998b-4462-a539-000000000005', 'user', body.content),
+      assistantMessage: message('e9345da6-998b-4462-a539-000000000006', 'assistant', 's1 共检出 3 条物种结果。',
+        [{ type: 'gpas', order: 1, result: { taskId: 'task-1', total: 3 } }]),
+    } } })
+  })
+  // History alone never opens the panel.
+  await expect(page.getByTestId('gpas-result-panel')).toHaveCount(0)
+
+  await composer(page).fill('查看样本 s1 分析结果')
+  await page.getByRole('button', { name: '发送' }).click()
+  const panel = page.getByTestId('gpas-result-panel')
+  await expect(panel.getByTestId('gpas-result-row')).toHaveCount(3)
+  // The sample name stands in for the analysis id.
+  await expect(page.getByRole('heading', { name: 's1 分析详情' })).toBeVisible()
+  await expect(page.getByTestId('gpas-result-entry')).toContainText('s1 分析详情')
+  await expect(page.getByTestId('gpas-result-entry')).not.toContainText('task-1')
+})

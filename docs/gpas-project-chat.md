@@ -138,6 +138,12 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 
 ### 样本分析详情（`file.result`）
 
+用户只知道样本名（如“查看样本 KY14599-1-T233R 分析结果”）时，助手按两步执行：先用 `file.list`（`fileName`=样本名）
+找到该样本的 `taskId`（文件行的 `analysisId`），再调用 `file.result`；不会让用户提供 ID。匹配到多个样本时列出样本名请用户选择。
+`file.list` 给模型的每个样本带 `sampleName`（`sampleNameOf`：去掉 `.clean.fastq.gz` 等后缀和 R1/R2 端标记）与 `taskId`，
+taskId 只用于调用详情工具，回复、入口卡片和面板标题都用样本名。本页打开期间产生的回复（按钮或手打请求）带详情时自动打开面板，
+历史消息不会自动打开。
+
 `file.result` 工具调用 `GET file/result/list`（`taskId`、可选 `speciesType`、`page`、`pageSize`，默认每页 20 条），
 与其它 GPAS 工具一致：服务端用会话 Cookie 请求上游，字段白名单后的当页数据交给模型（不含颜色、覆盖度图链接和内部 id），
 回复附带 `result` part（taskId、总数；agent 会把含 `result` 的 part 转发到回复中）。模型被要求只用 1–2 句概括，不复述 taskId、不逐条列举物种。`coverageUrl` 只保留 http(s) 链接，`color` 只保留 `#hex`/`rgb()`。
@@ -183,3 +189,4 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 16. `file/result/list` 是否按会话 Cookie 校验 taskId 属于当前团队（taskId 来自用户或模型输入）。
 17. result 行上是否都有 `taxId`、`hazardIndex`、`selfAlignRatio`、`onlyMatching`、`unifPvalue`、`abundance`、`ani95SpeciesNums`；
     `unifPvalue` 是否已是 −log10 值，`abundance` 是否为百分数，`coverage` 是比例还是百分比（当前 ≤1 视为比例）。
+18. `merge/list` 的 `fileName` 能否用样本名（文件名前缀，如 `KY14599-1-T233R`）模糊匹配到该样本的文件。

@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { AuthenticationError } from '../../auth.js'
 import { textCell } from '../../gpas.js'
-import { categorySharePct, fileBriefSchema, sampleKeys, sampleLabel, type FileBrief, type FileCard, type SampleKey } from '../../gpasContracts.js'
+import { categorySharePct, fileBriefSchema, sampleKeys, sampleNameOf, sampleLabel, type FileBrief, type FileCard, type SampleKey } from '../../gpasContracts.js'
 import { defineGpasTool } from '../defineTool.js'
 
 const text = z.string().nullish().transform((value) => value ?? null)
@@ -199,7 +199,7 @@ export function fileListReply(data: UploadedFileList): string {
 
 export const fileListTool = defineGpasTool({
   id: 'file.list', domain: 'file', title: '上传文件列表', effect: 'read',
-  description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态。传入 fileNames 时按文件名查询并只返回这些文件（用于展示刚上传的一批文件的分析结果）。',
+  description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态。传入 fileNames 时按文件名查询并只返回这些文件（用于展示刚上传的一批文件的分析结果）；fileName 可传样本名，用于按样本名查找样本的 taskId（分析 ID）。',
   examples: ['我上传的文件', '刚才上传的测序数据状态', '查一下质检结果', '我的文件列表', '上传的文件分析完了吗'],
   policy: '可以查询当前团队上传文件的列表、状态与分析摘要（各类别丰度前 5 的物种及其它、各类别检出种数占比），结果以卡片展示；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。',
   input: z.object({
@@ -257,8 +257,10 @@ export const fileListTool = defineGpasTool({
     missingFileNames: data.missingFileNames,
     note: '结果已以卡片展示在回复下方，只需简短解读，不要逐条罗列。brief 为分析摘要：top 是该类别内相对丰度前 topN 的物种，'
       + '该类别共检出 speciesCount 种，不是只检出这几种；abundance 为类别内相对丰度。'
-      + 'sharePct 是该类别检出种数占全部检出种数的比例，要说“种数占比”，不是丰度或 reads 占比。',
+      + 'sharePct 是该类别检出种数占全部检出种数的比例，要说“种数占比”，不是丰度或 reads 占比。'
+      + 'taskId 只用于调用样本分析详情工具，不要展示给用户；称呼样本时用 sampleName。',
     samples: data.cards.map((card, index) => ({
+      sampleName: sampleNameOf(card.files.map((file) => file.fileName)),
       files: data.rows[index].files.map((file) => ({ fileId: file.fileId, fileName: file.fileName, qcStatus: file.qcStatus })),
       taskId: card.analysisId,
       paired: card.paired,

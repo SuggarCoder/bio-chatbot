@@ -158,6 +158,8 @@ test('file list tool forwards its analysis cards to the user', async (t) => {
   assert.equal(result.part?.files?.[0].files[0].fileId, 'f-1')
   assert.deepEqual(result.part?.files?.[0].brief?.categories, [])
   assert.match(set.instructions(), /丰度前 N/)
+  // Sample-name requests resolve the task id through the file list first.
+  assert.match(set.instructions(), /先调用上传文件列表工具（fileName=样本名）找到该样本的 taskId，再调用样本分析详情工具/)
 })
 
 test('analysis detail tool forwards its result entry to the user', async (t) => {

@@ -1,4 +1,4 @@
-import type { FileCard } from '../../../server/gpasContracts'
+import { sampleNameOf, type FileCard } from '../../../server/gpasContracts'
 
 /** Coverage as a 0–100 bar width, or null when the value is not numeric. */
 export function coveragePct(value: string): number | null {
@@ -6,6 +6,12 @@ export function coveragePct(value: string): number | null {
   if (!Number.isFinite(parsed)) return null
   const pct = value.includes('%') || parsed > 1 ? parsed : parsed * 100
   return Math.min(100, Math.max(0, pct))
+}
+
+/** The sample name of the card whose analysisId is `taskId`, or null. */
+export function resultSampleName(cards: readonly FileCard[], taskId: string) {
+  const card = cards.find((item) => item.analysisId === taskId)
+  return card ? sampleNameOf(card.files.map((file) => file.fileName)) : null
 }
 
 /** The briefAnalysis of the card whose analysisId is `taskId`. */

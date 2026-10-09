@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import type { FileCard } from '../../../server/gpasContracts'
-import { coveragePct, resultBrief, resultCategories } from './resultHelpers'
+import { coveragePct, resultBrief, resultCategories, resultSampleName } from './resultHelpers'
 
 test('coverage reads percentages, fractions and plain numbers', () => {
   assert.equal(coveragePct('12.5%'), 12.5)
@@ -30,4 +30,6 @@ test('detail tabs are the detected categories of the matching card', () => {
   assert.deepEqual(resultCategories(cards, 'missing'), [])
   assert.equal(resultBrief(cards, 'task-1'), cards[1].brief)
   assert.equal(resultBrief(cards, 'missing'), null)
+  assert.equal(resultSampleName(cards, 'task-1'), 'f')
+  assert.equal(resultSampleName(cards, 'missing'), null)
 })

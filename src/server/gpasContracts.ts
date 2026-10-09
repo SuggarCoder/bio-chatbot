@@ -69,6 +69,29 @@ export function categorySharePct(speciesCount: number, categories: readonly { sp
 }
 export type FileCard = z.infer<typeof fileCardSchema>
 
+const END_SUFFIX = /([._-]R?[12])$/i
+const FILE_SUFFIXES = /(\.(clean|fastq|fq|gz|bz2|zip))+$/i
+/**
+ * The sample name users see, from its file names: sequencing suffixes and the
+ * R1/R2 end marker are dropped, e.g. KY14599-1-T233R_R1.clean.fastq.gz → KY14599-1-T233R.
+ */
+export function sampleNameOf(fileNames: readonly string[]): string {
+  const names = fileNames.map((name) => {
+    const stem = name.replace(FILE_SUFFIXES, '')
+    return fileNames.length > 1 ? stem.replace(END_SUFFIX, '') : stem.replace(/([._-]R[12])$/i, '')
+  }).filter(Boolean)
+  if (!names.length) return fileNames[0] ?? ''
+  // A pair whose stems differ keeps their common prefix.
+  let common = names[0]
+  for (const name of names.slice(1)) {
+    let index = 0
+    while (index < common.length && common[index] === name[index]) index += 1
+    common = common.slice(0, index)
+  }
+  common = common.replace(/[._-]+$/, '')
+  return common || fileNames[0]
+}
+
 /** Analysis task id accepted by file/result/list (the file list's analysisId). */
 export const taskIdSchema = z.string().trim().min(1).max(128).regex(/^[\w.:-]+$/)
 export const FILE_RESULT_PAGE_SIZE = 20

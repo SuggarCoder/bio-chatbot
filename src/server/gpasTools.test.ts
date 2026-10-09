@@ -11,7 +11,7 @@ import { GpasClient } from './gpas/client.js'
 import { defineGpasTool, identityFieldPattern } from './gpas/defineTool.js'
 import { createGpasTools } from './gpas/tools/index.js'
 import { mergeDuplicateRows, parseBrief } from './gpas/tools/file.js'
-import { gpasPartSchema } from './gpasContracts.js'
+import { gpasPartSchema, sampleNameOf } from './gpasContracts.js'
 
 const config = { gpas2AuthMode: 'upstream', gpas2UserInfoUrl: 'https://gpas.example.invalid:8058/api/gpas2/v1/user/info' } as AppConfig
 const profile = { userId: 'user-test', ownteamId: 'team-test', realName: '演示用户', ownteamName: '演示团队' } as Gpas2UserInfo
@@ -150,8 +150,10 @@ test('file list tool looks up the uploaded batch by file name', async (t) => {
   assert.deepEqual(data.rows[0].files.map((file) => file.fileId), ['f-1', 'f-2'])
   assert.equal(data.cards[0].analysisId, 'task-1')
   assert.deepEqual(data.missingFileNames, ['f-9.fq.gz'])
-  const model = tool.toModel(data) as { samples: Array<{ taskId: string | null }> }
+  const model = tool.toModel(data) as { note: string; samples: Array<{ taskId: string | null; sampleName: string }> }
   assert.equal(model.samples[0].taskId, 'task-1')
+  assert.equal(model.samples[0].sampleName, 'f')
+  assert.match(model.note, /不要展示给用户/)
   // Only allowlisted fields reach the model.
   assert.doesNotMatch(JSON.stringify(model), /private-hash|someone|session=mine/)
 
@@ -338,4 +340,24 @@ test('file result tool pages one task through the session and keeps safe fields 
   for (const bad of [{}, { taskId: '../x' }, { taskId: 't', pageSize: 51 }, { taskId: 't', speciesType: 'a b' }]) {
     assert.equal(tool.input.safeParse(bad).success, false, JSON.stringify(bad))
   }
+})
+
+test('sample names drop sequencing suffixes and the R1/R2 end marker', () => {
+  assert.equal(sampleNameOf(['KY14599-1-T233R_R1.clean.fastq.gz', 'KY14599-1-T233R_R2.clean.fastq.gz']), 'KY14599-1-T233R')
+  assert.equal(sampleNameOf(['a.fq.gz']), 'a')
+  assert.equal(sampleNameOf(['S1_R1.fq']), 'S1')
+  assert.equal(sampleNameOf(['x.R1.fastq', 'x.R2.fastq']), 'x')
+  assert.equal(sampleNameOf(['T1_1.fq.gz', 'T1_2.fq.gz']), 'T1')
+  assert.equal(sampleNameOf(['sample-12.fastq.gz']), 'sample-12')
+  // Unrelated names fall back to the first file name.
+  assert.equal(sampleNameOf(['abc', 'xyz']), 'abc')
+})
+
+test('the detail tool is described for sample-name requests, resolved through the file list', () => {
+  const tools = createGpasTools(new GpasService(config))
+  const result = tools.find((item) => item.id === 'file.result')!
+  const list = tools.find((item) => item.id === 'file.list')!
+  assert.match(result.description, /先用上传文件列表工具按样本名查到 taskId/)
+  assert.ok(result.examples.some((example) => /KY14599-1-T233R/.test(example)))
+  assert.match(list.description, /按样本名查找样本的 taskId/)
 })

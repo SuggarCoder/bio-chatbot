@@ -43,7 +43,9 @@ export const ArtifactSidePanel: Component = () => {
     : undefined)
   const type = () => artifact()?.type
   const gpasResult = () => state.activeGpasResult
-  const title = () => gpasResult() ? `样本 ${gpasResult()!.taskId} 分析详情` : artifact()?.title ?? 'Artifact'
+  const title = () => gpasResult()
+    ? gpasResult()!.sampleName ? `${gpasResult()!.sampleName} 分析详情` : '样本分析详情'
+    : artifact()?.title ?? 'Artifact'
   const version = () => state.activeVersion ?? artifact()?.currentVersion ?? 1
   const renderer = createMemo(() => {
     const current = type()

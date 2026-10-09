@@ -16,6 +16,8 @@ export type GpasResultSelection = {
   categories: Array<{ type: string; name: string }>
   /** The sample's briefAnalysis, for the statistics header. */
   brief: FileBrief | null
+  /** Shown instead of the analysis id, which users never see. */
+  sampleName: string | null
 }
 
 type ArtifactStoreState = {

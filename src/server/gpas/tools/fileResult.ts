@@ -1,6 +1,5 @@
 import { z } from 'zod'
 
-import { textCell } from '../../gpas.js'
 import {
   FILE_RESULT_PAGE_SIZE,
   fileResultPageSchema,
@@ -92,14 +91,14 @@ function toRow(row: z.infer<typeof rawRowSchema>): FileResultRow {
 }
 
 export function fileResultReply(data: FileResultPage): string {
-  if (data.total === 0) return `样本 ${textCell(data.taskId)} 暂无分析详情。`
-  return `样本 ${textCell(data.taskId)} 共检出 ${data.total} 条物种结果，完整列表可在右侧面板按类别和分页查看。`
+  if (data.total === 0) return '该样本暂无分析详情。'
+  return `该样本共检出 ${data.total} 条物种结果，完整列表可在右侧面板按类别和分页查看。`
 }
 
 export const fileResultTool = defineGpasTool({
   id: 'file.result', domain: 'file', title: '样本分析详情', effect: 'read',
-  description: '按样本的 taskId（上传文件列表中的 taskId / analysisId）查询该样本的物种分析详情，可按大类 speciesType 筛选并分页。',
-  examples: ['查看样本:123456分析详情', '这个样本的分析详情', '样本检出了哪些物种', '看一下这个样本的细菌明细', '分析详情下一页'],
+  description: '查询某个样本的物种分析详情，可按大类 speciesType 筛选并分页。需要 taskId（上传文件列表中样本的 taskId）；用户只给样本名时，先用上传文件列表工具按样本名查到 taskId。',
+  examples: ['查看样本 KY14599-1-T233R 分析结果', 'KY14599 的检测结果', '这个样本检出了哪些病原体', '这个样本的分析详情', '看一下这个样本的细菌明细', '分析详情下一页'],
   policy: '可以查询当前团队样本的物种分析详情（物种名称、生物学编号、类别、覆盖度、定植特性、风险等级与可信度证据），完整列表在右侧面板按类别分页展示；不能修改或重新分析样本。',
   input: fileResultQuerySchema,
   run: async ({ cookie, client }, args): Promise<FileResultPage> => {

@@ -58,7 +58,7 @@ import { FASTQ_ACCEPT } from '../../features/gpasUpload/fastqPairing'
 import { createGpasUploadController, uploadFallbackContent } from '../../features/gpasUpload/uploadController'
 import { UploadedFilesSummary, UploadTray } from '../../features/gpasUpload/UploadTray'
 import { FileAnalysisCards, GpasResultEntry } from '../../features/gpasUpload/FileAnalysisCards'
-import { resultBrief, resultCategories } from '../../features/gpasUpload/resultHelpers'
+import { resultBrief, resultCategories, resultSampleName } from '../../features/gpasUpload/resultHelpers'
 import { FILE_RESULT_REQUEST_TEXT } from '../../../server/gpasContracts'
 import type { GpasDetailRequest, GpasUploadBatch } from '../../features/chatbot/chatApi'
 import { InputDialog } from '../../shared/ui/InputDialog'
@@ -1588,6 +1588,7 @@ function ChatMessageBubble(props: {
   onViewDetail: (taskId: string) => void
   onOpenResult: (taskId: string) => void
   hasDetail: (taskId: string) => boolean
+  sampleNameFor: (taskId: string) => string | null
 }) {
   const isUser = () => props.message.role === 'user'
   const [visualComplete, setVisualComplete] = createSignal(
@@ -1662,7 +1663,7 @@ function ChatMessageBubble(props: {
             <Show
               when={liveGenerationId()}
               keyed
-              fallback={<StaticMessageParts message={props.message} disabled={props.generationActive} onProjectSubmit={props.onProjectSubmit} onViewDetail={props.onViewDetail} onOpenResult={props.onOpenResult} hasDetail={props.hasDetail} />}
+              fallback={<StaticMessageParts message={props.message} disabled={props.generationActive} onProjectSubmit={props.onProjectSubmit} onViewDetail={props.onViewDetail} onOpenResult={props.onOpenResult} hasDetail={props.hasDetail} sampleNameFor={props.sampleNameFor} />}
             >
               {(generationId) => (
                 <Show
@@ -1708,6 +1709,7 @@ function StaticMessageParts(props: {
   onViewDetail: (taskId: string) => void
   onOpenResult: (taskId: string) => void
   hasDetail: (taskId: string) => boolean
+  sampleNameFor: (taskId: string) => string | null
 }) {
   const parts = () => props.message.parts.length > 0
     ? props.message.parts
@@ -1730,7 +1732,7 @@ function StaticMessageParts(props: {
               <>
                 <Show when={part.form}>{(form) => <ProjectInitForm form={form()} messageId={props.message.id} disabled={props.disabled} onSubmit={props.onProjectSubmit} />}</Show>
                 <Show when={part.files}>{(files) => <Show when={files().length > 0}><FileAnalysisCards cards={files()} onViewDetail={props.onViewDetail} detailDisabled={props.disabled} hasDetail={props.hasDetail} /></Show>}</Show>
-                <Show when={part.result}>{(result) => <GpasResultEntry taskId={result().taskId} total={result().total} onOpen={props.onOpenResult} />}</Show>
+                <Show when={part.result}>{(result) => <GpasResultEntry taskId={result().taskId} total={result().total} sampleName={props.sampleNameFor(result().taskId)} onOpen={props.onOpenResult} />}</Show>
               </>
             )
           : part.type === 'gpas_upload'
@@ -2372,12 +2374,16 @@ function SessionConversationView(props: { conversationId: string }) {
   })
 
   // Analysis detail: the card button asks for it as a chat message, and the
-  // reply's result part opens the side panel (automatically for that request).
+  // reply's result part opens the side panel.
   const [pendingDetailTaskId, setPendingDetailTaskId] = createSignal<string>()
+  const conversationCards = () => (conversation()?.messages ?? []).flatMap((message) =>
+    message.parts.flatMap((part) => part.type === 'gpas' ? part.files ?? [] : []))
+  const sampleNameFor = (taskId: string) => resultSampleName(conversationCards(), taskId)
   const openResult = (taskId: string) => {
-    const cards = (conversation()?.messages ?? []).flatMap((message) =>
-      message.parts.flatMap((part) => part.type === 'gpas' ? part.files ?? [] : []))
-    artifactStore.openGpasResult({ taskId, categories: resultCategories(cards, taskId), brief: resultBrief(cards, taskId) })
+    const cards = conversationCards()
+    artifactStore.openGpasResult({
+      taskId, categories: resultCategories(cards, taskId), brief: resultBrief(cards, taskId), sampleName: resultSampleName(cards, taskId),
+    })
   }
   const hasResult = (taskId: string) => (conversation()?.messages ?? []).some((message) =>
     message.role === 'assistant' && message.parts.some((part) => part.type === 'gpas' && part.result?.taskId === taskId))
@@ -2398,15 +2404,28 @@ function SessionConversationView(props: { conversationId: string }) {
     shouldStickToBottom = true
     void runAssistantReply(props.conversationId, question.content, question.clientMessageId, undefined, chatStore, undefined, undefined, detail)
   }
+  // Any reply produced while this page is open (the button, a typed
+  // "查看样本 X 分析结果", a retry) opens its analysis detail when it lands.
+  // Replies that were already there, or loaded from history, never do.
+  let repliesBeforeRun: Set<string> | undefined
   createEffect(() => {
-    const taskId = pendingDetailTaskId()
-    if (!taskId) return
-    const done = (conversation()?.messages ?? []).some((message) => message.role === 'assistant' &&
-      message.status === 'done' &&
-      message.parts.some((part) => part.type === 'gpas' && part.result?.taskId === taskId))
-    if (!done) return
-    setPendingDetailTaskId(undefined)
-    untrack(() => openResult(taskId))
+    const active = conversation()
+    const running = Boolean(active?.requestPending || active?.activeGeneration)
+    untrack(() => {
+      const messages = active?.messages ?? []
+      if (running) {
+        repliesBeforeRun ??= new Set(messages.filter((message) => message.role === 'assistant').map((message) => message.id))
+        return
+      }
+      const before = repliesBeforeRun
+      repliesBeforeRun = undefined
+      setPendingDetailTaskId(undefined)
+      if (!before) return
+      const reply = [...messages].reverse().find((message) => message.role === 'assistant')
+      if (!reply || reply.status !== 'done' || before.has(reply.id)) return
+      const result = [...reply.parts].reverse().find((part) => part.type === 'gpas' && part.result)
+      if (result?.type === 'gpas' && result.result) openResult(result.result.taskId)
+    })
   })
 
   const sendFollowUp = (uploads?: GpasUploadBatch) => {
@@ -2696,6 +2715,7 @@ function SessionConversationView(props: { conversationId: string }) {
                             onViewDetail={viewDetail}
                             onOpenResult={openResult}
                             hasDetail={hasResult}
+                            sampleNameFor={sampleNameFor}
                             onProjectSubmit={async (input) => {
                               if (activeConversation().requestPending || activeConversation().activeGeneration) throw new Error('请等待当前回复完成。')
                               const question = chatStore.appendUserMessage(props.conversationId, '确认初始化项目')
