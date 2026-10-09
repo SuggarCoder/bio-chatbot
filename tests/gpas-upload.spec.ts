@@ -338,6 +338,11 @@ test('"查看详情" asks for the analysis detail and the panel pages each categ
   await expect(panel.getByTestId('gpas-stat-species')).toContainText('197')
   await expect(panel.getByTestId('gpas-stat-legend')).toContainText('细菌')
   await expect(panel.getByTestId('gpas-stat-legend')).toContainText('95.4%')
+  // The donut stands alone (no ring around it); top species are plain list rows.
+  await expect(panel.getByTestId('gpas-stat-donut')).toBeVisible()
+  expect(await panel.getByTestId('gpas-stat-donut').evaluate((svg) => getComputedStyle(svg.parentElement!).backgroundImage)).toBe('none')
+  await expect(panel.getByTestId('gpas-stat-top').getByRole('listitem')).toHaveCount(3)
+  await expect(panel.getByTestId('gpas-stat-top').getByRole('listitem').first()).toContainText('不完全链格孢')
   // The species table.
   await expect(panel.getByRole('columnheader')).toHaveText(['序号', '生物学编号', '物种名称', '定植特性', '风险分级', '覆盖度', '可信度'])
   await expect(panel.getByTestId('gpas-result-index').first()).toHaveText('1')

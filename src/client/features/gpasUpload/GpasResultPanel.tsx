@@ -234,14 +234,29 @@ export function GpasResultPanel(props: { selection: GpasResultSelection }) {
           {/* Phones scroll the table sideways instead of crushing the name column. */}
           <div class={`rounded-2xl bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-100 ${narrow() ? 'gpas-scrollbar overflow-x-auto' : ''}`}>
             <table class={`w-full table-fixed border-collapse text-left ${narrow() ? 'min-w-[420px]' : ''}`} data-testid="gpas-result-table">
+              {/* Shares of the table width, so the name column no longer takes all the slack. */}
               <colgroup>
-                <col class="w-9" />
-                <Show when={!narrow()}><col class="w-[68px]" /></Show>
-                <col />
-                <col class="w-[64px]" />
-                <col class="w-[60px]" />
-                <col class="w-[74px]" />
-                <col class="w-[56px]" />
+                <Show
+                  when={!narrow()}
+                  fallback={
+                    <>
+                      <col class="w-[8%]" />
+                      <col class="w-[30%]" />
+                      <col class="w-[15%]" />
+                      <col class="w-[16%]" />
+                      <col class="w-[16%]" />
+                      <col class="w-[15%]" />
+                    </>
+                  }
+                >
+                  <col class="w-[6%]" />
+                  <col class="w-[13%]" />
+                  <col class="w-[25%]" />
+                  <col class="w-[14%]" />
+                  <col class="w-[15%]" />
+                  <col class="w-[14%]" />
+                  <col class="w-[13%]" />
+                </Show>
               </colgroup>
               <thead>
                 <tr class="border-b border-slate-100 text-[11px] font-semibold text-slate-400">

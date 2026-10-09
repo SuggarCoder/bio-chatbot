@@ -29,6 +29,8 @@ const rawRowSchema = z.object({
   colonizationE: cell,
   color: z.string().nullish(),
   barcodeId: cell,
+  // 生物学编号: GPAS sends `taxid`; `taxId` is accepted too.
+  taxid: cell,
   taxId: cell,
   hazardIndex: numeric,
   selfAlignRatio: numeric,
@@ -79,7 +81,7 @@ function toRow(row: z.infer<typeof rawRowSchema>): FileResultRow {
     colonizationE: row.colonizationE,
     color: colorPattern.test(color) ? color : null,
     barcodeId: row.barcodeId,
-    taxId: row.taxId,
+    taxId: row.taxid || row.taxId,
     hazardIndex: row.hazardIndex === null ? null : Math.min(9, Math.max(0, Math.round(row.hazardIndex))),
     coverageValue: coverageFraction(row.coverage),
     selfAlignRatio: row.selfAlignRatio,

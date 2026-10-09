@@ -3,9 +3,6 @@ import { categorySharePct, type FileBrief } from '../../../server/gpasContracts'
 import { hazardGradient } from './evidenceRadar'
 import { formatPercent, formatReads, formatVolume, toneFor } from './FileAnalysisCards'
 
-/** Story-ring style outline in the app's teal theme. */
-const RING = 'linear-gradient(135deg, #2c7378, #6a9ea2 55%, #b9ced2)'
-
 export function briefStats(brief: FileBrief) {
   const detected = brief.categories.filter((category) => category.speciesCount > 0)
   const totalSpecies = detected.reduce((sum, category) => sum + category.speciesCount, 0)
@@ -38,16 +35,12 @@ function Donut(props: { slices: ReturnType<typeof briefStats>['slices'] }) {
     })
   }
   return (
-    <span class="grid h-[84px] w-[84px] shrink-0 place-items-center rounded-full p-[3px]" style={{ 'background-image': RING }}>
-      <span class="grid h-full w-full place-items-center rounded-full bg-white">
-        <svg viewBox="0 0 80 80" class="h-[70px] w-[70px] -rotate-90" aria-hidden="true">
-          <circle cx="40" cy="40" r={R} fill="none" stroke="#eef2f3" stroke-width="11" />
-          <For each={arcs()}>
-            {(arc) => <circle cx="40" cy="40" r={R} fill="none" stroke={arc.color} stroke-width="11" stroke-dasharray={arc.dash} stroke-dashoffset={arc.offset} stroke-linecap="butt" />}
-          </For>
-        </svg>
-      </span>
-    </span>
+    <svg viewBox="0 0 80 80" class="h-[76px] w-[76px] shrink-0 -rotate-90" aria-hidden="true" data-testid="gpas-stat-donut">
+      <circle cx="40" cy="40" r={R} fill="none" stroke="#eef2f3" stroke-width="11" />
+      <For each={arcs()}>
+        {(arc) => <circle cx="40" cy="40" r={R} fill="none" stroke={arc.color} stroke-width="11" stroke-dasharray={arc.dash} stroke-dashoffset={arc.offset} stroke-linecap="butt" />}
+      </For>
+    </svg>
   )
 }
 
@@ -113,21 +106,23 @@ export function BriefStats(props: { brief: FileBrief }) {
         <Show when={stats().topSpecies.length > 0}>
           <div class="min-w-0 flex-[1_1_200px] rounded-2xl bg-white p-3 ring-1 ring-slate-100">
             <p class="mb-2 text-[11px] font-medium text-slate-400">丰度 Top 物种 · 类别内相对丰度</p>
-            <ul class="flex gap-3">
+            <ol class="space-y-2" data-testid="gpas-stat-top">
               <For each={stats().topSpecies}>
-                {(item) => (
-                  <li class="flex min-w-0 flex-1 flex-col items-center text-center" title={`${item.cnName}${item.enName ? `（${item.enName}）` : ''}`}>
-                    <span class="grid h-12 w-12 place-items-center rounded-full p-[2.5px]" style={{ 'background-image': RING }}>
-                      <span class="grid h-full w-full place-items-center rounded-full border-2 border-white bg-teal-50 text-sm font-bold text-teal-700">
-                        {Array.from(item.cnName)[0] ?? '?'}
-                      </span>
+                {(item, index) => (
+                  <li class="min-w-0 text-xs" title={`${item.cnName}${item.enName ? `（${item.enName}）` : ''}`}>
+                    <div class="flex items-baseline gap-2">
+                      <span class="w-3 shrink-0 text-[11px] font-semibold tabular-nums text-teal-700">{index() + 1}</span>
+                      <span class="min-w-0 flex-1 truncate font-semibold text-slate-700">{item.cnName}</span>
+                      <span class="shrink-0 text-[11px] text-slate-400">{item.category}</span>
+                      <span class="w-11 shrink-0 text-right font-semibold tabular-nums text-slate-700">{formatPercent(item.abundancePct)}</span>
+                    </div>
+                    <span class="ml-5 mt-1 block h-1 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                      <span class="block h-full rounded-full bg-teal-600/80" style={{ width: `${Math.min(100, item.abundancePct)}%` }} />
                     </span>
-                    <span class="mt-1 w-full truncate text-[11px] font-medium text-slate-700">{item.cnName}</span>
-                    <span class="text-[10px] tabular-nums text-slate-400">{item.category} · {formatPercent(item.abundancePct)}</span>
                   </li>
                 )}
               </For>
-            </ul>
+            </ol>
           </div>
         </Show>
       </div>

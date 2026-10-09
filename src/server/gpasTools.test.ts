@@ -292,10 +292,10 @@ test('file result tool pages one task through the session and keeps safe fields 
       dataList: [
         { id: 'r1', taskId: 'task-1', speciesType: 'bacteria', taxCname: '空肠普雷沃菌', taxEname: 'Prevotella jejuni', coverage: '12.5%',
           coverageUrl: 'https://gpas.example/cov/1.png', colonization: '定植', colonizationE: 'colonized', color: '#2c7378', barcodeId: 'B01',
-          taxId: 1177574, hazardIndex: '3', selfAlignRatio: 1, onlyMatching: '10', unifPvalue: 12.94, abundance: '0.005%', ani95SpeciesNums: 0,
+          taxid: 1177574, hazardIndex: '3', selfAlignRatio: 1, onlyMatching: '10', unifPvalue: 12.94, abundance: '0.005%', ani95SpeciesNums: 0,
           createTime: '2026-01-01', updateTime: '2026-01-02', secret: 'x' },
         { id: 2, speciesType: 'bacteria', taxCname: '', taxEname: 'Unnamed', coverage: 3, coverageUrl: 'javascript:alert(1)',
-          colonization: null, colonizationE: null, color: 'red;background:url(x)', barcodeId: null },
+          colonization: null, colonizationE: null, color: 'red;background:url(x)', barcodeId: null, taxId: '9606' },
       ],
     } })
   })
@@ -319,6 +319,8 @@ test('file result tool pages one task through the session and keeps safe fields 
   assert.equal(data.rows[1].coverageUrl, null)
   assert.equal(data.rows[1].color, null)
   assert.equal(data.rows[1].taxCname, 'Unnamed')
+  // 生物学编号 comes from `taxid`; a `taxId` field is read as a fallback.
+  assert.equal(data.rows[1].taxId, '9606')
   // Missing evidence stays null rather than becoming zero.
   assert.equal(data.rows[1].hazardIndex, null)
   assert.equal(data.rows[1].selfAlignRatio, null)
