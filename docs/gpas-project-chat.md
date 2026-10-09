@@ -131,6 +131,10 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 - 卡片 header 右侧的「查看详情」（卡片有 `analysisId` 时显示）发送消息“通过分析ID查看样本详情”，
   分析 ID 放在请求体 `detail.taskId`（与 `uploads` 相同的做法）：用户气泡只显示这句文字，ID 只出现在
   `renderDetailContext` 追加给模型的上下文和 `gpas_detail` part 中。带 `detail` 的消息总会向助手提供 `file.result` 工具（`withDetailTool`）。
+  上传与详情消息的隐藏上下文存在消息的 `content` 中：界面展示走 `mapMessage`（只取用户文字），
+  模型上下文走 `contextContent`（`rebuildChatContext` 与生成起始消息都使用它），两者不能混用。
+- 同一样本在当前会话里已经有详情回复时，再点「查看详情」直接打开面板，不再发消息、调用模型或请求 GPAS。
+  面板按样本保留已加载的页面、当前 tab 和页码（最近 10 个样本），关闭后重新打开不会重新请求。
 
 ### 样本分析详情（`file.result`）
 

@@ -344,11 +344,22 @@ test('"查看详情" asks for the analysis detail and the panel pages each categ
     { taskId: 'task-1', speciesType: 'viral', page: '1', pageSize: '20' },
   ])
 
-  // The entry card reopens the panel after it is closed.
+  // The entry card reopens the panel on the same tab and page, from the cache.
+  const requestsBefore = queries.length
   await page.getByRole('button', { name: 'Close Artifact panel' }).click()
   await expect(panel).toHaveCount(0)
   await page.getByTestId('gpas-result-entry').click()
-  await expect(page.getByTestId('gpas-result-panel')).toBeVisible()
+  await expect(panel.getByTestId('gpas-result-page')).toHaveText('2 / 3')
+  await expect(panel.getByRole('tab', { name: /全部/ })).toHaveAttribute('aria-selected', 'true')
+
+  // Clicking 查看详情 again on the same card opens the loaded detail: no new message.
+  await page.getByRole('button', { name: 'Close Artifact panel' }).click()
+  await expect(panel).toHaveCount(0)
+  await expect(page.getByTestId('gpas-view-detail')).toHaveAttribute('title', '打开已加载的分析详情')
+  await page.getByTestId('gpas-view-detail').click()
+  await expect(panel.getByTestId('gpas-result-page')).toHaveText('2 / 3')
+  expect(sent).toHaveLength(1)
+  expect(queries).toHaveLength(requestsBefore)
 })
 
 test('cards without an analysis id have no detail button', async ({ page }) => {

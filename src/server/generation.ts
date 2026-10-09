@@ -864,7 +864,7 @@ export class GenerationService {
         context = appendContextMessage(
           context,
           revision,
-          start.userMessage,
+          { ...start.userMessage, content: start.userContextContent ?? start.userMessage.content },
         )
         const advanced = await advanceCachedChatContext(
           this.redis,

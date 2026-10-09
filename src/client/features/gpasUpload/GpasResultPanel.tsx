@@ -115,18 +115,44 @@ function ResultRow(props: { row: FileResultRow; index: number; narrow: boolean; 
   )
 }
 
+type PanelSession = {
+  tab: string
+  pages: Record<string, number>
+  cache: Record<string, FileResultPage>
+  meta: Record<string, { total: number; totalPage: number }>
+}
+/** Samples whose loaded pages survive closing and reopening the panel. */
+const MAX_SESSIONS = 10
+const sessions = new Map<string, PanelSession>()
+
+/** The kept state of one sample's panel; least recently opened samples are dropped. */
+export function panelSession(taskId: string): PanelSession {
+  const kept = sessions.get(taskId) ?? { tab: ALL, pages: {}, cache: {}, meta: {} }
+  sessions.delete(taskId)
+  sessions.set(taskId, kept)
+  while (sessions.size > MAX_SESSIONS) sessions.delete(sessions.keys().next().value!)
+  return kept
+}
+
 /**
  * A sample's analysis detail: one tab per detected category plus "全部".
- * Each tab and page is requested only when shown, and cached afterwards.
+ * Each tab and page is requested only when shown, and cached for the session,
+ * so reopening the same sample shows its last tab and page without a request.
  */
 export function GpasResultPanel(props: { selection: GpasResultSelection }) {
+  const session = panelSession(props.selection.taskId)
   const tabs = createMemo(() => [{ type: ALL, name: '全部' }, ...props.selection.categories])
   const categoryName = (type: string) => props.selection.categories.find((item) => item.type === type)?.name ?? type
-  const [tab, setTab] = createSignal(ALL)
-  const [pages, setPages] = createStore<Record<string, number>>({})
-  const [cache, setCache] = createStore<Record<string, FileResultPage>>({})
+  const [tab, selectTab] = createSignal(session.tab)
+  const setTab = (next: string) => {
+    session.tab = next
+    selectTab(next)
+  }
+  // Stores write through to the kept session objects.
+  const [pages, setPages] = createStore(session.pages)
+  const [cache, setCache] = createStore(session.cache)
   // Latest totals per tab: tab badges and the pager while a page loads.
-  const [meta, setMeta] = createStore<Record<string, { total: number; totalPage: number }>>({})
+  const [meta, setMeta] = createStore(session.meta)
   const [loading, setLoading] = createSignal(false)
   const [error, setError] = createSignal('')
   const [retry, setRetry] = createSignal(0)

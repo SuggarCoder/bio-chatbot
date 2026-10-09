@@ -185,7 +185,7 @@ function FoldedBlock(props: { categories: Category[]; share: (category: Category
   )
 }
 
-type DetailProps = { onViewDetail?: (taskId: string) => void; detailDisabled?: boolean }
+type DetailProps = { onViewDetail?: (taskId: string) => void; detailDisabled?: boolean; hasDetail?: (taskId: string) => boolean }
 
 function AnalysisCard(props: { card: FileCard } & DetailProps) {
   const size = () => {
@@ -215,8 +215,9 @@ function AnalysisCard(props: { card: FileCard } & DetailProps) {
           <button
             type="button"
             class="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-teal-700 ring-1 ring-teal-200 transition hover:bg-teal-50 hover:ring-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={props.detailDisabled}
-            title={props.detailDisabled ? '请等待当前回复完成' : undefined}
+            // A loaded detail opens without a new request, even while a reply runs.
+            disabled={props.detailDisabled && !props.hasDetail?.(props.card.analysisId!)}
+            title={props.hasDetail?.(props.card.analysisId!) ? '打开已加载的分析详情' : props.detailDisabled ? '请等待当前回复完成' : undefined}
             onClick={() => props.onViewDetail!(props.card.analysisId!)}
             data-testid="gpas-view-detail"
           >
@@ -295,7 +296,7 @@ export function FileAnalysisCards(props: { cards: FileCard[] } & DetailProps) {
   return (
     <div class="my-2 space-y-3" data-testid="gpas-file-cards">
       <For each={props.cards}>
-        {(card) => <AnalysisCard card={card} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} />}
+        {(card) => <AnalysisCard card={card} onViewDetail={props.onViewDetail} detailDisabled={props.detailDisabled} hasDetail={props.hasDetail} />}
       </For>
     </div>
   )

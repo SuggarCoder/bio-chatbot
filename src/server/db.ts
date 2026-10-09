@@ -272,6 +272,23 @@ export async function deleteChat(
   return rows.length > 0
 }
 
+/**
+ * What the model reads for a message. Upload and detail requests keep context
+ * the user never sees (file names, analysis id) in the stored `content`;
+ * `mapMessage` shows only the typed text, so it must not build model context.
+ * Other messages read their text parts, as before.
+ */
+export function contextContent(row: Pick<MessageRow, 'content' | 'parts'>): string {
+  const parts = Array.isArray(row.parts) ? row.parts : []
+  const hidden = parts.some((part) => part?.type === 'gpas_upload' || part?.type === 'gpas_detail')
+  if (hidden && typeof row.content === 'string' && row.content.length > 0) return row.content
+  return parts
+    .filter((part): part is { type: 'text'; order?: number; text: string } => part?.type === 'text' && typeof (part as { text?: unknown }).text === 'string')
+    .sort((left, right) => (left.order ?? 0) - (right.order ?? 0))
+    .map((part) => part.text)
+    .join('')
+}
+
 export function mapMessage(
   row: MessageRow,
   visibleArtifactIds?: ReadonlySet<string>,
@@ -707,6 +724,8 @@ export type GenerationStart = {
   streamId: string
   assistantMessageId: string
   userMessage: ChatMessageDto
+  /** The user message as the model reads it (see `contextContent`). */
+  userContextContent?: string
   reused: boolean
   status: GenerationDto['status']
   replacesMessageId?: string
@@ -748,6 +767,7 @@ export async function findGenerationStart(
       seq: messages.seq,
       role: messages.role,
       status: messages.status,
+      content: messages.content,
       parts: messages.parts,
       createdAt: messages.createdAt,
       generationId: generations.id,
@@ -773,6 +793,7 @@ export async function findGenerationStart(
     streamId: row.streamId,
     assistantMessageId: row.assistantMessageId,
     userMessage: mapMessage(row),
+    userContextContent: contextContent(row),
     reused: true,
     status: row.generationStatus as GenerationDto['status'],
     replacesMessageId: typeof metadata.replacesMessageId === 'string'
@@ -938,6 +959,7 @@ export async function getGenerationStartById(
     streamId: row.streamId,
     assistantMessageId: row.assistantMessageId,
     userMessage: mapMessage(row),
+    userContextContent: contextContent(row),
     reused: false,
     status: row.generationStatus as GenerationDto['status'],
     replacesMessageId: typeof metadata.replacesMessageId === 'string'
@@ -1199,6 +1221,7 @@ ${renderDetailContext(input.detail)}`
         seq: messages.seq,
         role: messages.role,
         status: messages.status,
+        content: messages.content,
         parts: messages.parts,
         createdAt: messages.createdAt,
       })
@@ -1265,6 +1288,7 @@ ${renderDetailContext(input.detail)}`
       streamId: input.streamId,
       assistantMessageId,
       userMessage,
+      userContextContent: contextContent(messageRow),
       reused: false,
       status: 'created',
       contextMaxSeq: toSafeNumber(sequence.userSeq, 'Message.seq'),
@@ -1326,6 +1350,7 @@ export async function createRegenerationStart(
         seq: userMessage.seq,
         role: userMessage.role,
         status: userMessage.status,
+        content: userMessage.content,
         parts: userMessage.parts,
         createdAt: userMessage.createdAt,
         originalGenerationId: original.id,
@@ -1480,6 +1505,7 @@ export async function createRegenerationStart(
       streamId: input.streamId,
       assistantMessageId,
       userMessage: mapMessage(target),
+      userContextContent: contextContent(target),
       reused: false,
       status: 'created',
       replacesMessageId: input.replacesMessageId,
@@ -1561,6 +1587,7 @@ export async function rebuildChatContext(
       seq: messages.seq,
       role: messages.role,
       status: messages.status,
+      content: messages.content,
       parts: messages.parts,
       createdAt: messages.createdAt,
     })
@@ -1568,15 +1595,16 @@ export async function rebuildChatContext(
     .where(and(...conditions))
     .orderBy(desc(messages.seq))
     .limit(80)
-  const mappedMessages = rows.reverse().map((row) => mapMessage(row))
+  rows.reverse()
 
   return {
     chatId,
     revision: toSafeNumber(chat.contextRevision, 'Chat.contextRevision'),
-    lastSeq: mappedMessages.at(-1)?.seq ?? 0,
-    messages: mappedMessages.map((message) => ({
-      role: message.role,
-      content: message.content,
+    lastSeq: rows.length ? toSafeNumber(rows[rows.length - 1].seq, 'Message.seq') : 0,
+    // The model reads stored content (upload and detail context included).
+    messages: rows.map((row) => ({
+      role: row.role as 'user' | 'assistant',
+      content: contextContent(row),
     })),
   }
 }

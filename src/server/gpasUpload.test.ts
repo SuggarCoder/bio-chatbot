@@ -4,7 +4,7 @@ import test from 'node:test'
 import { buildApp, withDetailTool, withUploadTools } from './app.js'
 import type { RedisClient } from './cache.js'
 import type { AppConfig } from './config.js'
-import { mapMessage, type Database } from './db.js'
+import { contextContent, mapMessage, type Database } from './db.js'
 import type { GenerationService } from './generation.js'
 import { FILE_RESULT_REQUEST_TEXT, gpasUploadBatchSchema, renderDetailContext, renderUploadContext, type GpasUploadBatch } from './gpasContracts.js'
 import type { GenerationStreamHub } from './streamStore.js'
@@ -112,6 +112,28 @@ test('detail messages show the fixed text and keep the analysis id for the model
   })
   assert.equal(message.content, '通过分析ID查看样本详情')
   assert.deepEqual(message.parts.map(part => part.type), ['text', 'gpas_detail'])
+})
+
+test('the model reads the stored context of upload and detail messages, the user sees the typed text', () => {
+  const detailContent = `${FILE_RESULT_REQUEST_TEXT}\n\n${renderDetailContext({ taskId: 'task-9' })}`
+  const detailRow = {
+    content: detailContent,
+    parts: [{ type: 'text', order: 0, text: FILE_RESULT_REQUEST_TEXT }, { type: 'gpas_detail', order: 1, taskId: 'task-9' }],
+  } as Parameters<typeof contextContent>[0]
+  assert.equal(contextContent(detailRow), detailContent)
+  assert.match(contextContent(detailRow), /taskId=task-9/)
+
+  const batch = gpasUploadBatchSchema.parse({ sampleType: 'clinic', items: [item({ layout: 'single', role: undefined, pairKey: undefined })] })
+  const uploadRow = {
+    content: `请检查\n\n${renderUploadContext(batch)}`,
+    parts: [{ type: 'text', order: 0, text: '请检查' }, { type: 'gpas_upload', order: 1, batch }],
+  } as Parameters<typeof contextContent>[0]
+  assert.match(contextContent(uploadRow), /fileNames=\["sample_R1\.fq\.gz"\]/)
+
+  // Ordinary messages keep reading their text parts, whatever `content` holds.
+  const plainRow = { content: 'raw output with <artifact>…</artifact>', parts: [{ type: 'text', order: 0, text: '你好' }] } as Parameters<typeof contextContent>[0]
+  assert.equal(contextContent(plainRow), '你好')
+  assert.equal(contextContent({ content: null, parts: [] } as unknown as Parameters<typeof contextContent>[0]), '')
 })
 
 test('message route rejects a malformed analysis detail request before authentication', async () => {

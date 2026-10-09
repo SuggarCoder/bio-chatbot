@@ -1587,6 +1587,7 @@ function ChatMessageBubble(props: {
   onProjectSubmit: (input: import('../../features/chatbot/chatApi').ProjectInput) => Promise<void>
   onViewDetail: (taskId: string) => void
   onOpenResult: (taskId: string) => void
+  hasDetail: (taskId: string) => boolean
 }) {
   const isUser = () => props.message.role === 'user'
   const [visualComplete, setVisualComplete] = createSignal(
@@ -1661,7 +1662,7 @@ function ChatMessageBubble(props: {
             <Show
               when={liveGenerationId()}
               keyed
-              fallback={<StaticMessageParts message={props.message} disabled={props.generationActive} onProjectSubmit={props.onProjectSubmit} onViewDetail={props.onViewDetail} onOpenResult={props.onOpenResult} />}
+              fallback={<StaticMessageParts message={props.message} disabled={props.generationActive} onProjectSubmit={props.onProjectSubmit} onViewDetail={props.onViewDetail} onOpenResult={props.onOpenResult} hasDetail={props.hasDetail} />}
             >
               {(generationId) => (
                 <Show
@@ -1706,6 +1707,7 @@ function StaticMessageParts(props: {
   onProjectSubmit: (input: import('../../features/chatbot/chatApi').ProjectInput) => Promise<void>
   onViewDetail: (taskId: string) => void
   onOpenResult: (taskId: string) => void
+  hasDetail: (taskId: string) => boolean
 }) {
   const parts = () => props.message.parts.length > 0
     ? props.message.parts
@@ -1727,7 +1729,7 @@ function StaticMessageParts(props: {
           ? (
               <>
                 <Show when={part.form}>{(form) => <ProjectInitForm form={form()} messageId={props.message.id} disabled={props.disabled} onSubmit={props.onProjectSubmit} />}</Show>
-                <Show when={part.files}>{(files) => <Show when={files().length > 0}><FileAnalysisCards cards={files()} onViewDetail={props.onViewDetail} detailDisabled={props.disabled} /></Show>}</Show>
+                <Show when={part.files}>{(files) => <Show when={files().length > 0}><FileAnalysisCards cards={files()} onViewDetail={props.onViewDetail} detailDisabled={props.disabled} hasDetail={props.hasDetail} /></Show>}</Show>
                 <Show when={part.result}>{(result) => <GpasResultEntry taskId={result().taskId} total={result().total} onOpen={props.onOpenResult} />}</Show>
               </>
             )
@@ -2377,9 +2379,17 @@ function SessionConversationView(props: { conversationId: string }) {
       message.parts.flatMap((part) => part.type === 'gpas' ? part.files ?? [] : []))
     artifactStore.openGpasResult({ taskId, categories: resultCategories(cards, taskId), brief: resultBrief(cards, taskId) })
   }
+  const hasResult = (taskId: string) => (conversation()?.messages ?? []).some((message) =>
+    message.role === 'assistant' && message.parts.some((part) => part.type === 'gpas' && part.result?.taskId === taskId))
   const viewDetail = (taskId: string) => {
+    // A sample already answered in this conversation opens directly: no new
+    // message, model call or GPAS request (the panel keeps its pages).
+    if (hasResult(taskId)) {
+      openResult(taskId)
+      return
+    }
     const active = conversation()
-    if (!active || active.requestPending || active.activeGeneration) return
+    if (!active || active.requestPending || active.activeGeneration || pendingDetailTaskId() === taskId) return
     // The analysis id goes in `detail`, never into the visible text.
     const detail = { taskId }
     const question = chatStore.appendUserMessage(props.conversationId, FILE_RESULT_REQUEST_TEXT, undefined, detail)
@@ -2685,6 +2695,7 @@ function SessionConversationView(props: { conversationId: string }) {
                             onRegenerate={() => regenerate(message)}
                             onViewDetail={viewDetail}
                             onOpenResult={openResult}
+                            hasDetail={hasResult}
                             onProjectSubmit={async (input) => {
                               if (activeConversation().requestPending || activeConversation().activeGeneration) throw new Error('请等待当前回复完成。')
                               const question = chatStore.appendUserMessage(props.conversationId, '确认初始化项目')
