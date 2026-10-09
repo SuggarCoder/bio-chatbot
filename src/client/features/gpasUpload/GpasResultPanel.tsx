@@ -5,7 +5,7 @@ import { fetchGpasFileResults } from '../chatbot/chatApi'
 import type { GpasResultSelection } from '../artifacts/artifactStore'
 import { BriefStats } from './BriefStats'
 import { EvidenceRadarDialog, MiniRadar } from './EvidenceRadar'
-import { hazardGradient } from './evidenceRadar'
+import { HazardStars } from './HazardStars'
 import { coveragePct } from './resultHelpers'
 
 const ALL = ''
@@ -37,22 +37,6 @@ function SkeletonRows(props: { narrow: boolean }) {
   )
 }
 
-function HazardPill(props: { level: number | null }) {
-  const tone = () => hazardGradient(props.level)
-  return (
-    <Show when={props.level !== null && props.level > 0} fallback={<span class="text-slate-300">—</span>}>
-      <span
-        class="inline-flex flex-col items-center rounded-full px-2 py-0.5 text-white shadow-sm"
-        style={{ 'background-image': `linear-gradient(135deg, ${tone().from}, ${tone().to})` }}
-        title={`危害等级 ${props.level}`}
-        data-testid="gpas-hazard-pill"
-      >
-        <span class="text-[11px] font-semibold leading-4">{tone().label}</span>
-        <span class="text-[8px] leading-3 tracking-tight" aria-hidden="true">{'★'.repeat(Math.min(5, props.level!))}</span>
-      </span>
-    </Show>
-  )
-}
 
 function ResultRow(props: { row: FileResultRow; index: number; narrow: boolean; categoryName: (type: string) => string; onRadar: () => void }) {
   const pct = () => coveragePct(props.row.coverage)
@@ -82,7 +66,7 @@ function ResultRow(props: { row: FileResultRow; index: number; narrow: boolean; 
           </span>
         </Show>
       </td>
-      <td class="px-2 py-2.5 text-center"><HazardPill level={props.row.hazardIndex} /></td>
+      <td class="px-2 py-2.5 text-center"><HazardStars level={props.row.hazardIndex} /></td>
       <td class="px-2 py-2.5 text-right">
         <span class="inline-flex items-center gap-1 text-xs font-semibold tabular-nums text-slate-700">
           {props.row.coverage || '—'}

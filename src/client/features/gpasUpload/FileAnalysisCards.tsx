@@ -1,6 +1,6 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 import { categorySharePct, sampleKeys, sampleLabel, sampleNameOf, type FileBrief, type FileCard, type SampleKey } from '../../../server/gpasContracts'
-import { hazardGradient } from './evidenceRadar'
+import { HazardStars } from './HazardStars'
 import { compositionSegments, type CompositionSegment } from './resultHelpers'
 import { layoutTreemap } from './treemap'
 
@@ -324,7 +324,6 @@ function SampleRow(props: { card: FileCard } & DetailProps) {
   const segments = () => compositionSegments(props.card.brief)
   const species = () => segments().reduce((sum, segment) => sum + segment.count, 0)
   const hazard = () => props.card.brief?.categories.reduce((max, category) => Math.max(max, category.maxHazard), 0) ?? 0
-  const tone = () => hazardGradient(hazard())
   const labels = () => [...segments()].sort((a, b) => b.count - a.count).slice(0, 3)
   const meta = () => [
     props.card.paired ? '双端' : '单端',
@@ -359,13 +358,7 @@ function SampleRow(props: { card: FileCard } & DetailProps) {
       </td>
       <td class="px-2 py-2.5 text-right text-xs font-semibold tabular-nums text-slate-700">{segments().length ? species().toLocaleString('zh-CN') : '—'}</td>
       <td class="px-2 py-2.5 text-center">
-        <Show when={hazard() > 0} fallback={<span class="text-slate-300">—</span>}>
-          <span class="inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold text-white shadow-sm"
-            style={{ 'background-image': `linear-gradient(135deg, ${tone().from}, ${tone().to})` }}
-          >
-            {tone().label}
-          </span>
-        </Show>
+        <HazardStars level={hazard()} />
       </td>
       <td class="whitespace-nowrap px-2 py-2.5 text-right text-xs tabular-nums text-slate-500">
         {props.card.brief?.totalReads != null ? formatReads(props.card.brief.totalReads).replace(' Reads', '') : '—'}

@@ -236,7 +236,7 @@ test('several samples are listed in one table with a composition bar per sample'
   await expect(segments).toHaveCount(3)
   await expect(segments.first()).toHaveAttribute('title', '细菌 188 种 · 95.4%')
   await expect(rows.first()).toContainText('197')
-  await expect(rows.first()).toContainText('3 级')
+  await expect(rows.first().getByRole('img', { name: '危害等级 3' })).toBeVisible()
   await expect(rows.first()).toContainText('38.96M')
   await expect(rows.first().getByTestId('gpas-view-detail')).toBeVisible()
   await expect(rows.nth(1)).toContainText('暂无分析摘要')
@@ -342,7 +342,7 @@ test('"查看详情" asks for the analysis detail and the panel pages each categ
   await expect(panel.getByRole('columnheader')).toHaveText(['序号', '生物学编号', '物种名称', '定植特性', '风险分级', '覆盖度', '可信度'])
   await expect(panel.getByTestId('gpas-result-index').first()).toHaveText('1')
   await expect(panel.getByTestId('gpas-result-row').nth(3)).toContainText('1177577')
-  await expect(panel.getByTestId('gpas-hazard-pill').first()).toContainText('1 级')
+  await expect(panel.getByTestId('gpas-hazard-stars').first()).toHaveAttribute('aria-label', '危害等级 1')
   if (process.env.SHOTS) {
     await page.waitForTimeout(400)
     await page.screenshot({ path: `${process.env.SHOTS}/table.png` })
