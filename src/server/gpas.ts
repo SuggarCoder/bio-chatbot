@@ -58,7 +58,26 @@ export type SampleProgress = {
 
 export type ProjectProgress =
   | { initialized: false; form: BusinessReply }
-  | { initialized: true; demo: boolean; projectName: string; teamName: string | null; samples: SampleProgress[] }
+  | { initialized: true; demo: boolean; projectName: string; teamName: string | null; samples: SampleProgress[]; monthly: MonthlySubmissions[] }
+
+/** Submissions of one month per sample type; months ascending. */
+export type MonthlySubmissions = { month: string; counts: SampleCounts }
+const MAX_MONTHS = 36
+
+/** Merges submit rows by year and month (rows of one month add up), oldest first. */
+export function monthlySubmissions(rows: ReadonlyArray<Partial<SampleCounts> & { year: number; month: number }>): MonthlySubmissions[] {
+  const months = new Map<string, SampleCounts>()
+  for (const row of rows) {
+    const month = `${row.year}-${String(row.month).padStart(2, '0')}`
+    const counts = months.get(month) ?? { clinic: 0, media: 0, environment: 0, lab: 0 }
+    for (const key of sampleKeys) counts[key] += row[key] ?? 0
+    months.set(month, counts)
+  }
+  return [...months.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-MAX_MONTHS)
+    .map(([month, counts]) => ({ month, counts }))
+}
 
 export function progressReply(progress: ProjectProgress): BusinessReply {
   if (!progress.initialized) return progress.form
@@ -69,7 +88,13 @@ export function progressReply(progress: ProjectProgress): BusinessReply {
   })
   return {
     content: `${prefix}项目：${textCell(progress.projectName)}\n\n团队：${textCell(progress.teamName)}\n\n| 样本类型 | 计划数量 | 已提交 | 剩余 | 完成率 |\n| --- | ---: | ---: | ---: | --- |\n${lines.join('\n')}\n\n已提交数量按接口返回的各年月累计统计。`,
-    part: { type: 'gpas', order: 1 },
+    part: { type: 'gpas', order: 1, progress: {
+      projectName: progress.projectName.slice(0, 200),
+      teamName: progress.teamName?.slice(0, 200) ?? null,
+      demo: progress.demo,
+      samples: progress.samples,
+      monthly: progress.monthly,
+    } },
   }
 }
 
@@ -161,6 +186,7 @@ export class GpasService {
       projectName: plans.map((row) => row.name).join('、'),
       teamName: profile.ownteamName ?? null,
       samples,
+      monthly: monthlySubmissions(summary.realSubmitInfo),
     }
   }
 

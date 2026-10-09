@@ -5,6 +5,7 @@ import { z } from 'zod'
 import {
   AgentSession,
   AgentToolbox,
+  hasVisiblePart,
   limitModelOutput,
   MODEL_OUTPUT_LIMIT_BYTES,
   toolFunctionName,
@@ -15,6 +16,7 @@ import type { CurrentUser } from './domain.js'
 import { GpasService } from './gpas.js'
 import { defineGpasTool } from './gpas/defineTool.js'
 import { createGpasTools } from './gpas/tools/index.js'
+import { gpasPartSchema } from './gpasContracts.js'
 import { openCredential, sealCredential } from './ingress.js'
 
 const config = {
@@ -79,14 +81,20 @@ test('progress tool runs with the session cookie for the session team only', asy
     '/project/exist/team-a': { code: 200, data: true },
     '/summary/submit/info/team-a': { code: 200,
       projectPlanInfo: { name: '项目甲', id: 'p', clinic: 10, media: 0, environment: 0, lab: 0 },
-      realSubmitInfo: [{ year: 2026, month: 1, clinic: 4 }] },
+      realSubmitInfo: [{ year: 2026, month: 2, clinic: 1 }, { year: 2026, month: 1, clinic: 3 }, { year: 2026, month: 2, clinic: 0, lab: 0 }] },
   }, seen))
   const set = toolbox().select(['project.progress'])!
   const session = new AgentSession(config, user, 'session=a', new AbortController().signal)
   const result = await set.execute({ call_id: 'c1', name: 'project__progress', arguments: '{}' }, session)
   assert.equal(result.ok, true)
   assert.equal(JSON.parse(result.output).samples[0].remaining, 6)
-  assert.equal(result.part, undefined)
+  // The progress table and its monthly chart are shown under the reply.
+  assert.equal(result.part?.progress?.projectName, '项目甲')
+  assert.deepEqual(result.part?.progress?.monthly, [
+    { month: '2026-01', counts: { clinic: 3, media: 0, environment: 0, lab: 0 } },
+    { month: '2026-02', counts: { clinic: 1, media: 0, environment: 0, lab: 0 } },
+  ])
+  assert.equal(gpasPartSchema.safeParse(result.part).success, true)
   assert.deepEqual(seen, [
     '/api/gpas2/v1/user/info session=a',
     '/api/gpas2/v1/project/exist/team-a session=a',
@@ -173,4 +181,23 @@ test('analysis detail tool forwards its result entry to the user', async (t) => 
   assert.equal(result.ok, true)
   assert.deepEqual(result.part?.result, { taskId: '3fb130aaa96d6cd30ec5a823bb8cded9', total: 198 })
   assert.match(result.output, /不要复述 taskId/)
+})
+
+test('only parts with something to show are forwarded under the reply', () => {
+  assert.equal(hasVisiblePart({ type: 'gpas', order: 1 }), false)
+  assert.equal(hasVisiblePart({ type: 'gpas', order: 1, files: [] }), false)
+  assert.equal(hasVisiblePart({ type: 'gpas', order: 1, result: { taskId: 't', total: 0 } }), true)
+  const profile = { realName: '演示用户', userName: 'demo', teamName: null, jobTitle: null, researchField: null, email: null, phone: null }
+  assert.equal(hasVisiblePart({ type: 'gpas', order: 1, profile }), true)
+})
+
+test('profile tool shows a card without internal ids', async () => {
+  const tool = createGpasTools(new GpasService(config)).find((item) => item.id === 'user.profile')!
+  const profile = { userId: 'user-a', ownteamId: 'team-a', ownteamName: '甲队', realName: ' 张三 ', email: 'a@b.c', phone: '', researchField: '病原' }
+  const reply = tool.toReply(await tool.run({ profile, client: {} as never }, {}), { profile, client: {} as never })
+  assert.deepEqual(reply.part.profile, {
+    realName: '张三', userName: null, teamName: '甲队', jobTitle: null, researchField: '病原', email: 'a@b.c', phone: null,
+  })
+  assert.doesNotMatch(JSON.stringify(reply.part), /user-a|team-a/)
+  assert.equal(gpasPartSchema.safeParse(reply.part).success, true)
 })

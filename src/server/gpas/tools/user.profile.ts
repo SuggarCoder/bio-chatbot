@@ -1,7 +1,19 @@
 import { z } from 'zod'
 
 import { profileReply } from '../../gpas.js'
+import type { Gpas2UserInfo } from '../../domain.js'
+import type { ProfileCard } from '../../gpasContracts.js'
 import { defineGpasTool } from '../defineTool.js'
+
+const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim().slice(0, 200) : null
+
+/** The card fields shown to the user; internal ids stay out. */
+export function profileCard(profile: Gpas2UserInfo): ProfileCard {
+  return {
+    realName: text(profile.realName), userName: text(profile.userName), teamName: text(profile.ownteamName),
+    jobTitle: text(profile.jobTitle), researchField: text(profile.researchField), email: text(profile.email), phone: text(profile.phone),
+  }
+}
 
 export const userProfileTool = defineGpasTool({
   id: 'user.profile', domain: 'user', title: '当前用户与团队信息', effect: 'read',
@@ -16,5 +28,5 @@ export const userProfileTool = defineGpasTool({
     teamName: profile.ownteamName ?? null, jobTitle: profile.jobTitle ?? null,
     email: profile.email ?? null, phone: profile.phone ?? null,
   }),
-  toReply: (profile) => ({ content: profileReply(profile), part: { type: 'gpas', order: 1 } }),
+  toReply: (profile) => ({ content: profileReply(profile), part: { type: 'gpas', order: 1, profile: profileCard(profile) } }),
 })

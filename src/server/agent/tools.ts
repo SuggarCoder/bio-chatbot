@@ -35,6 +35,11 @@ export function toolFunctionName(id: string): string {
   return id.replaceAll('.', '__')
 }
 
+/** Whether a tool's part has something to show under the reply. */
+export function hasVisiblePart(part: GpasPart): boolean {
+  return Boolean(part.form || part.files?.length || part.result || part.profile || part.progress)
+}
+
 export function limitModelOutput(value: unknown): string {
   const json = JSON.stringify(value ?? null)
   if (Buffer.byteLength(json, 'utf8') <= MODEL_OUTPUT_LIMIT_BYTES) return json
@@ -169,8 +174,8 @@ export class AgentToolSet {
         toolId: spec.id,
         title: spec.title,
         args: args.data as Record<string, unknown>,
-        // Forms, file cards and the analysis detail entry are shown under the reply.
-        ...(reply.part.form || reply.part.files?.length || reply.part.result ? { part: reply.part } : {}),
+        // Forms, cards, tables and the analysis detail entry are shown under the reply.
+        ...(hasVisiblePart(reply.part) ? { part: reply.part } : {}),
       }
     } catch (error) {
       if (session.signal.aborted) throw error

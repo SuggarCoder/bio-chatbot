@@ -58,6 +58,8 @@ import { FASTQ_ACCEPT } from '../../features/gpasUpload/fastqPairing'
 import { createGpasUploadController, uploadFallbackContent } from '../../features/gpasUpload/uploadController'
 import { UploadedFilesSummary, UploadTray } from '../../features/gpasUpload/UploadTray'
 import { FileAnalysisCards, GpasResultEntry } from '../../features/gpasUpload/FileAnalysisCards'
+import { ProfileCard } from '../../features/gpas/ProfileCard'
+import { ProjectProgressCard } from '../../features/gpas/ProjectProgressCard'
 import { resultBrief, resultCategories, resultSampleName } from '../../features/gpasUpload/resultHelpers'
 import { FILE_RESULT_REQUEST_TEXT } from '../../../server/gpasContracts'
 import type { GpasDetailRequest, GpasUploadBatch } from '../../features/chatbot/chatApi'
@@ -1732,6 +1734,8 @@ function StaticMessageParts(props: {
               <>
                 <Show when={part.form}>{(form) => <ProjectInitForm form={form()} messageId={props.message.id} disabled={props.disabled} onSubmit={props.onProjectSubmit} />}</Show>
                 <Show when={part.files}>{(files) => <Show when={files().length > 0}><FileAnalysisCards cards={files()} onViewDetail={props.onViewDetail} detailDisabled={props.disabled} hasDetail={props.hasDetail} /></Show>}</Show>
+                <Show when={part.profile}>{(profile) => <ProfileCard profile={profile()} />}</Show>
+                <Show when={part.progress}>{(progress) => <ProjectProgressCard progress={progress()} />}</Show>
                 <Show when={part.result}>{(result) => <GpasResultEntry taskId={result().taskId} total={result().total} sampleName={props.sampleNameFor(result().taskId)} onOpen={props.onOpenResult} />}</Show>
               </>
             )

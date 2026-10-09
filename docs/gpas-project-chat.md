@@ -139,6 +139,15 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 - 同一样本在当前会话里已经有详情回复时，再点「查看详情」直接打开面板，不再发消息、调用模型或请求 GPAS。
   面板按样本保留已加载的页面、当前 tab 和页码（最近 10 个样本），关闭后重新打开不会重新请求。
 
+### 用户信息与项目进度展示
+
+- `user.profile` 的回复附带 `profile` part，渲染为用户卡片（`src/client/features/gpas/ProfileCard.tsx`）：
+  姓名、账号、职称、团队、研究方向、联系方式、邮箱（可复制）；不展示用户 ID、团队 ID。
+- `project.progress` 的回复附带 `progress` part（含按月提交 `monthly`，由 `realSubmitInfo` 按年月合并），渲染为
+  `ProjectProgressCard`：总体完成率、累计完成率折线图（每个有计划的样本类型一条线，100% 目标虚线，hover/键盘查看各月数值，
+  线色经色盲校验）与进度表（含合计行）。少于 2 个月时不画折线。
+- agent 只转发有可展示内容的 part（`hasVisiblePart`：form、files、result、profile、progress）。
+
 ### 样本分析详情（`file.result`）
 
 用户只知道样本名（如“查看样本 KY14599-1-T233R 分析结果”）时，助手按两步执行：先用 `file.list`（`fileName`=样本名）

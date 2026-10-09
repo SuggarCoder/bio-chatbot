@@ -14,7 +14,7 @@ export function createProjectTools(service: GpasService) {
     input: z.object({}),
     run: ({ profile, cookie }) => service.progressData(profile, cookie),
     toModel: (data) => data.initialized
-      ? { initialized: true, projectName: data.projectName, samples: data.samples }
+      ? { initialized: true, projectName: data.projectName, samples: data.samples, monthly: data.monthly }
       : { initialized: false, note: '团队尚未初始化项目，已向用户展示初始化表单。' },
     toReply: (data) => progressReply(data),
   })

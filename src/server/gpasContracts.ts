@@ -165,12 +165,41 @@ export function renderDetailContext(detail: GpasDetailRequest): string {
 export type FileResultRow = z.infer<typeof fileResultRowSchema>
 export type FileResultPage = z.infer<typeof fileResultPageSchema>
 
+const nullableText = shortText.nullable()
+/** The signed-in user's card; internal ids are never shown. */
+export const profileCardSchema = z.object({
+  realName: nullableText, userName: nullableText, teamName: nullableText, jobTitle: nullableText,
+  researchField: nullableText, email: nullableText, phone: nullableText,
+})
+const sampleProgressSchema = z.object({
+  type: z.enum(sampleKeys),
+  label: shortText,
+  plan: count,
+  submitted: count,
+  remaining: count,
+  completionRate: z.number().nonnegative().nullable(),
+})
+/** Project progress with monthly submissions (oldest first) for the chart. */
+export const progressCardSchema = z.object({
+  projectName: shortText,
+  teamName: nullableText,
+  demo: z.boolean(),
+  samples: z.array(sampleProgressSchema).max(4),
+  monthly: z.array(z.object({ month: z.string().regex(/^\d{4}-\d{2}$/), counts: sampleCountsSchema })).max(36),
+})
+export type ProfileCard = z.infer<typeof profileCardSchema>
+export type ProgressCard = z.infer<typeof progressCardSchema>
+
 export const gpasPartSchema = z.object({
   type: z.literal('gpas'),
   order: z.number().int().nonnegative(),
   form: projectFormSchema.optional(),
   /** Uploaded file cards from the file list tool. */
   files: z.array(fileCardSchema).max(20).optional(),
+  /** The signed-in user's profile card. */
+  profile: profileCardSchema.optional(),
+  /** Project progress table and monthly chart. */
+  progress: progressCardSchema.optional(),
   /** Entry to a sample's analysis detail, opened in the side panel. */
   result: z.object({ taskId: taskIdSchema, total: z.number().int().nonnegative() }).optional(),
   capability: z.object({
