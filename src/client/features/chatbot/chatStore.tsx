@@ -293,6 +293,8 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     string,
     Promise<ChatConversation | undefined>
   >()
+  // Loads already in flight when a conversation is deleted must not bring it back.
+  const deletedConversationIds = new Set<string>()
 
   const moveConversationToTop = (id: string) => {
     setState('order', (current) => [
@@ -388,6 +390,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
       })
     }
     const request = fetchChat(id).then((detail) => {
+      if (deletedConversationIds.has(id)) return undefined
       const conversation = mapDetail(
         detail,
         state.conversations[id],
@@ -484,7 +487,13 @@ export const ChatStoreProvider: ParentComponent = (props) => {
       return
     }
 
-    await deleteChat(id)
+    try {
+      await deleteChat(id)
+    } catch (error) {
+      // A retry after a delete whose response was lost finds the chat already gone.
+      if (!(error instanceof ChatApiError && error.status === 404)) throw error
+    }
+    deletedConversationIds.add(id)
     setState(
       produce((draft: ChatState) => {
         delete draft.conversations[id]

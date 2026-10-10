@@ -19,6 +19,7 @@ import { ProjectInitForm } from '../../features/chatbot/ProjectInitForm'
 import { appRoutes, getAppPathname } from '../../routes'
 import {
   cancelGeneration,
+  ChatApiError,
   createGeneration,
   deleteMessageVote,
   regenerateMessage,
@@ -267,6 +268,83 @@ function buildConversationActionItems(
       onSelect: () => onDelete(conversationId),
     },
   ]
+}
+
+function describeDeleteError(error: unknown) {
+  return error instanceof ChatApiError
+    ? `删除失败：${error.message}`
+    : '网络连接失败，会话未删除，请检查网络后重试。'
+}
+
+function DeleteConversationDialog(props: {
+  conversationId: string
+  onClose: () => void
+  onDeleted?: () => void
+}) {
+  const chatStore = useChatStore()
+  const navigate = useNavigate()
+  const [isDeleting, setIsDeleting] = createSignal(false)
+  const [errorMessage, setErrorMessage] = createSignal<string>()
+  const title = () => chatStore.getConversation(props.conversationId)?.title
+  const close = () => {
+    if (!isDeleting()) props.onClose()
+  }
+  // The conversation leaves the list only once the server has deleted it, so
+  // a failed request keeps the dialog open with the error instead of failing silently.
+  const confirm = async () => {
+    if (isDeleting()) return
+    const conversationId = props.conversationId
+    const generationId =
+      chatStore.getConversation(conversationId)?.activeGeneration?.generationId
+    setIsDeleting(true)
+    setErrorMessage(undefined)
+    try {
+      await chatStore.deleteConversation(conversationId)
+    } catch (error) {
+      setErrorMessage(describeDeleteError(error))
+      setIsDeleting(false)
+      return
+    }
+    if (generationId) {
+      cancelAssistantReply(generationId)
+    }
+    navigate(appRoutes.home, { replace: true })
+    props.onDeleted?.()
+    props.onClose()
+  }
+
+  return (
+    <ModalDialog
+      title="确认删除该会话？"
+      description={`删除后将无法恢复。${title() ? ` 会话名称：${title()}` : ''}`}
+      onClose={close}
+    >
+      <Show when={errorMessage()}>
+        <p role="alert" class="mb-4 rounded-2xl bg-red-50 px-4 py-3 text-sm leading-6 text-red-700">
+          {errorMessage()}
+        </p>
+      </Show>
+      <div class="flex justify-end gap-3">
+        <button
+          type="button"
+          class="inline-flex h-11 items-center rounded-full px-5 text-sm font-semibold text-slate-300 transition duration-200 hover:text-slate-400 disabled:cursor-not-allowed"
+          disabled={isDeleting()}
+          onClick={close}
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          class="inline-flex h-11 items-center rounded-full bg-[#6f2b2b] px-5 text-sm font-semibold text-white transition duration-200 hover:bg-[#5f2222] disabled:cursor-wait disabled:opacity-70"
+          disabled={isDeleting()}
+          aria-busy={isDeleting()}
+          onClick={() => void confirm()}
+        >
+          {isDeleting() ? '删除中…' : errorMessage() ? '重试删除' : '确认删除'}
+        </button>
+      </div>
+    </ModalDialog>
+  )
 }
 
 function buildAccountMenuItems(): PopupMenuEntry[] {
@@ -728,7 +806,6 @@ function ExpandedSidebarPanel(props: {
   onLogout: () => void
 }) {
   const chatStore = useChatStore()
-  const navigate = useNavigate()
   const [renameConversationId, setRenameConversationId] = createSignal<string | null>(null)
   const [renameValue, setRenameValue] = createSignal('')
   const [deleteConversationId, setDeleteConversationId] = createSignal<string | null>(null)
@@ -760,25 +837,6 @@ function ExpandedSidebarPanel(props: {
 
     void chatStore.renameConversation(conversationId, title)
     closeRenameDialog()
-  }
-  const confirmDeleteConversation = () => {
-    const conversationId = deleteConversationId()
-
-    if (!conversationId) {
-      return
-    }
-
-    const generationId =
-      chatStore.getConversation(conversationId)
-        ?.activeGeneration?.generationId
-
-    if (generationId) {
-      cancelAssistantReply(generationId)
-    }
-    navigate(appRoutes.home, { replace: true })
-    void chatStore.deleteConversation(conversationId)
-    closeDeleteDialog()
-    props.onConversationSelect()
   }
 
   return (
@@ -907,32 +965,13 @@ function ExpandedSidebarPanel(props: {
       />
 
       <Show when={deleteConversationId()}>
-        <ModalDialog
-          title="确认删除该会话？"
-          description={`删除后将无法恢复。${
-            chatStore.getConversation(deleteConversationId() ?? '')?.title
-              ? ` 会话名称：${chatStore.getConversation(deleteConversationId() ?? '')?.title}`
-              : ''
-          }`}
-          onClose={closeDeleteDialog}
-        >
-          <div class="flex justify-end gap-3">
-            <button
-              type="button"
-              class="inline-flex h-11 items-center rounded-full px-5 text-sm font-semibold text-slate-300 transition duration-200 hover:text-slate-400"
-              onClick={closeDeleteDialog}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              class="inline-flex h-11 items-center rounded-full bg-[#6f2b2b] px-5 text-sm font-semibold text-white transition duration-200 hover:bg-[#5f2222]"
-              onClick={confirmDeleteConversation}
-            >
-              确认删除
-            </button>
-          </div>
-        </ModalDialog>
+        {(conversationId) => (
+          <DeleteConversationDialog
+            conversationId={conversationId()}
+            onClose={closeDeleteDialog}
+            onDeleted={props.onConversationSelect}
+          />
+        )}
       </Show>
 
       <div class="mt-auto border-t border-slate-200 px-4 py-4">
@@ -1881,7 +1920,6 @@ function ConversationLoadErrorState(props: {
 
 function SessionConversationView(props: { conversationId: string }) {
   const chatStore = useChatStore()
-  const navigate = useNavigate()
   const [renameConversationId, setRenameConversationId] = createSignal<string | null>(null)
   const [renameValue, setRenameValue] = createSignal('')
   const [deleteConversationId, setDeleteConversationId] = createSignal<string | null>(null)
@@ -1995,24 +2033,6 @@ function SessionConversationView(props: { conversationId: string }) {
 
     void chatStore.renameConversation(conversationId, title)
     closeRenameDialog()
-  }
-  const confirmDeleteConversation = () => {
-    const conversationId = deleteConversationId()
-
-    if (!conversationId) {
-      return
-    }
-
-    const generationId =
-      chatStore.getConversation(conversationId)
-        ?.activeGeneration?.generationId
-
-    if (generationId) {
-      cancelAssistantReply(generationId)
-    }
-    navigate(appRoutes.home, { replace: true })
-    void chatStore.deleteConversation(conversationId)
-    closeDeleteDialog()
   }
 
   const showMessageListScrollbar = () => {
@@ -2781,32 +2801,12 @@ function SessionConversationView(props: { conversationId: string }) {
           />
 
           <Show when={deleteConversationId()}>
-            <ModalDialog
-              title="确认删除该会话？"
-              description={`删除后将无法恢复。${
-                chatStore.getConversation(deleteConversationId() ?? '')?.title
-                  ? ` 会话名称：${chatStore.getConversation(deleteConversationId() ?? '')?.title}`
-                  : ''
-              }`}
-              onClose={closeDeleteDialog}
-            >
-              <div class="flex justify-end gap-3">
-                <button
-                  type="button"
-                  class="inline-flex h-11 items-center rounded-full px-5 text-sm font-semibold text-slate-300 transition duration-200 hover:text-slate-400"
-                  onClick={closeDeleteDialog}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  class="inline-flex h-11 items-center rounded-full bg-[#6f2b2b] px-5 text-sm font-semibold text-white transition duration-200 hover:bg-[#5f2222]"
-                  onClick={confirmDeleteConversation}
-                >
-                  确认删除
-                </button>
-              </div>
-            </ModalDialog>
+            {(conversationId) => (
+              <DeleteConversationDialog
+                conversationId={conversationId()}
+                onClose={closeDeleteDialog}
+              />
+            )}
           </Show>
         </>
       )}

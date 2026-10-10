@@ -582,3 +582,51 @@ test('long conversations expose question anchors and preserve position while loa
   await page.setViewportSize({ width: 800, height: 720 })
   await expect(rail).toBeHidden()
 })
+
+test('a delete that cannot reach the server keeps the conversation and can be retried', async ({ page }) => {
+  let networkDown = true
+  const deleteRequests: string[] = []
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const request = route.request()
+    const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
+    if (pathname.endsWith('/api/me')) {
+      return route.fulfill({ json: { id: 'test-user', realName: 'Test User', name: 'Test User' } })
+    }
+    if (pathname.endsWith('/api/conversations')) {
+      return route.fulfill({ json: { conversations: summaries } })
+    }
+    const match = pathname.match(/\/api\/conversations\/(conversation-[ab])$/)
+    if (match && request.method() === 'DELETE') {
+      deleteRequests.push(match[1])
+      if (networkDown) return route.abort('internetdisconnected')
+      return route.fulfill({ status: 204 })
+    }
+    if (match) {
+      return route.fulfill({ json: detail(match[1] as 'conversation-a' | 'conversation-b') })
+    }
+    await route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/conversation-a')
+  await expect(page.getByText('Message from A')).toBeVisible()
+  await page.locator('aside').first().getByAltText('GPAS').first().click()
+  const sidebarLinks = page.locator('aside a[href="/ai-chatbot/conversation-a"]')
+  await expect(sidebarLinks).toHaveCount(1)
+
+  await page.getByRole('button', { name: '打开当前会话操作菜单' }).click()
+  await page.getByText('删除', { exact: true }).click()
+  await page.getByRole('button', { name: '确认删除' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('会话未删除')
+  await expect(page).toHaveURL(/\/ai-chatbot\/conversation-a$/)
+  await expect(sidebarLinks).toHaveCount(1)
+
+  networkDown = false
+  await page.getByRole('button', { name: '重试删除' }).click()
+
+  await expect(page).toHaveURL(/\/ai-chatbot$/)
+  await expect(sidebarLinks).toHaveCount(0)
+  await expect(page.locator('aside a[href="/ai-chatbot/conversation-b"]')).toHaveCount(1)
+  expect(deleteRequests).toEqual(['conversation-a', 'conversation-a'])
+})
