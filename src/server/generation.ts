@@ -198,6 +198,32 @@ export class GenerationRejectedError extends Error {
   }
 }
 
+/** Added to the model input for the last agent round, which gets no tools. */
+export const AGENT_FINAL_ROUND_INPUT: OpenAI.Responses.ResponseInputItem = {
+  role: 'user',
+  content: '（系统提示）本次回答的工具调用次数已用完，不能再调用工具。请基于已有结果直接回答；已有结果不足以回答时如实说明，并提示完整数据可在界面中查看。',
+}
+
+/** Shown when an agent run queried data but the model wrote no answer. */
+export const AGENT_EMPTY_ANSWER_FALLBACK =
+  '已完成数据查询，但未能基于查询结果生成文字回答。完整结果可在界面中查看，也可以缩小问题范围（如指定类别）后重新提问。'
+
+/**
+ * Tool options for one agent round. The last round gets no tools at all:
+ * providers may ignore tool_choice 'none' and end the round with a call.
+ */
+export function agentRoundTools(
+  tools: OpenAI.Responses.FunctionTool[] | undefined,
+  exhausted: boolean,
+) {
+  return tools && !exhausted ? { tools, tool_choice: 'auto' as const } : {}
+}
+
+/** Text to answer with when a run queried data but the model wrote nothing. */
+export function agentAnswerFallback(toolCallsUsed: number, answerText: string): string | null {
+  return toolCallsUsed > 0 && !answerText.trim() ? AGENT_EMPTY_ANSWER_FALLBACK : null
+}
+
 class GenerationLengthError extends Error {
   constructor() {
     super('Model output reached its configured token limit')
@@ -1100,11 +1126,33 @@ export class GenerationService {
           content: message.content,
         }))
       let toolCallsUsed = 0
+      let answerText = ''
+      const pushOutputText = (delta: string) => {
+        if (patchMode) {
+          patchOutput += delta
+        } else if (parser) {
+          parser.push(delta)
+        } else {
+          const startIndex = runtime.partialOutput.length
+          runtime.partialOutput += delta
+          appendTextPart(delta)
+          messageSequence += 1
+          emit({
+            type: 'message.delta',
+            sequence: messageSequence,
+            startIndex,
+            delta,
+          })
+        }
+      }
 
       // One model call in flight per run: the generation lease bounds total
       // upstream concurrency (generation + background <= upstream).
       for (;;) {
         const toolsExhausted = toolCallsUsed >= this.config.agentMaxToolCalls
+        // The last round gets no tools at all (providers may ignore
+        // tool_choice 'none') and must answer from the results it has.
+        if (agentTools && toolsExhausted) modelInput.push(AGENT_FINAL_ROUND_INPUT)
         const responseStream = await this.qwen.responses.create(
           {
             model: input.model ?? this.config.qwenModel,
@@ -1112,13 +1160,7 @@ export class GenerationService {
             input: modelInput,
             max_output_tokens: this.config.qwenMaxOutputTokens,
             stream: true,
-            ...(agentTools
-              ? {
-                  tools: agentTools.tools,
-                  // The last round must answer from the results it already has.
-                  tool_choice: toolsExhausted ? 'none' as const : 'auto' as const,
-                }
-              : {}),
+            ...agentRoundTools(agentTools?.tools, toolsExhausted),
           },
           { signal: runtime.controller.signal },
         )
@@ -1245,23 +1287,7 @@ export class GenerationService {
               firstTokenAt = Date.now()
             }
             roundText += event.delta
-
-            if (patchMode) {
-              patchOutput += event.delta
-            } else if (parser) {
-              parser.push(event.delta)
-            } else {
-              const startIndex = runtime.partialOutput.length
-              runtime.partialOutput += event.delta
-              appendTextPart(event.delta)
-              messageSequence += 1
-              emit({
-                type: 'message.delta',
-                sequence: messageSequence,
-                startIndex,
-                delta: event.delta,
-              })
-            }
+            pushOutputText(event.delta)
           } else if (event.type === 'response.completed') {
             runtime.providerRequestId = event.response.id
             // Agent runs make several model calls; usage accumulates.
@@ -1284,6 +1310,7 @@ export class GenerationService {
           }
         }
 
+        answerText += roundText
 
         if (!agentTools || !agentSession || functionCalls.length === 0 || toolsExhausted) break
         await this.checkpoint(runtime, true)
@@ -1339,6 +1366,13 @@ export class GenerationService {
             output: result.output,
           })
         }
+      }
+
+      // A run that already queried data must not fail for an empty last round.
+      const fallback = agentTools ? agentAnswerFallback(toolCallsUsed, answerText) : null
+      if (fallback) {
+        ensureResponseStep()
+        pushOutputText(fallback)
       }
 
       await this.checkpoint(runtime, true)
