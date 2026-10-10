@@ -78,11 +78,26 @@ function Stars(props: { count: number; color?: string }) {
   )
 }
 
-const TREEMAP_HEIGHT = 160
-// Narrow blocks stack rows, which need a little more height.
-const treemapHeight = (width: number) => width < 200 ? 200 : TREEMAP_HEIGHT
+// The lead block spans the card and gets more room; narrow blocks stack rows.
+const treemapHeight = (width: number, lead: boolean) => width < 200 ? 240 : lead ? 220 : 184
 
-function CategoryBlock(props: { category: Category; index: number; sharePct: number }) {
+type TileFit = 'hero' | 'full' | 'line' | 'dot'
+/** How much a tile of this pixel size can show. */
+export function tileFit(width: number, height: number): TileFit {
+  if (width >= 104 && height >= 84) return 'hero'
+  // Tall narrow tiles still have room for a two-line name above the value.
+  if ((width >= 60 && height >= 48) || (width >= 44 && height >= 64)) return 'full'
+  if (width >= 56 && height >= 22) return 'line'
+  return 'dot'
+}
+const tileClass: Record<TileFit, string> = {
+  hero: 'flex-col justify-between px-2.5 py-2',
+  full: 'flex-col justify-between px-2 py-1.5',
+  line: 'items-center justify-between gap-1 px-2',
+  dot: 'items-center justify-center px-0.5',
+}
+
+function CategoryBlock(props: { category: Category; index: number; sharePct: number; lead: boolean }) {
   const tone = () => toneFor(props.category.type, props.index)
   // Real container width decides the split direction and how much text fits.
   const [width, setWidth] = createSignal(320)
@@ -102,62 +117,65 @@ function CategoryBlock(props: { category: Category; index: number; sharePct: num
   const rects = () => layoutTreemap([
     ...props.category.top.map((item, index) => ({ key: `t${index}`, value: item.abundancePct })),
     ...(showRest() ? [{ key: 'rest', value: restPct() }] : []),
-  ], width() / treemapHeight(width()))
+  ], width() / height())
+  const height = () => treemapHeight(width(), props.lead)
 
   return (
     <section
-      class="flex min-w-0 flex-[1_1_240px] flex-col rounded-xl p-2"
+      class={`flex min-w-0 flex-col rounded-2xl p-2.5 ${props.lead ? 'basis-full' : 'flex-[1_1_240px]'}`}
       style={{ 'background-color': tone().block, color: tone().label }}
       data-testid="gpas-brief-category"
     >
-      <header class="mb-1.5 flex items-center justify-between gap-2 px-1 text-xs">
-        <span class="min-w-0 truncate font-semibold" title="种数占比：该类别检出种数 / 全部检出种数">
-          {props.category.name} · 检出 {props.category.speciesCount} 种 · 占比 {formatPercent(props.sharePct)}
+      <header class="mb-2 flex items-baseline justify-between gap-2 px-1">
+        <span class="min-w-0 truncate" title="种数占比：该类别检出种数 / 全部检出种数">
+          <span class="text-[13px] font-semibold">{props.category.name}</span>
+          <span class="text-xs opacity-80"> · 检出 <span class="font-semibold">{props.category.speciesCount}</span> 种 · 占比 <span class="font-semibold">{formatPercent(props.sharePct)}</span></span>
         </span>
         <Show when={props.category.top.length > 0}>
-          <span class="shrink-0 opacity-80">丰度前 {props.category.top.length}</span>
+          <span class="shrink-0 text-[11px] opacity-75">丰度前 {props.category.top.length}</span>
         </Show>
       </header>
       <Show
         when={rects().length > 0}
         fallback={<p class="px-1 pb-1 text-xs opacity-80">摘要未包含该类别的物种明细</p>}
       >
-        <div ref={container} class="relative w-full" style={{ height: `${treemapHeight(width())}px` }}>
+        <div ref={container} class="relative w-full" style={{ height: `${height()}px` }}>
           <For each={rects()}>
             {(rect) => {
               const isRest = rect.key === 'rest'
               const item = isRest ? undefined : props.category.top[Number(rect.key.slice(1))]
               const colors = isRest ? tone().rest : tone().tiles[Number(rect.key.slice(1)) % tone().tiles.length]
-              // full: name, stars, value; line: one row; dot: value only (details in the title).
-              const fit = () => {
-                const w = (rect.width / 100) * width()
-                const h = (rect.height / 100) * treemapHeight(width())
-                return w >= 64 && h >= 60 ? 'full' : w >= 44 && h >= 20 ? 'line' : 'dot'
-              }
+              // hero/full: name, stars, value; line: one row; dot: value only (details in the title).
+              const fit = () => tileFit((rect.width / 100) * width(), (rect.height / 100) * height())
+              const label = item ? item.cnName : `其它 ${restCount()} 种`
+              const value = formatPercent(item ? item.abundancePct : restPct())
               return (
                 <div
-                  class="absolute p-0.5"
+                  class="absolute p-[1.5px]"
                   style={{ left: `${rect.x}%`, top: `${rect.y}%`, width: `${rect.width}%`, height: `${rect.height}%` }}
                 >
                   <div
-                    class={`flex h-full w-full overflow-hidden rounded-lg text-[11px] leading-4 ${fit() === 'full' ? 'flex-col gap-0.5 px-2 py-1.5' : fit() === 'line' ? 'items-center justify-between gap-1 px-1.5' : 'items-center justify-center px-0.5'}`}
+                    class={`flex h-full w-full overflow-hidden rounded-[10px] text-[11px] leading-4 ${tileClass[fit()]}`}
                     style={{ 'background-color': colors.bg, color: colors.fg }}
                     title={item
-                      ? `${item.cnName}${item.enName ? `（${item.enName}）` : ''} · 类别内相对丰度 ${formatPercent(item.abundancePct)}${item.taxId ? ` · taxId ${item.taxId}` : ''}${item.hazard ? ` · 危害等级 ${item.hazard}` : ''}`
-                      : `其它 ${restCount()} 种，合计约 ${formatPercent(restPct())}`}
+                      ? `${item.cnName}${item.enName ? `（${item.enName}）` : ''} · 类别内相对丰度 ${value}${item.taxId ? ` · taxId ${item.taxId}` : ''}${item.hazard ? ` · 危害等级 ${item.hazard}` : ''}`
+                      : `其它 ${restCount()} 种，合计约 ${value}`}
                     data-testid={isRest ? 'gpas-brief-rest' : 'gpas-brief-species'}
                   >
-                    <Show when={fit() !== 'dot'} fallback={<span class="sr-only">{item ? item.cnName : `其它 ${restCount()} 种`}</span>}>
-                      <span class={`min-w-0 font-semibold ${fit() === 'full' ? 'line-clamp-2' : 'truncate'}`}>
-                        {item ? item.cnName : `其它 ${restCount()} 种`}
+                    <Show when={fit() !== 'dot'} fallback={<span class="sr-only">{label}</span>}>
+                      <span class="min-w-0">
+                        <span class={`block font-semibold ${fit() === 'line' ? 'truncate' : 'line-clamp-2'} ${fit() === 'hero' ? 'text-xs' : ''}`}>{label}</span>
+                        <Show when={fit() === 'hero' && item?.enName}>
+                          <span class="mt-0.5 block truncate text-[10px] italic opacity-70">{item!.enName}</span>
+                        </Show>
                       </span>
                     </Show>
-                    <Show when={fit() === 'full' && item}>
-                      <Stars count={item!.hazard} />
-                    </Show>
-                    <Show when={fit() !== 'dot' || rect.width * width() / 100 >= 28}>
-                      <span class={`shrink-0 ${isRest ? 'opacity-80' : 'opacity-90'}`}>{formatPercent(item ? item.abundancePct : restPct())}</span>
-                    </Show>
+                    <span class={`flex shrink-0 items-end justify-between gap-1 ${fit() === 'dot' && rect.width * width() / 100 < 28 ? 'hidden' : ''}`}>
+                      <span class={`whitespace-nowrap tabular-nums ${fit() === 'hero' ? 'text-lg font-bold leading-6' : fit() === 'full' ? 'text-[13px] font-semibold' : ''} ${isRest ? 'opacity-80' : ''}`}>{value}</span>
+                      <Show when={(fit() === 'hero' || (fit() === 'full' && rect.width * width() / 100 >= 84)) && item}>
+                        <Stars count={item!.hazard} />
+                      </Show>
+                    </span>
                   </div>
                 </div>
               )
@@ -173,7 +191,7 @@ function FoldedBlock(props: { categories: Category[]; share: (category: Category
   const sharePct = () => Math.round(props.categories.reduce((sum, category) => sum + props.share(category), 0) * 10) / 10
   return (
     <section
-      class="flex min-w-0 flex-[1_1_160px] flex-col rounded-xl p-2"
+      class="flex min-w-0 flex-[1_1_160px] flex-col rounded-2xl p-2.5"
       style={{ 'background-color': otherTone.block, color: otherTone.label }}
       data-testid="gpas-brief-category"
     >
@@ -231,8 +249,8 @@ function AnalysisCard(props: { card: FileCard } & DetailProps) {
                 when={group().shown.length > 0}
                 fallback={<p class="px-1 text-xs text-slate-500">分析摘要中未检出微生物。</p>}
               >
-                <div class="flex flex-wrap gap-2">
-                  <For each={group().shown}>{(category, index) => <CategoryBlock category={category} index={index()} sharePct={share(category)} />}</For>
+                <div class="flex flex-wrap gap-2.5">
+                  <For each={group().shown}>{(category, index) => <CategoryBlock category={category} index={index()} sharePct={share(category)} lead={index() === 0 && group().shown.length > 1} />}</For>
                   <Show when={group().folded.length > 0}>
                     <FoldedBlock categories={group().folded} share={share} />
                   </Show>

@@ -258,6 +258,29 @@ test('analysis cards describe the brief as a per-category top-5 summary with spe
   await expect(page.getByText(/Count\/mL/)).toHaveCount(0)
 })
 
+// GPAS has so far sent three topInfos per category; cards must hold up to five.
+const fiveTop = (rawBrief.microbialInfo as RawCategory[]).map((category) => category.topInfos?.length ? {
+  ...category,
+  topInfos: [...category.topInfos, ...[['甲', '1.8%'], ['乙', '0.9%']].map(([suffix, abundance], index) => ({
+    taxCnName: `${category.microbialName}补充${suffix}`, taxEnName: '', taxId: `9${index}`, abundance, hazardIndex: index,
+  }))].slice(0, 5),
+} : category)
+
+test('cards show up to five species per category, each tile readable', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1600 })
+  await showCards(page, [card('s1', toBrief(fiveTop))])
+  const first = page.getByTestId('gpas-file-card').first()
+  await expect(first.getByText('丰度前 5', { exact: true })).toHaveCount(3)
+  const bacteria = first.getByTestId('gpas-brief-category').first()
+  await expect(bacteria.getByTestId('gpas-brief-species')).toHaveCount(5)
+  if (process.env.SHOTS) await first.screenshot({ path: `${process.env.SHOTS}/card.png` })
+  // Tiles never collapse into slivers: each is at least 40px on both sides.
+  for (const box of await bacteria.getByTestId('gpas-brief-species').evaluateAll((tiles) =>
+    tiles.map((tile) => tile.getBoundingClientRect()).map(({ width, height }) => ({ width, height })))) {
+    expect(Math.min(box.width, box.height)).toBeGreaterThanOrEqual(40)
+  }
+})
+
 test('a single sample without a brief says so on its card', async ({ page }) => {
   await showCards(page, [card('s2', null)])
   await expect(page.getByTestId('gpas-file-card')).toContainText('暂无分析摘要')
@@ -317,10 +340,11 @@ test('more than five detected categories fold into one "其他" block', async ({
 })
 
 test('analysis cards fit a phone-width screen', async ({ page }) => {
-  await page.setViewportSize({ width: 375, height: 800 })
-  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo))])
+  await page.setViewportSize({ width: 375, height: 1400 })
+  await showCards(page, [card('s1', toBrief(fiveTop))])
   const overflow = await page.getByTestId('gpas-file-card').first().evaluate((element) => element.scrollWidth - element.clientWidth)
   expect(overflow).toBeLessThanOrEqual(0)
+  if (process.env.SHOTS) await page.getByTestId('gpas-file-card').first().screenshot({ path: `${process.env.SHOTS}/card-phone.png` })
 })
 
 const resultRow = (index: number, speciesType: string, page: number) => ({

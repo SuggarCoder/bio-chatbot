@@ -4,15 +4,26 @@ export const NARROW_ASPECT = 0.9
 /** Rectangle in percent of the container. */
 export type TreemapRect = { key: string; x: number; y: number; width: number; height: number }
 
+/** Worst width/height ratio of a row of areas laid along a side of length `side`. */
+function worstRatio(row: number[], side: number) {
+  const sum = row.reduce((acc, value) => acc + value, 0)
+  const thickness = sum / side
+  return Math.max(...row.map((value) => {
+    const length = value / thickness
+    return Math.max(length / thickness, thickness / length)
+  }))
+}
+
 /**
- * Template layout: the first item takes a slice along the longer side of the
- * box (left column when wide, top row when tall), sized by its value; the
- * remaining items share the rest, stacked across the other axis. Item order is
- * kept, so callers put the largest first and a catch-all ("others") last.
- * Works for any number of items; very narrow boxes stack all items as rows.
+ * Squarified treemap (Bruls, Huizing & van Wijk): items fill rows along the
+ * shorter side of the remaining box, and a row closes once another item would
+ * make its tiles less square. Item order is kept, so callers put the largest
+ * first and a catch-all ("others") last; very narrow boxes stack all items as
+ * rows instead.
  *
- * `minShare` lifts tiny values so their tiles stay readable; the displayed
- * numbers must come from the data, not from the tile size.
+ * `aspect` is the box's width/height. `minShare` lifts tiny values so their
+ * tiles stay readable; the displayed numbers must come from the data, not from
+ * the tile size.
  */
 export function layoutTreemap(items: TreemapItem[], aspect = 1.6, minShare = 0.1): TreemapRect[] {
   const positive = items.filter((item) => Number.isFinite(item.value) && item.value > 0)
@@ -33,25 +44,39 @@ export function layoutTreemap(items: TreemapItem[], aspect = 1.6, minShare = 0.1
     })
   }
 
-  const [first, ...rest] = weighted
-  const firstShare = (first.value / sum) * 100
-  const restSum = sum - first.value
+  // Lay out in units where the box is aspect × 1, then convert to percent.
+  const areas = weighted.map((item) => (item.value / sum) * aspect)
   const rects: TreemapRect[] = []
-  let offset = 0
-  if (aspect >= 1) {
-    rects.push({ key: first.key, x: 0, y: 0, width: firstShare, height: 100 })
-    for (const item of rest) {
-      const height = (item.value / restSum) * 100
-      rects.push({ key: item.key, x: firstShare, y: offset, width: 100 - firstShare, height })
-      offset += height
+  let box = { x: 0, y: 0, width: aspect, height: 1 }
+  let index = 0
+  while (index < areas.length) {
+    const side = Math.min(box.width, box.height)
+    const row = [areas[index]]
+    let next = index + 1
+    while (next < areas.length && worstRatio([...row, areas[next]], side) <= worstRatio(row, side)) {
+      row.push(areas[next])
+      next += 1
     }
-  } else {
-    rects.push({ key: first.key, x: 0, y: 0, width: 100, height: firstShare })
-    for (const item of rest) {
-      const width = (item.value / restSum) * 100
-      rects.push({ key: item.key, x: offset, y: firstShare, width, height: 100 - firstShare })
-      offset += width
-    }
+    const thickness = row.reduce((acc, value) => acc + value, 0) / side
+    let offset = 0
+    row.forEach((area, position) => {
+      const length = area / thickness
+      const key = weighted[index + position].key
+      rects.push(box.width >= box.height
+        ? { key, x: box.x, y: box.y + offset, width: thickness, height: length }
+        : { key, x: box.x + offset, y: box.y, width: length, height: thickness })
+      offset += length
+    })
+    box = box.width >= box.height
+      ? { x: box.x + thickness, y: box.y, width: box.width - thickness, height: box.height }
+      : { x: box.x, y: box.y + thickness, width: box.width, height: box.height - thickness }
+    index = next
   }
-  return rects
+  return rects.map((rect) => ({
+    key: rect.key,
+    x: (rect.x / aspect) * 100,
+    y: rect.y * 100,
+    width: (rect.width / aspect) * 100,
+    height: rect.height * 100,
+  }))
 }

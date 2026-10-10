@@ -26,8 +26,8 @@ test('areas follow values, keep order, and skip empty items', () => {
   assert.deepEqual(rects.map((rect) => rect.key), ['a', 'b', 'c'])
   assert.ok(Math.abs(area(rects[0]) / 10_000 - 0.6) < 1e-9)
   assert.ok(Math.abs(area(rects[1]) / 10_000 - 0.3) < 1e-9)
-  // The largest item takes the left column of a wide box, like the template.
-  assert.deepEqual([rects[0].x, rects[0].y, rects[0].height], [0, 0, 100])
+  // The largest item starts at the top left of the box.
+  assert.deepEqual([rects[0].x, rects[0].y], [0, 0])
   assert.deepEqual(layoutTreemap([{ key: 'x', value: 0 }]), [])
 })
 
@@ -40,4 +40,17 @@ test('narrow boxes stack every item as a full-width row', () => {
 test('tiny values are lifted to a readable minimum share', () => {
   const rects = layoutTreemap([{ key: 'big', value: 98 }, { key: 'tiny', value: 2 }])
   assert.ok(area(rects[1]) / 10_000 > 0.08)
+})
+
+test('five species plus others stay close to square instead of thin strips', () => {
+  const aspect = 2
+  const values = [36.3, 24, 3.6, 1.8, 0.9, 33.4]
+  const rects = layoutTreemap(values.map((value, index) => ({ key: `k${index}`, value })), aspect)
+  assert.deepEqual(rects.map((rect) => rect.key), values.map((_, index) => `k${index}`))
+  for (const rect of rects) {
+    // Back to box units (width is `aspect` times the height).
+    const width = rect.width * aspect
+    const ratio = Math.max(width / rect.height, rect.height / width)
+    assert.ok(ratio < 3, `${rect.key} ratio ${ratio.toFixed(2)}`)
+  }
 })
