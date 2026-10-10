@@ -2,6 +2,7 @@ import { For, Show, type JSX } from 'solid-js'
 import { categorySharePct, type FileBrief } from '../../../server/gpasContracts'
 import { hazardGradient } from './evidenceRadar'
 import { formatPercent, formatReads, formatVolume, toneFor } from './FileAnalysisCards'
+import { categoryTopSpecies } from './resultHelpers'
 
 export function briefStats(brief: FileBrief) {
   const detected = brief.categories.filter((category) => category.speciesCount > 0)
@@ -9,15 +10,16 @@ export function briefStats(brief: FileBrief) {
   const maxHazard = brief.categories.reduce((max, category) => Math.max(max, category.maxHazard), 0)
   // Slices use the same category colors as the analysis cards.
   const slices = detected.map((category, index) => ({
+    type: category.type,
     name: category.name,
     count: category.speciesCount,
     sharePct: categorySharePct(category.speciesCount, brief.categories),
     color: toneFor(category.type, index).tiles[0].bg,
   }))
-  const topSpecies = detected
-    .flatMap((category) => category.top.map((item) => ({ ...item, category: category.name })))
-    .sort((a, b) => b.abundancePct - a.abundancePct)
-    .slice(0, 3)
+  const topSpecies = categoryTopSpecies(brief).map((item) => ({
+    ...item,
+    color: slices.find((slice) => slice.type === item.type && slice.name === item.category)?.color,
+  }))
   return { totalSpecies, categoryCount: detected.length, maxHazard, slices, topSpecies }
 }
 
@@ -108,15 +110,15 @@ export function BriefStats(props: { brief: FileBrief }) {
             <p class="mb-2 text-[11px] font-medium text-slate-400">丰度 Top 物种 · 类别内相对丰度</p>
             <ol class="space-y-2" data-testid="gpas-stat-top">
               <For each={stats().topSpecies}>
-                {(item, index) => (
+                {(item) => (
                   <li class="min-w-0 text-xs" title={`${item.cnName}${item.enName ? `（${item.enName}）` : ''}`}>
-                    <div class="flex items-baseline gap-2">
-                      <span class="w-3 shrink-0 text-[11px] font-semibold tabular-nums text-teal-700">{index() + 1}</span>
+                    <div class="flex items-center gap-2">
+                      <span class="h-2 w-2 shrink-0 rounded-full" style={{ 'background-color': item.color }} aria-hidden="true" />
                       <span class="min-w-0 flex-1 truncate font-semibold text-slate-700">{item.cnName}</span>
                       <span class="shrink-0 text-[11px] text-slate-400">{item.category}</span>
                       <span class="w-11 shrink-0 text-right font-semibold tabular-nums text-slate-700">{formatPercent(item.abundancePct)}</span>
                     </div>
-                    <span class="ml-5 mt-1 block h-1 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                    <span class="ml-4 mt-1 block h-1 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
                       <span class="block h-full rounded-full bg-teal-600/80" style={{ width: `${Math.min(100, item.abundancePct)}%` }} />
                     </span>
                   </li>

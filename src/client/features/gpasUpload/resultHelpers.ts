@@ -28,6 +28,21 @@ export function resultCategories(cards: readonly FileCard[], taskId: string) {
 }
 
 /**
+ * Each detected category's most abundant species, in the brief's category
+ * order (the detail panel's tab order). Abundance is relative within a
+ * category, so species of different categories are not ranked together.
+ */
+export function categoryTopSpecies(brief: FileBrief) {
+  return brief.categories
+    .filter((category) => category.speciesCount > 0 && category.top.length > 0)
+    .map((category) => ({
+      ...category.top.reduce((best, item) => item.abundancePct > best.abundancePct ? item : best),
+      type: category.type,
+      category: category.name,
+    }))
+}
+
+/**
  * Category colors for composition bars, validated as a categorical set
  * (adjacent CVD and normal-vision separation on the light surface). Known
  * categories keep their slot; others take the free slots in brief order.
