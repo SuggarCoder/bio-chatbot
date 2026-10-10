@@ -204,21 +204,44 @@ const card = (fileId: string, brief: unknown, analysisId: string | null = null) 
   sampleType: 'clinic', status: 'uploaded', analysisStatus: brief ? 'success' : 'running', metaStatus: 'missing', uploadTime: '2026-01-06 20:54:10', analysisId, brief,
 })
 
-async function showCards(page: Page, cards: unknown[]) {
+async function showCards(page: Page, cards: unknown[], text = '这批文件的分析摘要如下。') {
   await mockApis(page, () => ({ status: 200 }))
   await page.route(`**/ai-chatbot/api/conversations/${chatId}`, (route) => route.fulfill({ json: {
     id: chatId, title: '上传', chatType: 'general', status: 'active', createdAt: timestamp, updatedAt: timestamp,
     pageInfo: { hasMore: false, beforeSeq: null }, activeGeneration: null,
     messages: [
       { id: 'e9345da6-998b-4462-a539-000000000001', seq: 1, role: 'user', status: 'completed', content: '查一下', parts: [], createdAt: timestamp, vote: null, executionSteps: [] },
-      { id: 'e9345da6-998b-4462-a539-000000000002', seq: 2, role: 'assistant', status: 'completed', content: '这批文件的分析摘要如下。',
-        parts: [{ type: 'text', order: 0, text: '这批文件的分析摘要如下。' }, { type: 'gpas', order: 1, files: cards }],
+      { id: 'e9345da6-998b-4462-a539-000000000002', seq: 2, role: 'assistant', status: 'completed', content: text,
+        parts: [{ type: 'text', order: 0, text }, { type: 'gpas', order: 1, files: cards }],
         createdAt: timestamp, vote: null, executionSteps: [] },
     ],
   } }))
   await page.goto(`/ai-chatbot/${chatId}`)
   await expect(page.getByTestId('gpas-file-cards').first()).toBeVisible()
 }
+
+test('markdown tables in replies are framed like the file list table, with row dividers only', async ({ page }) => {
+  const table = '| 文件名 | 状态 | Reads |\n| --- | --- | ---: |\n| s1_R1.fq.gz | 已完成 | 38,959,015 |\n| s2_R1.fq.gz | 分析中 | — |'
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo))], `这批文件的状态如下。\n\n${table}`)
+  const frame = page.locator('.markdown-table')
+  await expect(frame.getByRole('row')).toHaveCount(3)
+  const style = await frame.evaluate((element) => {
+    const cell = element.querySelector('tbody td')!
+    return {
+      radius: getComputedStyle(element).borderTopLeftRadius,
+      cellLeft: getComputedStyle(cell).borderLeftWidth,
+      cellTop: getComputedStyle(cell).borderTopWidth,
+      tableWidth: element.querySelector('table')!.getBoundingClientRect().width,
+      frameWidth: element.getBoundingClientRect().width,
+    }
+  })
+  expect(style.radius).toBe('16px')
+  expect(style.cellLeft).toBe('0px')
+  expect(style.cellTop).toBe('1px')
+  expect(style.tableWidth).toBeCloseTo(style.frameWidth, 0)
+  await expect(frame.getByRole('cell', { name: '38,959,015' })).toHaveCSS('text-align', 'right')
+  if (process.env.SHOTS) await frame.screenshot({ path: `${process.env.SHOTS}/markdown-table.png` })
+})
 
 test('analysis cards describe the brief as a per-category top-5 summary with species shares', async ({ page }) => {
   await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo))])

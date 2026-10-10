@@ -149,7 +149,9 @@ function MarkdownToken(props: { token: Token }): JSX.Element {
     case 'list_item':
       return <li><TokenList tokens={childTokens(token)} /></li>
     case 'table':
+      // Styled like the GPAS file list table: framed, scrolls sideways when wide.
       return (
+        <div class="markdown-table">
         <table>
           <thead>
             <tr>
@@ -170,6 +172,7 @@ function MarkdownToken(props: { token: Token }): JSX.Element {
             </For>
           </tbody>
         </table>
+        </div>
       )
     default:
       return childTokens(token).length > 0

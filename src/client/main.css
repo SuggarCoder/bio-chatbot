@@ -314,7 +314,7 @@
   .markdown-message ol,
   .markdown-message blockquote,
   .markdown-message pre,
-  .markdown-message table {
+  .markdown-message .markdown-table {
     margin: .75rem 0;
   }
 
@@ -376,23 +376,59 @@
     color: inherit;
   }
 
-  .markdown-message table {
-    display: block;
+  /* Same look as the GPAS file list table: a framed card, row dividers only. */
+  .markdown-message .markdown-table {
     max-width: 100%;
     overflow-x: auto;
+    border-radius: 1rem;
+    background: white;
+    box-shadow: 0 0 0 1px rgb(226 232 240);
+  }
+
+  .markdown-message table {
+    width: 100%;
     border-collapse: collapse;
+    font-size: .8125rem;
+    line-height: 1.45;
+    font-variant-numeric: tabular-nums;
   }
 
   .markdown-message th,
   .markdown-message td {
-    border: 1px solid rgb(226 232 240);
-    padding: .4rem .65rem;
+    padding: .6rem .75rem;
     text-align: left;
+    vertical-align: top;
+  }
+
+  .markdown-message th:first-child,
+  .markdown-message td:first-child {
+    padding-left: 1rem;
+  }
+
+  .markdown-message th:last-child,
+  .markdown-message td:last-child {
+    padding-right: 1rem;
   }
 
   .markdown-message th {
     background: rgb(248 250 252);
+    color: rgb(100 116 139);
+    font-size: .6875rem;
     font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .markdown-message td {
+    border-top: 1px solid rgb(241 245 249);
+    color: rgb(51 65 85);
+  }
+
+  .markdown-message tbody tr {
+    transition: background-color .15s;
+  }
+
+  .markdown-message tbody tr:hover {
+    background: rgb(240 253 250 / .5);
   }
 
   .markdown-message a {
