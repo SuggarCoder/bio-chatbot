@@ -149,7 +149,11 @@ test('the tray sits above the input, offers only planned sample types and explai
   const trayBox = (await tray.boundingBox())!
   const inputBox = (await composer(page).boundingBox())!
   expect(trayBox.y + trayBox.height).toBeLessThanOrEqual(inputBox.y + 1)
+  // Files sit side by side.
+  const firstFile = (await page.getByTestId('gpas-upload-file').first().boundingBox())!
   const lastFile = (await page.getByTestId('gpas-upload-file').last().boundingBox())!
+  expect(lastFile.y).toBeCloseTo(firstFile.y, 0)
+  expect(lastFile.x).toBeGreaterThan(firstFile.x + firstFile.width)
   const typeRow = (await page.getByTestId('gpas-sample-types').boundingBox())!
   expect(typeRow.y).toBeGreaterThanOrEqual(lastFile.y + lastFile.height)
 
@@ -160,6 +164,20 @@ test('the tray sits above the input, offers only planned sample types and explai
   await expect(page.getByRole('tooltip')).toHaveText('请先选择样本类型')
   await page.getByRole('radio', { name: '环境样本' }).click()
   await expect(send).toBeEnabled()
+})
+
+test('selected files wrap onto new rows at the composer edge', async ({ page }) => {
+  await mockApis(page, () => ({ status: 200 }))
+  await page.goto(`/ai-chatbot/${chatId}`)
+  await fileInput(page).setInputFiles(Array.from({ length: 8 }, (_, index) =>
+    upload(`KY14592-${index + 1}-T225R-long-sample-name.fq`, fastq(`S${index}`, null))))
+  const files = page.getByTestId('gpas-upload-file')
+  await expect(files).toHaveCount(8)
+  const list = (await page.getByTestId('gpas-upload-files').boundingBox())!
+  const boxes = await Promise.all(Array.from({ length: 8 }, async (_, index) => (await files.nth(index).boundingBox())!))
+  expect(new Set(boxes.map((box) => Math.round(box.y))).size).toBeGreaterThan(1)
+  for (const box of boxes) expect(box.x + box.width).toBeLessThanOrEqual(list.x + list.width + 1)
+  if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/tray.png` })
 })
 
 test('a single planned sample type is selected automatically', async ({ page }) => {

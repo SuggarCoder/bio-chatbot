@@ -70,13 +70,14 @@ export function UploadTray(props: { controller: GpasUploadController }) {
       <For each={c.notices()}>{(notice) => <p class="font-medium text-rose-500">{notice}</p>}</For>
 
       <Show when={c.hasFiles()}>
-        <ul class="space-y-1">
+        {/* Files sit side by side and wrap at the composer's edge. */}
+        <ul class="flex flex-wrap gap-1.5" data-testid="gpas-upload-files">
           <Show
             when={rows()}
             fallback={
               <For each={c.files()}>
                 {(file) => (
-                  <li class="flex items-center gap-2 text-slate-500">
+                  <li class="flex min-w-0 max-w-full items-center gap-2 rounded-lg bg-slate-50 px-2 py-1 text-slate-500">
                     <span class="truncate">{file.name}</span>
                     <span class="shrink-0 text-slate-400">{formatSize(file.size)}</span>
                     <span class="shrink-0">正在校验单双端…</span>
@@ -91,7 +92,7 @@ export function UploadTray(props: { controller: GpasUploadController }) {
                   const label = () => layoutLabel(result, groupNumbers())
                   const progress = () => c.snapshot()?.files.get(result.file)
                   return (
-                    <li class="flex flex-wrap items-center gap-2" data-testid="gpas-upload-file">
+                    <li class="flex min-w-0 max-w-full flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-2 py-1" data-testid="gpas-upload-file">
                       <span class="min-w-0 max-w-full truncate font-medium text-slate-700">{result.file.name}</span>
                       <span class="shrink-0 text-slate-400">{formatSize(result.file.size)}</span>
                       <span class={`shrink-0 rounded-full px-2 py-0.5 ring-1 ${toneClass[label().tone]}`}>{label().text}</span>
