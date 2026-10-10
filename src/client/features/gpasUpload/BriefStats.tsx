@@ -1,13 +1,12 @@
 import { For, Show, type JSX } from 'solid-js'
 import { categorySharePct, type FileBrief } from '../../../server/gpasContracts'
-import { hazardGradient } from './evidenceRadar'
+import { HazardStars } from './HazardStars'
 import { formatPercent, formatReads, formatVolume, toneFor } from './FileAnalysisCards'
 import { categoryTopSpecies } from './resultHelpers'
 
 export function briefStats(brief: FileBrief) {
   const detected = brief.categories.filter((category) => category.speciesCount > 0)
   const totalSpecies = detected.reduce((sum, category) => sum + category.speciesCount, 0)
-  const maxHazard = brief.categories.reduce((max, category) => Math.max(max, category.maxHazard), 0)
   // Slices use the same category colors as the analysis cards.
   const slices = detected.map((category, index) => ({
     type: category.type,
@@ -20,7 +19,13 @@ export function briefStats(brief: FileBrief) {
     ...item,
     color: slices.find((slice) => slice.type === item.type && slice.name === item.category)?.color,
   }))
-  return { totalSpecies, categoryCount: detected.length, maxHazard, slices, topSpecies }
+  // maxHazandIndex is per category: each detected category keeps its own level, in tab order.
+  const hazards = detected.map((category, index) => ({
+    name: category.name,
+    level: category.maxHazard,
+    color: slices[index].color,
+  }))
+  return { totalSpecies, categoryCount: detected.length, slices, topSpecies, hazards }
 }
 
 function Donut(props: { slices: ReturnType<typeof briefStats>['slices'] }) {
@@ -63,7 +68,6 @@ function Kpi(props: { label: string; value: string; hint?: JSX.Element; primary?
 /** Sample-level statistics from briefAnalysis, above the species table. */
 export function BriefStats(props: { brief: FileBrief }) {
   const stats = () => briefStats(props.brief)
-  const hazard = () => hazardGradient(stats().maxHazard)
   return (
     <section class="space-y-2.5 px-3 pb-1 pt-3" aria-label="分析摘要统计" data-testid="gpas-brief-stats">
       <div class="flex flex-wrap gap-2.5">
@@ -79,13 +83,21 @@ export function BriefStats(props: { brief: FileBrief }) {
           value={props.brief.totalReads != null ? formatReads(props.brief.totalReads).replace(' Reads', '') : '—'}
           hint={props.brief.dataVolume != null ? `数据量 ${formatVolume(props.brief.dataVolume)}` : undefined}
         />
-        <Kpi
-          label="最高风险"
-          value={stats().maxHazard > 0 ? hazard().label : '—'}
-          hint={stats().maxHazard > 0
-            ? <span style={{ color: hazard().ink }}>{'★'.repeat(Math.min(5, stats().maxHazard))}</span>
-            : '未检出风险物种'}
-        />
+        <div class="min-w-0 flex-[1_1_150px] rounded-2xl bg-white p-3 text-slate-800 ring-1 ring-slate-100" data-testid="gpas-stat-hazard">
+          <p class="text-[11px] font-medium text-slate-400">最高风险 · 按类别</p>
+          <ul class="mt-1.5 space-y-1 text-xs">
+            <For each={stats().hazards}>
+              {(item) => (
+                <li class="flex items-center gap-1.5">
+                  <span class="h-2 w-2 shrink-0 rounded-full" style={{ 'background-color': item.color }} aria-hidden="true" />
+                  <span class="min-w-0 flex-1 truncate text-slate-600">{item.name}</span>
+                  <HazardStars level={item.level} />
+                  <span class="w-9 shrink-0 text-right font-semibold tabular-nums text-slate-700">{item.level > 0 ? `${item.level} 级` : '—'}</span>
+                </li>
+              )}
+            </For>
+          </ul>
+        </div>
       </div>
 
       <div class="flex flex-wrap gap-2.5">

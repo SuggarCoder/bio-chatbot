@@ -309,7 +309,10 @@ const resultRow = (index: number, speciesType: string, page: number) => ({
 })
 
 test('"查看详情" asks for the analysis detail and the panel pages each category on demand', async ({ page }) => {
-  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo), 'task-1')])
+  // Each category has its own maxHazandIndex; the panel must keep them apart.
+  const levels: Record<string, number> = { bacteria: 3, viral: 4, fungi: 0 }
+  await showCards(page, [card('s1', toBrief(rawBrief.microbialInfo.map((category: RawCategory) =>
+    ({ ...category, maxHazandIndex: levels[category.microbialType] ?? category.maxHazandIndex }))), 'task-1')])
   const queries: Array<Record<string, string>> = []
   await page.route('**/ai-chatbot/api/gpas/file/results**', async (route) => {
     const query = Object.fromEntries(new URL(route.request().url()).searchParams)
@@ -359,6 +362,16 @@ test('"查看详情" asks for the analysis detail and the panel pages each categ
   // The donut stands alone (no ring around it); top species are plain list rows.
   await expect(panel.getByTestId('gpas-stat-donut')).toBeVisible()
   expect(await panel.getByTestId('gpas-stat-donut').evaluate((svg) => getComputedStyle(svg.parentElement!).backgroundImage)).toBe('none')
+  // The highest hazard level per detected category, in the tab order.
+  const hazardRows = panel.getByTestId('gpas-stat-hazard').getByRole('listitem')
+  await expect(hazardRows).toHaveCount(3)
+  await expect(hazardRows.nth(0)).toContainText('细菌')
+  await expect(hazardRows.nth(0)).toContainText('3 级')
+  await expect(hazardRows.nth(1)).toContainText('病毒')
+  await expect(hazardRows.nth(1)).toContainText('4 级')
+  await expect(hazardRows.nth(1).getByTestId('gpas-hazard-stars')).toHaveAttribute('aria-label', '危害等级 4')
+  await expect(hazardRows.nth(2)).toContainText('真菌')
+  await expect(hazardRows.nth(2)).toContainText('—')
   // Each category's most abundant species, in the tab order.
   const topRows = panel.getByTestId('gpas-stat-top').getByRole('listitem')
   await expect(topRows).toHaveCount(3)
@@ -370,7 +383,7 @@ test('"查看详情" asks for the analysis detail and the panel pages each categ
   await expect(panel.getByRole('columnheader')).toHaveText(['序号', '生物学编号', '物种名称', '定植特性', '风险分级', '覆盖度', '可信度'])
   await expect(panel.getByTestId('gpas-result-index').first()).toHaveText('1')
   await expect(panel.getByTestId('gpas-result-row').nth(3)).toContainText('1177577')
-  await expect(panel.getByTestId('gpas-hazard-stars').first()).toHaveAttribute('aria-label', '危害等级 1')
+  await expect(panel.getByTestId('gpas-result-table').getByTestId('gpas-hazard-stars').first()).toHaveAttribute('aria-label', '危害等级 1')
   if (process.env.SHOTS) {
     await page.waitForTimeout(400)
     await page.screenshot({ path: `${process.env.SHOTS}/table.png` })
