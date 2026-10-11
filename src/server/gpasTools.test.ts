@@ -280,14 +280,17 @@ test('file list tool returns one analysis card per sample and wording rules for 
   assert.doesNotMatch(JSON.stringify(model), /microbialInfo|tool_code/)
 })
 
-test('analyzedOnly reads past the newest uploads and returns analysed samples only', async (t) => {
-  // 120 rows, newest first: uploads still in progress, then analysed samples
-  // from page 2 on. One pair's two listings fall on different pages.
+test('analyzedOnly reads past the newest uploads and returns finished analyses only', async (t) => {
+  // 120 rows, newest first: uploads still in progress, then finished analyses
+  // from page 2 on. One pair's two listings fall on different pages, and a
+  // brief alone (analysis not yet verified) does not count as finished.
+  const done = { analysisStatus: 'analysisverified', briefAnalysis: sampleBrief }
   const all: Array<Record<string, unknown>> = Array.from({ length: 120 }, (_, index) => index < 60
     ? { isPair: false, file1: gpasFile(`new-${index}`, { groupId: null, analysisStatus: 'noanalysis' }) }
-    : { isPair: false, file1: gpasFile(`old-${index}`, { groupId: null, analysisId: `task-${index}`, briefAnalysis: sampleBrief }) })
-  all[49] = { isPair: true, file1: gpasFile('p-2', { groupId: 'g-p', fileName: 'p_R2.fq.gz' }), file2: gpasFile('p-1', { groupId: 'g-p', fileName: 'p_R1.fq.gz' }) }
-  all[50] = { isPair: true, file1: gpasFile('p-1', { groupId: 'g-p', fileName: 'p_R1.fq.gz', analysisId: 'task-p', briefAnalysis: sampleBrief }), file2: gpasFile('p-2', { groupId: 'g-p', fileName: 'p_R2.fq.gz' }) }
+    : { isPair: false, file1: gpasFile(`old-${index}`, { groupId: null, analysisId: `task-${index}`, ...done }) })
+  all[10] = { isPair: false, file1: gpasFile('running', { groupId: null, analysisId: 'task-r', analysisStatus: 'analysising', briefAnalysis: sampleBrief }) }
+  all[49] = { isPair: true, file1: gpasFile('p-2', { groupId: 'g-p', fileName: 'p_R2.fq.gz', briefAnalysis: sampleBrief }), file2: gpasFile('p-1', { groupId: 'g-p', fileName: 'p_R1.fq.gz' }) }
+  all[50] = { isPair: true, file1: gpasFile('p-1', { groupId: 'g-p', fileName: 'p_R1.fq.gz', analysisId: 'task-p', ...done }), file2: gpasFile('p-2', { groupId: 'g-p', fileName: 'p_R2.fq.gz' }) }
   const queries: Array<Record<string, string>> = []
   t.mock.method(globalThis, 'fetch', async (url: URL) => {
     queries.push(Object.fromEntries(url.searchParams))
@@ -302,15 +305,18 @@ test('analyzedOnly reads past the newest uploads and returns analysed samples on
 
   assert.deepEqual(queries.map((query) => [query.page, query.pageSize]), [['1', '50'], ['2', '50'], ['3', '50']])
   assert.ok(queries.every((query) => query.ownTeamId === 'team-test' && !('analyzedOnly' in query)))
-  // The pair counts once; every listed sample has a brief.
+  // The pair counts once, from its finished listing; every listed sample is finished.
   assert.equal(data.total, 61)
   assert.equal(data.rows.length, 20)
   assert.equal(data.hasMore, true)
   assert.deepEqual(data.scan, { uploaded: 120, read: 120, complete: true })
-  assert.ok(data.cards.every((card) => card.brief))
+  assert.ok(data.cards.every((card) => card.brief && card.analysisStatus === 'analysisverified'))
   assert.deepEqual(data.cards[0].files.map((file) => file.fileId), ['p-1', 'p-2'])
+  assert.equal(data.cards[0].analysisId, 'task-p')
 
-  const model = tool.toModel(data) as { total: number; hasMore: boolean; note: string }
+  const model = tool.toModel(data) as { total: number; hasMore: boolean; note: string; samples: Array<{ analysisDone: boolean }> }
+  assert.ok(model.samples.every((sample) => sample.analysisDone))
+  assert.match(model.note, /analysisverified/)
   assert.equal(model.total, 61)
   assert.equal(model.hasMore, true)
   assert.match(model.note, /已全部检查/)

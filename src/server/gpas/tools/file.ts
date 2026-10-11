@@ -137,6 +137,13 @@ function briefFor(files: ListFile[]): FileBrief | null {
 
 type ListRow = { paired: boolean; groupId: string | null; files: ListFile[] }
 
+/** GPAS marks a finished analysis with this `analysisStatus`; other values mean not finished. */
+export const ANALYSIS_DONE_STATUS = 'analysisverified'
+const isDoneStatus = (status: string | null) => status?.trim().toLowerCase() === ANALYSIS_DONE_STATUS
+const analysisDone = (files: ListFile[]) => files.some((file) => isDoneStatus(file.analysisStatus))
+/** Which listing of a sample to keep: a finished analysis first, then a readable brief. */
+const rowRank = (row: ListRow) => (analysisDone(row.files) ? 2 : 0) + (briefFor(row.files) ? 1 : 0)
+
 /**
  * A sample's identity: a pair by its groupId, else its analysisId; a
  * single-end file (or a pair carrying neither) by its fileIds.
@@ -151,14 +158,15 @@ function sampleKey(row: ListRow) {
 /**
  * merge/list can return the same pair twice (R1/R2 and R2/R1), often with
  * the analysis on only one of them. Rows of the same sample collapse into
- * one, keeping a row that has a readable brief; pair files are ordered by name.
+ * one, keeping a row whose analysis is finished, else one with a readable
+ * brief; pair files are ordered by name.
  */
 export function mergeDuplicateRows(rows: ListRow[]): ListRow[] {
   const merged = new Map<string, ListRow>()
   for (const row of rows) {
     const key = sampleKey(row)
     const kept = merged.get(key)
-    if (!kept || (!briefFor(kept.files) && briefFor(row.files))) merged.set(key, row)
+    if (!kept || rowRank(row) > rowRank(kept)) merged.set(key, row)
   }
   return [...merged.values()].map((row) => ({
     ...row,
@@ -174,7 +182,7 @@ function toCard(row: { paired: boolean; groupId: string | null; files: ListFile[
     files: row.files.map((file) => ({ fileId: file.fileId, fileName: file.fileName, sizeBytes: file.size ?? null })),
     sampleType: first.sampleType,
     status: first.status,
-    analysisStatus: first.analysisStatus,
+    analysisStatus: (row.files.find((file) => isDoneStatus(file.analysisStatus)) ?? first).analysisStatus,
     metaStatus: first.metaStatus,
     uploadTime: first.uploadTime,
     analysisId: row.files.find((file) => file.analysisId)?.analysisId ?? null,
@@ -220,7 +228,7 @@ export function fileListReply(data: UploadedFileList): string {
 function pagingNote(data: UploadedFileList): string {
   if (!data.page) return ''
   const scope = data.scan
-    ? `total 是有分析结果的样本数（服务端读取了最近上传的 ${data.scan.read} 个文件行，共 ${data.scan.uploaded} 个`
+    ? `total 是分析已完成（analysisStatus=${ANALYSIS_DONE_STATUS}）的样本数（服务端读取了最近上传的 ${data.scan.read} 个文件行，共 ${data.scan.uploaded} 个`
       + `${data.scan.complete ? '，已全部检查' : '，更早的上传未检查，回复时要说明是最近上传中的结果，更早的可到 GPAS Web 查看'}）。`
     : 'total 是符合条件的样本总数，samples 只是其中一页；不要把这一页当成全部，也不要据此推断其余样本的分析状态。'
   const more = data.hasMore ? `还有更多样本（hasMore=true），回复时说明共 ${data.total} 个，可继续查看下一页（page=${data.page + 1}）。` : ''
@@ -229,13 +237,13 @@ function pagingNote(data: UploadedFileList): string {
 
 export const fileListTool = defineGpasTool({
   id: 'file.list', domain: 'file', title: '上传文件列表', effect: 'read',
-  description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态，结果分页（默认每页 20 个样本，按上传时间从新到旧）。传入 fileNames 时按文件名查询并只返回这些文件（用于展示刚上传的一批文件的分析结果）；fileName 可传样本名，用于按样本名查找样本的 taskId（分析 ID）；用户只想看已有分析结果的样本时传 analyzedOnly=true，服务端会翻阅多页只返回有分析结果的样本。',
+  description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态，结果分页（默认每页 20 个样本，按上传时间从新到旧）。传入 fileNames 时按文件名查询并只返回这些文件（用于展示刚上传的一批文件的分析结果）；fileName 可传样本名，用于按样本名查找样本的 taskId（分析 ID）；用户只想看已有分析结果的样本时传 analyzedOnly=true，服务端会翻阅多页只返回分析已完成的样本。',
   examples: ['我上传的文件', '刚才上传的测序数据状态', '查一下质检结果', '我的文件列表', '上传的文件分析完了吗', '只展示我已经有查询结果的样本', '哪些样本已经分析完了'],
   policy: '可以查询当前团队上传文件的列表、状态与分析摘要（各类别丰度前 5 的物种及其它、各类别检出种数占比），结果以卡片展示；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。',
   input: z.object({
     fileNames: z.array(z.string().trim().min(1).max(255)).max(20).optional(),
     fileName: filter,
-    /** Only samples with an analysis result (a readable briefAnalysis). */
+    /** Only samples whose analysis is finished (analysisStatus analysisverified). */
     analyzedOnly: z.boolean().optional(),
     status: filter,
     qcStatus: filter,
@@ -282,7 +290,7 @@ export const fileListTool = defineGpasTool({
         list({ ...filters, page: index + 2, pageSize: SCAN_PAGE_SIZE })))
       const listed = [first, ...rest].flatMap(toRows)
       // Merged across pages: a pair's two listings may fall on different pages.
-      const analysed = mergeDuplicateRows(listed).filter((row) => briefFor(row.files))
+      const analysed = mergeDuplicateRows(listed).filter((row) => analysisDone(row.files))
       const rows = analysed.slice((page - 1) * pageSize, page * pageSize)
       const complete = listed.length >= uploaded
       return {
@@ -318,6 +326,8 @@ export const fileListTool = defineGpasTool({
     note: pagingNote(data) + '结果已展示在回复下方（单个样本为卡片，多个样本为表格），只需简短解读，不要逐条罗列。brief 为分析摘要：top 是该类别内相对丰度前 topN 的物种，'
       + '该类别共检出 speciesCount 种，不是只检出这几种；abundance 为类别内相对丰度。'
       + 'sharePct 是该类别检出种数占全部检出种数的比例，要说“种数占比”，不是丰度或 reads 占比。'
+      + `analysisDone 为 true 表示分析已完成（analysisStatus=${ANALYSIS_DONE_STATUS}），其它 analysisStatus 都是尚未完成；`
+      + '向用户说“分析已完成”，不要把状态值直译成“已验证”。'
       + 'taskId 只用于调用样本分析详情工具，不要展示给用户；称呼样本时用 sampleName。',
     samples: data.cards.map((card, index) => ({
       sampleName: sampleNameOf(card.files.map((file) => file.fileName)),
@@ -327,6 +337,7 @@ export const fileListTool = defineGpasTool({
       sampleType: card.sampleType,
       status: card.status,
       analysisStatus: card.analysisStatus,
+      analysisDone: isDoneStatus(card.analysisStatus),
       metaStatus: card.metaStatus,
       brief: briefForModel(card.brief),
     })),

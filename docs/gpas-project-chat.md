@@ -119,8 +119,8 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 
 不按文件名查询时 `file.list` 是分页的（默认每页 20 个样本，最新上传在前），交给模型的结果带 `total`、`page`、`hasMore`
 和说明，避免模型把第一页当成全部样本。用户只想看“已经有查询结果的样本”时，模型传 `analyzedOnly=true`：
-服务端按每页 50 行读取最近上传的至多 10 页（500 行，第 1 页之后并行），跨页合并同一样本后只保留有可解析 `briefAnalysis`
-的样本，再按 `page`/`pageSize` 分页返回；`scan` 说明读取了多少行、是否已读完全部上传，未读完时模型需说明更早的上传未检查。
+服务端按每页 50 行读取最近上传的至多 10 页（500 行，第 1 页之后并行），跨页合并同一样本后只保留分析已完成（`analysisStatus=analysisverified`，
+其它取值均为未完成）的样本，再按 `page`/`pageSize` 分页返回；`scan` 说明读取了多少行、是否已读完全部上传，未读完时模型需说明更早的上传未检查。
 
 `file.list` 的结果以“病原体分类分布”卡片展示在助手回复下方（每个样本一张，双端合并），由
 `src/client/features/gpasUpload/FileAnalysisCards.tsx` 渲染，数据来自解析后的 `briefAnalysis`（`parseBrief`）：
@@ -133,7 +133,7 @@ generation 查询；不记录 Cookie 或工具返回的数据。
   （`tileFit`：大块显示名称、学名、大号丰度和危害星级；中块显示名称和丰度；小块单行；最小块只显示丰度，名称在提示中）。
   目前 GPAS 每个类别只返回 3 条 `topInfos`，卡片因此显示“丰度前 3”；上游返回更多时最多显示 5 条。
 - 单端与双端文件的分析结果一致，双端样本只展示一份：取第一个可解析的 `briefAnalysis`。
-  `merge/list` 可能把同一对双端文件按 R1/R2、R2/R1 各返回一行，服务端合并同一样本的行（`mergeDuplicateRows`）：双端按 `groupId`，缺失时按 `analysisId`，单端按 `fileId`，保留有分析结果的那行。
+  `merge/list` 可能把同一对双端文件按 R1/R2、R2/R1 各返回一行，服务端合并同一样本的行（`mergeDuplicateRows`）：双端按 `groupId`，缺失时按 `analysisId`，单端按 `fileId`，保留分析已完成的那行，其次保留有可解析 brief 的那行。
 - 检出类别最多显示 5 块，超过时按检出种数取前 4 块，其余合并为“其他”；未检出的类别列在“未检出”一行。
 - ★ 数量为 `hazardIndex`。brief 缺失或无法解析时，卡片只显示文件信息和分析状态。
 - 卡片只用于单个样本；多个样本时改为一张表格（样本名、物种组成、检出种数、最高风险、Reads、查看详情）。
@@ -207,7 +207,8 @@ taskId 只用于调用详情工具，回复、入口卡片和面板标题都用�
 10. `summary/submit/info` 在多项目团队下 `projectPlanInfo` 的实际形状（当前同时接受对象或对象数组）。
 11. 各类别的 `topInfos` 实际最多返回几条（卡片最多展示 5 条）。
 12. `dataVolume` 的单位（当前显示为“数据量 10.68 G”）；`hazardIndex` 的取值范围（当前按 0–5 颗星显示）。
-13. `metaStatus`、`analysisStatus` 的取值与中文含义（当前原样显示）。
+13. `metaStatus`、`analysisStatus` 的取值与中文含义（当前原样显示）。已确认：`analysisStatus=analysisverified` 表示分析完成，其它取值为未完成；
+    `merge/list` 的 `analysisStatus` 查询参数能否直接按该值筛选仍待确认（能的话 `analyzedOnly` 可不再翻页扫描）。
 14. `merge/list` 的 `fileName` 是精确匹配还是模糊匹配（服务端已按文件名精确过滤）；文件行上是否有 `analysisId`，且即为 `file/result/list` 的 `taskId`。
 15. `file/result/list` 的 `speciesType` 取值是否与 brief 的 `microbialType`（bacteria/viral/fungi…）一致；`coverage` 的格式（百分比字符串或小数）。
 16. `file/result/list` 是否按会话 Cookie 校验 taskId 属于当前团队（taskId 来自用户或模型输入）。
