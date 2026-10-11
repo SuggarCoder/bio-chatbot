@@ -81,6 +81,7 @@ import {
 import { GenerationStreamStore } from './streamStore.js'
 import { fitInputBudget, QwenTokenCounter, type TokenCounter } from './tokenBudget.js'
 import {
+  addBusinessPart,
   AgentSession,
   type AgentFunctionCall,
   type AgentToolbox,
@@ -1359,7 +1360,7 @@ export class GenerationService {
           }).catch(() => undefined)
           completeStep(stepId, result.ok ? undefined : '未能完成')
           emit({ type: 'tool.result', toolRunId: stepId, toolName: call.name })
-          if (result.part) businessParts.push(result.part)
+          if (result.part) addBusinessPart(businessParts, result.part)
           modelInput.push({
             type: 'function_call_output',
             call_id: call.call_id,

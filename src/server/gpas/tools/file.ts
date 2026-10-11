@@ -30,6 +30,14 @@ const listSchema = z.object({
 
 /** Rows fetched per file name; the API may match names loosely, exact names are kept. */
 const NAME_LOOKUP_PAGE_SIZE = 10
+/**
+ * `analyzedOnly` reads the newest uploads in pages of this size, at most this
+ * many pages: new uploads sort first, so analysed samples are often not on
+ * the first page at all.
+ */
+const SCAN_PAGE_SIZE = 50
+const SCAN_MAX_PAGES = 10
+const DEFAULT_PAGE_SIZE = 20
 const filter = z.string().trim().min(1).max(200).optional()
 
 const pick = (file: z.infer<typeof fileSchema>) => ({
@@ -38,7 +46,18 @@ const pick = (file: z.infer<typeof fileSchema>) => ({
   metaStatus: file.metaStatus, uploadTime: file.uploadTime,
 })
 export type UploadedFileRow = { paired: boolean; groupId: string | null; files: ReturnType<typeof pick>[] }
-export type UploadedFileList = { total: number; rows: UploadedFileRow[]; cards: FileCard[]; missingFileNames: string[] }
+export type UploadedFileList = {
+  total: number
+  rows: UploadedFileRow[]
+  cards: FileCard[]
+  missingFileNames: string[]
+  page?: number
+  pageSize?: number
+  /** More samples exist past this page. */
+  hasMore?: boolean
+  /** Set for `analyzedOnly`: how many uploads were read and whether that was all of them. */
+  scan?: { uploaded: number; read: number; complete: boolean }
+}
 
 /** Species kept per category; the brief is a summary, not the full result. */
 export const BRIEF_TOP_SPECIES = 5
@@ -197,14 +216,27 @@ export function fileListReply(data: UploadedFileList): string {
   return `${table}${missing}`.trim()
 }
 
+/** Keeps the model from reading one page as every sample the team has. */
+function pagingNote(data: UploadedFileList): string {
+  if (!data.page) return ''
+  const scope = data.scan
+    ? `total 是有分析结果的样本数（服务端读取了最近上传的 ${data.scan.read} 个文件行，共 ${data.scan.uploaded} 个`
+      + `${data.scan.complete ? '，已全部检查' : '，更早的上传未检查，回复时要说明是最近上传中的结果，更早的可到 GPAS Web 查看'}）。`
+    : 'total 是符合条件的样本总数，samples 只是其中一页；不要把这一页当成全部，也不要据此推断其余样本的分析状态。'
+  const more = data.hasMore ? `还有更多样本（hasMore=true），回复时说明共 ${data.total} 个，可继续查看下一页（page=${data.page + 1}）。` : ''
+  return scope + more
+}
+
 export const fileListTool = defineGpasTool({
   id: 'file.list', domain: 'file', title: '上传文件列表', effect: 'read',
-  description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态。传入 fileNames 时按文件名查询并只返回这些文件（用于展示刚上传的一批文件的分析结果）；fileName 可传样本名，用于按样本名查找样本的 taskId（分析 ID）。',
-  examples: ['我上传的文件', '刚才上传的测序数据状态', '查一下质检结果', '我的文件列表', '上传的文件分析完了吗'],
+  description: '查询当前团队已上传的测序文件及其状态、质检、分析、元信息状态，结果分页（默认每页 20 个样本，按上传时间从新到旧）。传入 fileNames 时按文件名查询并只返回这些文件（用于展示刚上传的一批文件的分析结果）；fileName 可传样本名，用于按样本名查找样本的 taskId（分析 ID）；用户只想看已有分析结果的样本时传 analyzedOnly=true，服务端会翻阅多页只返回有分析结果的样本。',
+  examples: ['我上传的文件', '刚才上传的测序数据状态', '查一下质检结果', '我的文件列表', '上传的文件分析完了吗', '只展示我已经有查询结果的样本', '哪些样本已经分析完了'],
   policy: '可以查询当前团队上传文件的列表、状态与分析摘要（各类别丰度前 5 的物种及其它、各类别检出种数占比），结果以卡片展示；不能代为发起分析、提交或删除文件，这些操作请前往 GPAS Web。',
   input: z.object({
     fileNames: z.array(z.string().trim().min(1).max(255)).max(20).optional(),
     fileName: filter,
+    /** Only samples with an analysis result (a readable briefAnalysis). */
+    analyzedOnly: z.boolean().optional(),
     status: filter,
     qcStatus: filter,
     analysisStatus: filter,
@@ -215,7 +247,7 @@ export const fileListTool = defineGpasTool({
     if (!profile.ownteamId) throw new AuthenticationError('当前用户未关联团队，无法查询文件。', 422, 'team_missing')
     const ownTeamId = profile.ownteamId
     const names = [...new Set(args.fileNames ?? [])]
-    const { fileNames: _names, page, pageSize, ...filters } = args
+    const { fileNames: _names, analyzedOnly, page = 1, pageSize = DEFAULT_PAGE_SIZE, ...filters } = args
     // GET with query parameters. orderBy is left to the API default
     // (-update_time, -create_time), which already lists new uploads first.
     const list = (query: Record<string, string | number | undefined>) => client.read(cookie, {
@@ -242,7 +274,30 @@ export const fileListTool = defineGpasTool({
       }
     }
 
-    const data = await list({ ...filters, page: page ?? 1, pageSize: pageSize ?? 20 })
+    if (analyzedOnly) {
+      const first = await list({ ...filters, page: 1, pageSize: SCAN_PAGE_SIZE })
+      const uploaded = first.dataPage.totalData
+      const pages = Math.max(1, Math.min(SCAN_MAX_PAGES, Math.ceil(uploaded / SCAN_PAGE_SIZE)))
+      const rest = await Promise.all(Array.from({ length: pages - 1 }, (_, index) =>
+        list({ ...filters, page: index + 2, pageSize: SCAN_PAGE_SIZE })))
+      const listed = [first, ...rest].flatMap(toRows)
+      // Merged across pages: a pair's two listings may fall on different pages.
+      const analysed = mergeDuplicateRows(listed).filter((row) => briefFor(row.files))
+      const rows = analysed.slice((page - 1) * pageSize, page * pageSize)
+      const complete = listed.length >= uploaded
+      return {
+        total: analysed.length,
+        rows: rows.map((row) => ({ ...row, files: row.files.map(pick) })),
+        cards: rows.slice(0, 20).map(toCard),
+        missingFileNames: [],
+        page,
+        pageSize,
+        hasMore: page * pageSize < analysed.length,
+        scan: { uploaded, read: listed.length, complete },
+      }
+    }
+
+    const data = await list({ ...filters, page, pageSize })
     const listed = toRows(data)
     const rows = mergeDuplicateRows(listed)
     return {
@@ -250,12 +305,17 @@ export const fileListTool = defineGpasTool({
       rows: rows.map((row) => ({ ...row, files: row.files.map(pick) })),
       cards: rows.slice(0, 20).map(toCard),
       missingFileNames: [],
+      page,
+      pageSize,
+      hasMore: page * pageSize < data.dataPage.totalData,
     }
   },
   toModel: (data) => ({
     total: data.total,
+    ...(data.page ? { page: data.page, pageSize: data.pageSize, hasMore: data.hasMore } : {}),
+    ...(data.scan ? { analyzedOnly: true, scan: data.scan } : {}),
     missingFileNames: data.missingFileNames,
-    note: '结果已展示在回复下方（单个样本为卡片，多个样本为表格），只需简短解读，不要逐条罗列。brief 为分析摘要：top 是该类别内相对丰度前 topN 的物种，'
+    note: pagingNote(data) + '结果已展示在回复下方（单个样本为卡片，多个样本为表格），只需简短解读，不要逐条罗列。brief 为分析摘要：top 是该类别内相对丰度前 topN 的物种，'
       + '该类别共检出 speciesCount 种，不是只检出这几种；abundance 为类别内相对丰度。'
       + 'sharePct 是该类别检出种数占全部检出种数的比例，要说“种数占比”，不是丰度或 reads 占比。'
       + 'taskId 只用于调用样本分析详情工具，不要展示给用户；称呼样本时用 sampleName。',

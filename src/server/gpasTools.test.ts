@@ -10,7 +10,7 @@ import { GpasService } from './gpas.js'
 import { GpasClient } from './gpas/client.js'
 import { defineGpasTool, identityFieldPattern } from './gpas/defineTool.js'
 import { createGpasTools } from './gpas/tools/index.js'
-import { mergeDuplicateRows, parseBrief } from './gpas/tools/file.js'
+import { mergeDuplicateRows, parseBrief, type UploadedFileList } from './gpas/tools/file.js'
 import { gpasPartSchema, sampleNameOf } from './gpasContracts.js'
 
 const config = { gpas2AuthMode: 'upstream', gpas2UserInfoUrl: 'https://gpas.example.invalid:8058/api/gpas2/v1/user/info' } as AppConfig
@@ -278,6 +278,59 @@ test('file list tool returns one analysis card per sample and wording rules for 
   assert.equal(model.samples[1].brief, null)
   // The raw brief string never reaches the model.
   assert.doesNotMatch(JSON.stringify(model), /microbialInfo|tool_code/)
+})
+
+test('analyzedOnly reads past the newest uploads and returns analysed samples only', async (t) => {
+  // 120 rows, newest first: uploads still in progress, then analysed samples
+  // from page 2 on. One pair's two listings fall on different pages.
+  const all: Array<Record<string, unknown>> = Array.from({ length: 120 }, (_, index) => index < 60
+    ? { isPair: false, file1: gpasFile(`new-${index}`, { groupId: null, analysisStatus: 'noanalysis' }) }
+    : { isPair: false, file1: gpasFile(`old-${index}`, { groupId: null, analysisId: `task-${index}`, briefAnalysis: sampleBrief }) })
+  all[49] = { isPair: true, file1: gpasFile('p-2', { groupId: 'g-p', fileName: 'p_R2.fq.gz' }), file2: gpasFile('p-1', { groupId: 'g-p', fileName: 'p_R1.fq.gz' }) }
+  all[50] = { isPair: true, file1: gpasFile('p-1', { groupId: 'g-p', fileName: 'p_R1.fq.gz', analysisId: 'task-p', briefAnalysis: sampleBrief }), file2: gpasFile('p-2', { groupId: 'g-p', fileName: 'p_R2.fq.gz' }) }
+  const queries: Array<Record<string, string>> = []
+  t.mock.method(globalThis, 'fetch', async (url: URL) => {
+    queries.push(Object.fromEntries(url.searchParams))
+    const page = Number(url.searchParams.get('page'))
+    const size = Number(url.searchParams.get('pageSize'))
+    return Response.json({ code: 200, dataPage: { totalData: all.length, dataList: all.slice((page - 1) * size, page * size) } })
+  })
+  const service = new GpasService(config)
+  const tool = createGpasTools(service).find((item) => item.id === 'file.list')!
+  const context = { profile, cookie: 'session=mine', client: service.client }
+  const data = await tool.run(context, tool.input.parse({ analyzedOnly: true })) as UploadedFileList
+
+  assert.deepEqual(queries.map((query) => [query.page, query.pageSize]), [['1', '50'], ['2', '50'], ['3', '50']])
+  assert.ok(queries.every((query) => query.ownTeamId === 'team-test' && !('analyzedOnly' in query)))
+  // The pair counts once; every listed sample has a brief.
+  assert.equal(data.total, 61)
+  assert.equal(data.rows.length, 20)
+  assert.equal(data.hasMore, true)
+  assert.deepEqual(data.scan, { uploaded: 120, read: 120, complete: true })
+  assert.ok(data.cards.every((card) => card.brief))
+  assert.deepEqual(data.cards[0].files.map((file) => file.fileId), ['p-1', 'p-2'])
+
+  const model = tool.toModel(data) as { total: number; hasMore: boolean; note: string }
+  assert.equal(model.total, 61)
+  assert.equal(model.hasMore, true)
+  assert.match(model.note, /已全部检查/)
+  assert.match(model.note, /共 61 个/)
+
+  const last = await tool.run(context, tool.input.parse({ analyzedOnly: true, page: 4 })) as UploadedFileList
+  assert.equal(last.rows.length, 1)
+  assert.equal(last.hasMore, false)
+})
+
+test('a plain file list page tells the model it is one page of many', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ code: 200, dataPage: { totalData: 95, dataList: [
+    { isPair: false, file1: gpasFile('f-1', { groupId: null }) },
+  ] } }))
+  const service = new GpasService(config)
+  const tool = createGpasTools(service).find((item) => item.id === 'file.list')!
+  const data = await tool.run({ profile, cookie: 'session=mine', client: service.client }, tool.input.parse({})) as UploadedFileList
+  const model = tool.toModel(data) as { total: number; page: number; hasMore: boolean; note: string }
+  assert.deepEqual([model.total, model.page, model.hasMore], [95, 1, true])
+  assert.match(model.note, /不要把这一页当成全部/)
 })
 
 test('file result tool pages one task through the session and keeps safe fields only', async (t) => {

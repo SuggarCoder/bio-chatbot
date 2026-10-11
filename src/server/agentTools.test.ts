@@ -3,6 +3,7 @@ import test from 'node:test'
 import { z } from 'zod'
 
 import {
+  addBusinessPart,
   AgentSession,
   AgentToolbox,
   hasVisiblePart,
@@ -16,7 +17,7 @@ import type { CurrentUser } from './domain.js'
 import { GpasService } from './gpas.js'
 import { defineGpasTool } from './gpas/defineTool.js'
 import { createGpasTools } from './gpas/tools/index.js'
-import { gpasPartSchema } from './gpasContracts.js'
+import { gpasPartSchema, type GpasPart } from './gpasContracts.js'
 import { openCredential, sealCredential } from './ingress.js'
 
 const config = {
@@ -189,6 +190,29 @@ test('only parts with something to show are forwarded under the reply', () => {
   assert.equal(hasVisiblePart({ type: 'gpas', order: 1, result: { taskId: 't', total: 0 } }), true)
   const profile = { realName: '演示用户', userName: 'demo', teamName: null, jobTitle: null, researchField: null, email: null, phone: null }
   assert.equal(hasVisiblePart({ type: 'gpas', order: 1, profile }), true)
+})
+
+test('a reply shows each sample once, however often the model calls the tools', () => {
+  const card = (fileIds: string[], analysisId: string | null, groupId: string | null = null) => ({
+    groupId, paired: fileIds.length === 2, files: fileIds.map((fileId) => ({ fileId, fileName: `${fileId}.fq.gz`, sizeBytes: null })),
+    sampleType: null, status: null, analysisStatus: null, metaStatus: null, uploadTime: null, analysisId, brief: null,
+  })
+  const parts: GpasPart[] = []
+  // A detail request answered by an overview call and a category call.
+  addBusinessPart(parts, { type: 'gpas', order: 1, result: { taskId: 't-1', total: 198 } })
+  addBusinessPart(parts, { type: 'gpas', order: 1, result: { taskId: 't-1', total: 40 } })
+  assert.deepEqual(parts, [{ type: 'gpas', order: 1, result: { taskId: 't-1', total: 198 } }])
+  // A filtered call first: the entry keeps the full total.
+  addBusinessPart(parts, { type: 'gpas', order: 1, result: { taskId: 't-2', total: 3 } })
+  addBusinessPart(parts, { type: 'gpas', order: 1, result: { taskId: 't-2', total: 50 } })
+  assert.deepEqual(parts.map((part) => part.result), [{ taskId: 't-1', total: 198 }, { taskId: 't-2', total: 50 }])
+
+  // A second file list repeats one pair (by groupId, other fileIds) and adds a new sample.
+  addBusinessPart(parts, { type: 'gpas', order: 1, files: [card(['a1', 'a2'], 't-1', 'g-1')] })
+  addBusinessPart(parts, { type: 'gpas', order: 1, files: [card(['a2b', 'a1b'], null, 'g-1'), card(['s1'], 't-3')] })
+  addBusinessPart(parts, { type: 'gpas', order: 1, files: [card(['s1'], 't-3')] })
+  assert.deepEqual(parts.flatMap((part) => part.files ?? []).map((item) => item.files[0].fileId), ['a1', 's1'])
+  assert.equal(parts.length, 4)
 })
 
 test('profile tool shows a card without internal ids', async () => {

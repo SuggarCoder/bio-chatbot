@@ -6,7 +6,7 @@ import { AuthenticationError, loadProfile } from '../auth.js'
 import type { CapabilityDescription } from '../capabilities/registry.js'
 import type { AppConfig } from '../config.js'
 import type { CurrentUser, Gpas2UserInfo } from '../domain.js'
-import type { GpasPart } from '../gpasContracts.js'
+import type { FileCard, GpasPart } from '../gpasContracts.js'
 import type { GpasClient } from '../gpas/client.js'
 import type { GpasToolContext, GpasToolSpec } from '../gpas/defineTool.js'
 
@@ -38,6 +38,36 @@ export function toolFunctionName(id: string): string {
 /** Whether a tool's part has something to show under the reply. */
 export function hasVisiblePart(part: GpasPart): boolean {
   return Boolean(part.form || part.files?.length || part.result || part.profile || part.progress)
+}
+
+const cardKeys = (card: FileCard) => [
+  ...(card.analysisId ? [`analysis:${card.analysisId}`] : []),
+  ...(card.groupId ? [`group:${card.groupId}`] : []),
+  `files:${card.files.map((file) => file.fileId).sort().join('\n')}`,
+]
+
+/**
+ * Adds one tool's part to a reply, showing each sample once: repeated detail
+ * calls for a task (other pages or categories) share one entry, which keeps
+ * the largest total (the unfiltered one), and file cards already shown in the
+ * reply are not repeated.
+ */
+export function addBusinessPart(parts: GpasPart[], part: GpasPart): void {
+  let next = part
+  const result = part.result
+  if (result) {
+    const index = parts.findIndex((item) => item.result?.taskId === result.taskId)
+    if (index >= 0) {
+      const kept = parts[index]
+      parts[index] = { ...kept, result: { taskId: result.taskId, total: Math.max(kept.result!.total, result.total) } }
+      next = { ...next, result: undefined }
+    }
+  }
+  if (next.files?.length) {
+    const shown = new Set(parts.flatMap((item) => item.files ?? []).flatMap(cardKeys))
+    next = { ...next, files: next.files.filter((card) => !cardKeys(card).some((key) => shown.has(key))) }
+  }
+  if (hasVisiblePart(next)) parts.push(next)
 }
 
 export function limitModelOutput(value: unknown): string {
@@ -133,6 +163,8 @@ export class AgentToolSet {
       '- 用户消息带有 GPAS 文件上传结果时，先调用上传文件列表工具按这批文件名（fileNames）查询，再基于返回的状态和分析结果作答，不要只复述上传进度。',
       '- 用户要查看样本分析详情时调用样本分析详情工具；完整列表在右侧面板展示，只需简短概括。',
       '- 用户按样本名或文件名查看分析详情/结果时：先调用上传文件列表工具（fileName=样本名）找到该样本的 taskId，再调用样本分析详情工具；不要让用户提供 taskId 或分析 ID，回复中用样本名称呼样本，不要展示 taskId。匹配到多个样本时列出样本名请用户选择；样本尚无 taskId（未分析）时如实说明分析状态。',
+      '- 上传文件列表是分页的，total 是全部样本数，samples 只是其中一页；不要把一页当成全部，也不要说“仅有这几个样本”。用户只想看已有分析结果的样本时，调用上传文件列表工具并传 analyzedOnly=true。',
+      '- 同一个样本的分析详情在一次回复中只会展示一个入口；查看详情只需调用一次样本分析详情工具，除非用户要其它页或其它类别。',
       '- 上传文件列表的结果会在回复下方展示（单个样本为卡片，多个样本为表格），只需简短解读；分析摘要只含各类别丰度前几位的物种，要说“丰度前 N”“共检出 X 种”，不要说成只检出这些；类别占比是检出种数占比，不要说成丰度或 reads 占比。',
       '- 工具返回 error 时如实告知用户原因，不要反复调用同一工具。',
       ...(limits ? ['以下业务不支持或有限制，用户问到时按此说明：', limits] : []),

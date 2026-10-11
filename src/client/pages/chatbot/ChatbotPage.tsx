@@ -1717,6 +1717,10 @@ function StaticMessageParts(props: {
     ? props.message.parts
     : [{ type: 'text' as const, order: 0, text: props.message.content }]
 
+  // Older replies may hold one detail entry per tool call; a task shows once.
+  const firstResultPart = (part: { result?: { taskId: string } }) =>
+    parts().find((item) => item.type === 'gpas' && item.result?.taskId === part.result?.taskId) === part
+
   return (
     <For each={parts()}>
       {(part) => part.type === 'artifact_ref'
@@ -1736,7 +1740,7 @@ function StaticMessageParts(props: {
                 <Show when={part.files}>{(files) => <Show when={files().length > 0}><FileAnalysisCards cards={files()} onViewDetail={props.onViewDetail} detailDisabled={props.disabled} hasDetail={props.hasDetail} /></Show>}</Show>
                 <Show when={part.profile}>{(profile) => <ProfileCard profile={profile()} />}</Show>
                 <Show when={part.progress}>{(progress) => <ProjectProgressCard progress={progress()} />}</Show>
-                <Show when={part.result}>{(result) => <GpasResultEntry taskId={result().taskId} total={result().total} sampleName={props.sampleNameFor(result().taskId)} onOpen={props.onOpenResult} />}</Show>
+                <Show when={firstResultPart(part) && part.result}>{(result) => <GpasResultEntry taskId={result().taskId} total={result().total} sampleName={props.sampleNameFor(result().taskId)} onOpen={props.onOpenResult} />}</Show>
               </>
             )
           : part.type === 'gpas_upload'

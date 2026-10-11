@@ -117,6 +117,11 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 而不是复述上传进度：每个文件名请求一次 `fileName=<名称>`（每次 10 条），只保留文件名完全相同的行，双端两个文件名命中同一样本时合并。
 未找到的文件名作为“可能仍在入库”返回。用户之后也可以直接问“我上传的文件”。
 
+不按文件名查询时 `file.list` 是分页的（默认每页 20 个样本，最新上传在前），交给模型的结果带 `total`、`page`、`hasMore`
+和说明，避免模型把第一页当成全部样本。用户只想看“已经有查询结果的样本”时，模型传 `analyzedOnly=true`：
+服务端按每页 50 行读取最近上传的至多 10 页（500 行，第 1 页之后并行），跨页合并同一样本后只保留有可解析 `briefAnalysis`
+的样本，再按 `page`/`pageSize` 分页返回；`scan` 说明读取了多少行、是否已读完全部上传，未读完时模型需说明更早的上传未检查。
+
 `file.list` 的结果以“病原体分类分布”卡片展示在助手回复下方（每个样本一张，双端合并），由
 `src/client/features/gpasUpload/FileAnalysisCards.tsx` 渲染，数据来自解析后的 `briefAnalysis`（`parseBrief`）：
 
@@ -138,6 +143,9 @@ generation 查询；不记录 Cookie 或工具返回的数据。
 - 卡片 header 右侧的「查看详情」（卡片有 `analysisId` 时显示）发送消息“通过分析ID查看样本详情”，
   分析 ID 放在请求体 `detail.taskId`（与 `uploads` 相同的做法）：用户气泡只显示这句文字，ID 只出现在
   `renderDetailContext` 追加给模型的上下文和 `gpas_detail` part 中。带 `detail` 的消息总会向助手提供 `file.result` 工具（`withDetailTool`）。
+- 一条回复中同一样本只出现一次（`addBusinessPart`）：模型对同一 `taskId` 多次调用 `file.result`（翻页、按类别筛选）时
+  只保留一个分析详情入口，条数取最大值（即未筛选的总数）；多次 `file.list` 中已展示过的样本卡片
+  （按 `analysisId`、`groupId` 或 fileId 识别）不重复展示。客户端渲染历史消息时同样只显示每个 `taskId` 的第一个入口。
   上传与详情消息的隐藏上下文存在消息的 `content` 中：界面展示走 `mapMessage`（只取用户文字），
   模型上下文走 `contextContent`（`rebuildChatContext` 与生成起始消息都使用它），两者不能混用。
 - 同一样本在当前会话里已经有详情回复时，再点「查看详情」直接打开面板，不再发消息、调用模型或请求 GPAS。
