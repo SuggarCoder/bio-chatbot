@@ -6,7 +6,7 @@
 
 - **上游工作量小**：不需要 OpenAPI、通用查询语言、数据目录，也不需要改返回格式。
 - **查询足够灵活**：任意嵌套的“并且 / 或者 / 非”都能表达，包括带限定的计数（如“细菌里的五星病原 ≥ 3 个”）。
-- **结果准确**：总数和分页由上游的一条 SQL 给出，不在本地拼接。
+- **结果准确**：总数和分页由上游在一次查询中给出，不在本地拼接。
 - **以后接更多接口时，工具数量不变**。
 
 更早的设计（`sample-query-data-agent.md`、`gpas-semantic-platform.md`、`gpas-openapi-plan.md` 等）保留为长期参考。
@@ -26,7 +26,7 @@
 服务端按“接口注册表”中该接口的那一条：
   校验条件 → 物种名换成编号 → 把嵌套条件编译成上游的固定两层结构
   ↓
-上游执行（一条 SQL），按现有格式返回
+上游执行查询，按现有格式返回
   ↓
 服务端按注册表解析结果，生成口径说明，选择展示方式
 ```
@@ -94,7 +94,7 @@
   ```
 
 - **本项目服务端**负责把条件树编译成这个两层结构（第 5.3 节）。按布尔代数，任何“并且 / 或者 / 非”的组合都能化成“若干组的或，每组是若干条件和若干否定条件的并且”，
-  否定条件放进该组的排除组。所以这个两层结构**能表达任意组合**，上游却始终只需要实现一种写法。
+  否定条件放进该组的排除组。所以这个两层结构**能表达任意组合**，上游却始终只需要支持一种结构。
 
 例子：
 
@@ -104,7 +104,7 @@
 | 临床样本中，检出金葡或者细菌五星 ≥ 3，但不包括肠道样本 | 组1 = { 临床，检出金葡 }，排除 { 肠道 }<br>组2 = { 临床，细菌五星 ≥ 3 }，排除 { 肠道 } |
 | （肠道或者呼吸道）并且（检出金葡或者五星 ≥ 3） | 4 个组：肠道 + 金葡、肠道 + 五星、呼吸道 + 金葡、呼吸道 + 五星（同一字段的多个取值也可以合并成一组，见第 5.3 节） |
 
-**为什么不直接让上游支持任意嵌套**：那就是之前被拒绝的通用查询语言。固定两层结构的 SQL 写法只有一种，上游写一次就能用于所有查询；
+**为什么不直接让上游支持任意嵌套**：那就是之前被拒绝的通用查询语言。固定两层结构只有一种形式，上游实现一次就能用于所有查询；
 嵌套展开的复杂度由本项目承担，并且有组数上限保护（第 3.2 节）。
 
 ### 2.4 仍然表达不了的
@@ -121,7 +121,7 @@
 
 | # | 约定 | 原因 |
 |---|---|---|
-| 1 | 请求结构：`{ ownTeamId, anyOf: [条件组, …], orderBy, page, pageSize }`，条件组的结构见第 4.2 节。不需要条件的接口可以用 GET 平铺参数 | 同一种结构，上游的实现代码可以复用 |
+| 1 | 请求结构：`{ ownTeamId, anyOf: [条件组, …], orderBy, page, pageSize }`，条件组的结构见第 4.2 节。不需要条件的接口可以用 GET 平铺参数 | 所有接口用同一种请求结构 |
 | 2 | **校验 `ownTeamId` 与登录会话的团队一致**，不一致返回 403；按 ID 查询时同样校验对象属于当前团队 | 唯一的安全硬性要求 |
 | 3 | 返回沿用 GPAS 现有的 `dataPage` 结构 | 上游不用设计新格式 |
 | 4 | `totalData` 是符合条件的**业务对象数**，并且是精确值 | 模型会回答“共 N 个”，按文件行计数会给出错误答案 |
@@ -149,8 +149,7 @@
 |---|---|---|
 | 接口 | 地址、方法 | 上游 |
 | 用途 | 一句话说明能查什么 | 双方 |
-| 条件 | 每个条件一行：条件名、中文名（同义词）、取值、SQL 条件示意 | 本项目起草，上游确认 |
-| 上游列名 | 每个条件对应的数据库列 | 上游 |
+| 条件 | 每个条件一行：条件名、中文名（同义词）、取值、含义 | 本项目起草，上游确认 |
 | 业务对象 | 一行代表什么、`totalData` 数的是什么 | 上游确认 |
 | 返回示例 | 一份真实的返回（去掉敏感信息） | 上游 |
 | 单位与枚举 | 本项目要显示或计算的字段的单位、取值含义 | 上游，按需回答 |
@@ -215,23 +214,23 @@
 
 **样本条件**（都可选，同一组内取交集）：
 
-| 条件 | 中文名（同义词） | 取值 | SQL 条件（示意） | 上游列名 | 确认 |
-|---|---|---|---|---|---|
-| `detectionType` | 检测项目（检测类型、检测套餐） | 见第 4.4 节，数组 | `s.detection_type IN (…)` | | |
-| `sampleType` | 样本类型 | `clinic`、`media`、`environment`、`lab`，数组 | `s.sample_type IN (…)` | | |
-| `analysisDone` | 已完成分析（已鉴定、有结果） | `true` | `s.analysis_status = 'analysisverified'` | | |
-| `sampleName` | 样本名 | 文本 | `s.sample_name LIKE '%…%'` | | |
-| `uploadFrom` / `uploadTo` | 上传时间 | `YYYY-MM-DD`，含当天 | `s.upload_time >= … AND s.upload_time < 次日` | | |
+| 条件 | 中文名（同义词） | 取值 | 含义 | 确认 |
+|---|---|---|---|---|
+| `detectionType` | 检测项目（检测类型、检测套餐） | 见第 4.4 节，数组 | 样本的检测项目是其中之一 | |
+| `sampleType` | 样本类型 | `clinic`、`media`、`environment`、`lab`，数组 | 样本类型是其中之一 | |
+| `analysisDone` | 已完成分析（已鉴定、有结果） | `true` | 分析状态为 `analysisverified` | |
+| `sampleName` | 样本名 | 文本 | 样本名包含该文本 | |
+| `uploadFrom` / `uploadTo` | 上传时间 | `YYYY-MM-DD` | 上传日期在范围内，含起止两天 | |
 
 **检出条件** `detections`（数组，每一项都要满足）：
 
-| 字段 | 中文名 | 取值 | SQL 条件（示意） | 上游列名 | 确认 |
-|---|---|---|---|---|---|
-| `taxIds` | 物种 | taxId 数组，最多 20 个 | `d.tax_id IN (…)` | | |
-| `hazardLevels` | 危害等级 | 1–5 的数组 | `d.hazard_index IN (…)` | | |
-| `microbialTypes` | 大类 | `bacteria`、`viral`、`fungi` 等 | `d.microbial_type IN (…)` | | |
-| `minAbundance` | 丰度下限（%） | 0–100 | `d.abundance >= …` | | |
-| `min` / `max` | 满足以上筛选的物种数范围 | 整数，默认 `min = 1`、`max` 不限 | `(SELECT COUNT(DISTINCT d.tax_id) FROM 检出表 d WHERE d.analysis_id = s.analysis_id AND 以上筛选) BETWEEN min AND max` | | |
+| 字段 | 中文名 | 取值 | 含义 | 确认 |
+|---|---|---|---|---|
+| `taxIds` | 物种 | taxId 数组，最多 20 个 | 只数这些物种 | |
+| `hazardLevels` | 危害等级 | 1–5 的数组 | 只数这些危害等级的物种 | |
+| `microbialTypes` | 大类 | `bacteria`、`viral`、`fungi` 等 | 只数这些大类的物种 | |
+| `minAbundance` | 丰度下限（%） | 0–100 | 只数丰度不低于该值的物种 | |
+| `min` / `max` | 数量范围 | 整数，默认 `min = 1`、`max` 不限 | 同时满足以上筛选的不同物种数在范围内（含两端） | |
 
 检出条件只对已完成分析的样本有意义：未分析的样本没有检出记录，计数为 0。所以“未检出 xx”（`max: 0`）
 或排除组中的检出条件（“不是检出 xx”）会把未分析的样本也算进来。
@@ -261,76 +260,56 @@
 | `GUT_MICROBIOME` | 肠道微生物检测 | 肠道、肠道菌群 |
 | `RESPIRATORY` | 呼吸道检测（示例） | 呼吸道 |
 
-物种名查询（新增，很小）：`GET /species/search?keyword=金黄色&limit=10`，返回 `[{ taxId, taxCnName, taxEnName }]`。
-上游已有物种表（检出明细中有中英文名），按名称模糊查询即可。
+物种名查询（新增）：`GET /species/search?keyword=金黄色&limit=10`，返回 `[{ taxId, taxCnName, taxEnName }]`，要求见第 4.5 节。
 
-### 4.5 上游实现
+### 4.5 对上游的要求
 
-数据准备：
+上游怎么实现由上游自己决定，用什么数据库或框架、是否预先计算都可以。只要满足下面的要求，并通过验收用例。
 
-| 需要 | 说明 |
+**数据要求**
+
+| 要求 | 说明 |
 |---|---|
-| 样本有“检测项目”字段 | 现在没有的话需要新增，并在上传或项目层面填写 |
-| 检出明细表加索引 | 检出明细（样本 × 物种）已经存在，加索引 `(analysis_id, hazard_index)`、`(analysis_id, tax_id)`、`(team_id, tax_id)` |
-| 检出明细有大类字段 | 每条检出记录要能知道它属于细菌、病毒还是真菌（`file/result/list` 的 `speciesType` 已经有） |
+| 样本有检测项目 | 每个样本都能确定它的检测项目代码（第 4.4 节）。现在没有的话需要新增 |
+| 按完整检出结果判断 | 检出条件按该样本**全部**检出物种判断，不能只用 `briefAnalysis` 里的前几名 |
+| 检出记录有大类、危害等级、丰度 | 大类的取值与 `microbialTypes` 一致；丰度按百分数（0–100）理解，如果不是请告知 |
 
-接口实现：把“一个组的条件”写成一个 SQL 片段，组和排除组都用它。以 MyBatis（3.4.2 及以上）为例：
+**查询含义（必须严格一致）**
 
-```xml
-<!-- 一个组（或排除组）的条件；${g} 是组变量名 -->
-<sql id="groupConds">
-  1 = 1
-  <if test="${g}.detectionType != null and ${g}.detectionType.size() > 0">
-    AND s.detection_type IN <foreach collection="${g}.detectionType" item="t" open="(" separator="," close=")">#{t}</foreach>
-  </if>
-  <if test="${g}.sampleType != null and ${g}.sampleType.size() > 0">
-    AND s.sample_type IN <foreach collection="${g}.sampleType" item="t" open="(" separator="," close=")">#{t}</foreach>
-  </if>
-  <if test="${g}.analysisDone">
-    AND s.analysis_status = 'analysisverified'
-  </if>
-  <if test="${g}.detections != null">
-    <foreach collection="${g}.detections" item="dt">
-      AND (SELECT COUNT(DISTINCT d.tax_id) FROM detection d
-           WHERE d.analysis_id = s.analysis_id
-           <if test="dt.taxIds != null and dt.taxIds.size() > 0">
-             AND d.tax_id IN <foreach collection="dt.taxIds" item="x" open="(" separator="," close=")">#{x}</foreach>
-           </if>
-           <if test="dt.hazardLevels != null and dt.hazardLevels.size() > 0">
-             AND d.hazard_index IN <foreach collection="dt.hazardLevels" item="x" open="(" separator="," close=")">#{x}</foreach>
-           </if>
-           <if test="dt.microbialTypes != null and dt.microbialTypes.size() > 0">
-             AND d.microbial_type IN <foreach collection="dt.microbialTypes" item="x" open="(" separator="," close=")">#{x}</foreach>
-           </if>
-           <if test="dt.minAbundance != null">AND d.abundance &gt;= #{dt.minAbundance}</if>
-          ) BETWEEN #{dt.min} AND #{dt.max}
-    </foreach>
-  </if>
-</sql>
+1. 结果是本团队样本中，满足任意一个组的样本。
+2. 样本满足一个组，当且仅当：满足该组所有样本条件，并且满足该组所有检出条件，并且不满足该组的任何一个排除组。
+3. 样本满足一个排除组，当且仅当：满足该排除组所有样本条件和所有检出条件。
+4. 同一个条件的多个取值表示“任一”，例如 `sampleType: ["clinic", "lab"]` 表示临床或实验室样本。
+5. 检出条件的计数，是该样本的检出记录中同时满足该条件全部筛选字段的**不同物种数**。计数在 `[min, max]` 范围内（含两端）即满足；`min` 缺省为 1，`max` 缺省不限。未分析的样本计数为 0。
+6. 日期按自然日计算，包含起止两天；请告知使用的时区。
+7. `sampleName` 是包含匹配。
 
-<select id="searchSamples" resultType="SampleRow">
-  SELECT s.* FROM sample s
-  WHERE s.team_id = #{teamId}                                   <!-- 已与登录会话核对 -->
-    AND <foreach collection="anyOf" item="g" open="(" separator=" OR " close=")">
-      ( <include refid="groupConds"><property name="g" value="g"/></include>
-        <if test="g.except != null and g.except.size() > 0">
-          AND NOT <foreach collection="g.except" item="e" open="(" separator=" OR " close=")">
-            ( <include refid="groupConds"><property name="g" value="e"/></include> )
-          </foreach>
-        </if>
-      )
-    </foreach>
-  ORDER BY s.upload_time DESC
-</select>
-```
+**结果要求**
 
-- 在 Java 代码中先校验并补默认值：组数、排除组数、检出条件数不超过第 3.2 节的上限；每组至少有一个条件或排除组；
-  检出条件缺 `min` 时补 1，缺 `max` 时补一个足够大的数。
-- 所有值用 `#{}` 绑定，不拼接字符串；`orderBy` 只接受约定的取值，在代码里映射成固定列名。
-- 总数用现有的分页插件（如 PageHelper）计算。因为是一条 SQL，满足多个组的样本只算一次。
-- 查出当页样本后，按现有方式组装成 `merge/list` 的行结构；可选字段在内存中补充。
+- `totalData` 是满足条件的样本数，必须精确；满足多个组的样本只算一次。
+- 每个样本只返回一行，带 `analysisId`；行结构与 `file/dual/merge/list` 相同，文件上增加 `detectionType`。
+- 排序要稳定：排序值相同时再按 `analysisId` 排序，保证翻页不重复、不遗漏。
+- 只返回本团队的样本。
 
-另外，现有的 `GET /file/result/list` 需要补上团队校验：`taskId` 不属于当前团队时返回 403。
+**校验与错误**
+
+- `ownTeamId` 与登录会话的团队不一致时返回 403。
+- 超出第 3.2 节的上限、组为空、取值不合法时，返回明确的业务错误码，并指出是哪个字段，不能静默忽略或截断。
+- 遇到不认识的字段要报错，不能忽略。否则条件被悄悄丢掉，结果会比实际多，而且没人发现。
+
+**性能**
+
+- 本项目请求 GPAS 的超时是 10 秒。在团队的实际数据量下，单次查询应明显低于这个时间，建议 3 秒以内。
+
+**验收**
+
+- 本项目提供一组验收用例，每条是一个请求体，加上它在测试数据上应当返回的样本 ID 和总数。用例覆盖：每个条件单独使用、组内“并且”、组间“或者”、排除组、计数的上下限（包括 `max: 0`）、满足多个组的样本只算一次、翻页。
+- 上游提供一个测试团队和固定的测试数据，或者与本项目约定一份测试数据。
+
+**其它接口**
+
+- 物种名查询（第 4.4 节）：按中文名、英文名包含匹配，最多返回 `limit` 条。
+- 现有的 `GET /file/result/list` 需要补上团队校验：`taskId` 不属于当前团队时返回 403。
 
 ---
 
@@ -478,13 +457,13 @@ GPAS → 服务端        { code: 200, dataPage: { totalData: 9, dataList: [ mer
 | 步骤 | 谁做 | 内容 |
 |---|---|---|
 | 1 | 双方 | 填写接口约定表（第 3.3 节） |
-| 2 | 上游 | 按通用约定实现接口（第 3.1 节）；需要条件的接口沿用两层结构，条件片段的写法与第 4.5 节相同 |
+| 2 | 上游 | 按通用约定实现接口（第 3.1 节）；需要条件的接口沿用同样的两层结构和含义（第 4.5 节），并通过验收用例 |
 | 3 | 本项目 | 注册表加一条；返回格式是新的就写一个解析函数；展示优先复用已有组件。条件编译器对所有接口通用，不用改 |
 | 4 | 本项目 | 加评测用例：这个接口的常见问法，检查模型能选对 `api`、写对条件 |
 
 **不新增工具**。只有两种例外：写操作走 `gpas.prepare` 的表单；文件上传这类有特殊交互的，继续用专用通道。
 
-以后加条件也一样：约定表加一行，上游在条件片段里加一个 `<if>`，注册表加一行。
+以后加条件也一样：约定表加一行，上游支持这个条件，注册表加一行。
 
 ---
 
@@ -509,7 +488,7 @@ GPAS → 服务端        { code: 200, dataPage: { totalData: 9, dataList: [ mer
 
 ## 8. 实施顺序
 
-1. **对齐约定**（1–2 次会议）：通用约定（第 3.1、3.2 节）；样本查询的约定表（上游列名、确认、真实返回示例）；检测项目的全部代码。
+1. **对齐约定**（1–2 次会议）：通用约定（第 3.1、3.2 节）；样本查询的约定表（逐条确认、真实返回示例）；检测项目的全部代码；验收用例和测试数据。
 2. **上游**：样本查询接口（两层结构）、物种名查询接口、检测项目字段；`file/result/list` 补团队校验。
 3. **本项目**：接口注册表、`gpas.query`（含条件编译器）、`sample.search` 条目、评测用例。
 4. **迁移**：按第 7 节把现有工具逐个迁入注册表。
