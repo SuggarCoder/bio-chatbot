@@ -1,0 +1,307 @@
+name: Deploy AI Chatbot
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      reset_database:
+        description: >-
+          DELETES ALL DATA. Type the database name from DATABASE_URL to drop
+          and rebuild the database and clear this app's Redis keys before
+          deploying. Leave empty for a normal deploy.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-chatbot-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: TEST
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+
+    timeout-minutes: 45
+    env:
+      DEPLOY_ENV_FILE: /home/lu/.env
+
+    steps:
+      - name: Configure Git
+        shell: bash
+        run: |
+          git config --global http.version HTTP/1.1
+          git config --global http.maxRequests 1
+
+      - name: Checkout repository - attempt 1
+        id: checkout_1
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Clean failed checkout 1
+        if: steps.checkout_1.outcome == 'failure'
+        shell: bash
+        run: |
+          find "$GITHUB_WORKSPACE" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} +
+
+          sleep 15
+
+      - name: Checkout repository - attempt 2
+        id: checkout_2
+        if: steps.checkout_1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Clean failed checkout 2
+        if: >
+          steps.checkout_1.outcome == 'failure' &&
+          steps.checkout_2.outcome == 'failure'
+        shell: bash
+        run: |
+          find "$GITHUB_WORKSPACE" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} +
+
+          sleep 30
+
+      - name: Checkout repository - attempt 3
+        id: checkout_3
+        if: >
+          steps.checkout_1.outcome == 'failure' &&
+          steps.checkout_2.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Verify checkout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ ! -f package.json ]; then
+            echo "All checkout attempts failed"
+            exit 1
+          fi
+
+          echo "Successfully checked out commit:"
+          git rev-parse HEAD || true
+
+      - name: Verify deployment environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ -L "$DEPLOY_ENV_FILE" ]; then
+            echo "Deployment environment file must not be a symbolic link"
+            exit 1
+          fi
+
+          if [ ! -f "$DEPLOY_ENV_FILE" ]; then
+            echo "Deployment environment file is missing"
+            exit 1
+          fi
+
+          if [ ! -s "$DEPLOY_ENV_FILE" ]; then
+            echo "Deployment environment file is empty"
+            exit 1
+          fi
+
+          if [ ! -r "$DEPLOY_ENV_FILE" ]; then
+            echo "Deployment environment file is not readable by the runner"
+            exit 1
+          fi
+
+          permissions="$(stat -c '%a' -- "$DEPLOY_ENV_FILE")"
+          if [ "${permissions: -1}" != "0" ]; then
+            echo "Deployment environment file must not be accessible by other users"
+            exit 1
+          fi
+
+          node <<'NODE'
+          const path = process.env.DEPLOY_ENV_FILE
+          process.loadEnvFile(path)
+
+          const sensitiveKeys = [
+            'DATABASE_URL',
+            'REDIS_URL',
+            'QWEN_API_KEY',
+            'REQUEST_ENCRYPTION_KEY',
+            'GPAS2_USER_INFO_URL',
+            'S3_ACCESS_KEY_ID',
+            'S3_SECRET_ACCESS_KEY',
+            'S3_ADMIN_ACCESS_KEY_ID',
+            'S3_ADMIN_SECRET_ACCESS_KEY',
+          ]
+
+          for (const key of sensitiveKeys) {
+            const value = process.env[key]
+
+            if (!value) {
+              continue
+            }
+
+            const escaped = value
+              .replaceAll('%', '%25')
+              .replaceAll('\r', '%0D')
+              .replaceAll('\n', '%0A')
+
+            process.stdout.write(`::add-mask::${escaped}\n`)
+          }
+          NODE
+
+          echo "Deployment environment file is ready"
+
+      - name: Verify host model assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          model_root=/home/lu/models
+          tokenizer_config="$model_root/qwen-tokenizer/tokenizer_config.json"
+
+          if [ -L "$model_root" ] || [ ! -d "$model_root" ]; then
+            echo "Host model directory is missing or is a symbolic link: $model_root"
+            exit 1
+          fi
+
+          for required_file in \
+            "$model_root/qwen-tokenizer/tokenizer.json" \
+            "$tokenizer_config"
+          do
+            if [ ! -f "$required_file" ] || [ ! -r "$required_file" ]; then
+              echo "Required model file is missing or unreadable: $required_file"
+              exit 1
+            fi
+          done
+
+          TOKENIZER_CONFIG="$tokenizer_config" node <<'NODE'
+          const fs = require('node:fs')
+          const config = JSON.parse(
+            fs.readFileSync(process.env.TOKENIZER_CONFIG, 'utf8'),
+          )
+
+          if (typeof config.chat_template !== 'string' || !config.chat_template) {
+            throw new Error('Qwen tokenizer_config.json must contain chat_template')
+          }
+          NODE
+
+          echo "Host model assets are ready"
+
+      - name: Build and deploy
+        env:
+          APP_COMMIT: ${{ github.sha }}
+          # Empty on push; passed through env, never interpolated into the script.
+          RESET_DATABASE_CONFIRM: ${{ inputs.reset_database }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          compose=(
+            docker compose
+            --env-file "$DEPLOY_ENV_FILE"
+            -p ai-chatbot
+          )
+
+          "${compose[@]}" build
+
+          "${compose[@]}" \
+            run \
+            --rm \
+            storage-init
+
+          if [ -n "${RESET_DATABASE_CONFIRM:-}" ]; then
+            # Check the confirmation, connections and permissions while the
+            # running services are untouched, so a typo cannot take them down.
+            "${compose[@]}" \
+              run \
+              --rm \
+              -e "RESET_DATABASE_CONFIRM=${RESET_DATABASE_CONFIRM}" \
+              -e RESET_DATABASE_CHECK_ONLY=true \
+              app \
+              node dist/server/resetDatabase.js
+
+            echo "Rebuilding the database: all data will be deleted"
+            # Nothing may hold connections or write keys during the reset.
+            "${compose[@]}" stop app worker
+
+            # Refuses unless the confirmation equals the database name.
+            "${compose[@]}" \
+              run \
+              --rm \
+              -e "RESET_DATABASE_CONFIRM=${RESET_DATABASE_CONFIRM}" \
+              app \
+              node dist/server/resetDatabase.js
+
+            "${compose[@]}" \
+              run \
+              --rm \
+              app \
+              node dist/server/initDatabase.js
+          else
+            "${compose[@]}" \
+              run \
+              --rm \
+              app \
+              node dist/server/migrate.js
+          fi
+
+          "${compose[@]}" \
+            up \
+            -d \
+            --remove-orphans
+
+      - name: Verify application
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          compose=(
+            docker compose
+            --env-file "$DEPLOY_ENV_FILE"
+            -p ai-chatbot
+          )
+
+          for attempt in $(seq 1 30); do
+            echo "Health check ${attempt}/30"
+
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              http://10.88.20.19:8090/ai-chatbot/api/health
+            then
+              echo
+              echo "Deployment succeeded"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          "${compose[@]}" ps
+          "${compose[@]}" logs --tail=200
+
+          exit 1

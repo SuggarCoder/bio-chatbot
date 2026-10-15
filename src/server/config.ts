@@ -1,0 +1,434 @@
+import 'dotenv/config'
+
+export type AppConfig = {
+  nodeEnv: string
+  host: string
+  port: number
+  serveClient: boolean
+  databaseUrl: string
+  requestEncryptionKey: string
+  ingressConcurrency: number
+  upstreamConcurrency: number
+  upstreamTokensPerMinute: number
+  upstreamRequestsPerMinute: number
+  pgPoolMax: number
+  authCacheTtlSeconds: number
+  redisUrl: string
+  redisPrefix: string
+  qwenApiKey: string
+  qwenBaseUrl: string
+  qwenModel: string
+  qwenTokenizerPath: string
+  qwenContextWindowTokens: number
+  qwenMaxInputTokens: number
+  qwenMaxOutputTokens: number
+  chatHistoryTokenBudget: number
+  chatSummaryTokenBudget: number
+  summaryTargetTokens: number
+  summaryTriggerTokens: number
+  instructionsTokenBudget: number
+  artifactProtocolTokenBudget: number
+  artifactFullContentTokenBudget: number
+  artifactOutlineTokenBudget: number
+  artifactFragmentTokenBudget: number
+  contextMemoryEnabled: boolean
+  userMemoryEnabled: boolean
+  userMemoryTokenBudget: number
+  userMemoryMaxItems: number
+  artifactPatchEnabled: boolean
+  backgroundModel: string
+  backgroundMaxOutputTokens: number
+  backgroundConcurrency: number
+  backgroundTimeoutMs: number
+  gpas2AuthMode: 'mock' | 'upstream'
+  gpas2UserInfoUrl?: string
+  chatRateLimitPerMinute: number
+  monthlyTokenLimit: number
+  globalGenerationConcurrency: number
+  providerGenerationConcurrency: number
+  modelGenerationConcurrency: number
+  generationTimeoutMs: number
+  generationLockLeaseMs: number
+  generationLockRenewIntervalMs: number
+  generationCancelPollIntervalMs: number
+  generationSnapshotIntervalMs: number
+  artifactProtocolEnabled: boolean
+  agentMaxToolCalls: number
+  agentToolLimit: number
+  objectStorage: ObjectStorageConfig
+}
+
+export type ObjectStorageConfig = {
+  enabled: boolean
+  endpoint?: string
+  region: string
+  bucket?: string
+  accessKeyId?: string
+  secretAccessKey?: string
+  forcePathStyle: boolean
+  maxAttempts: number
+  serverSideEncryption?: 'AES256'
+}
+
+function required(name: string): string {
+  const value = process.env[name]?.trim()
+
+  if (!value) {
+    throw new Error(`${name} is required`)
+  }
+
+  return value
+}
+
+function positiveInteger(name: string, fallback: number, allowZero = false): number {
+  const raw = process.env[name]?.trim()
+  const value = raw ? Number(raw) : fallback
+  const minimum = allowZero ? 0 : 1
+
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(`${name} must be an integer greater than or equal to ${minimum}`)
+  }
+
+  return value
+}
+
+function booleanValue(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  fallback: boolean,
+): boolean {
+  const raw = environment[name]?.trim().toLowerCase()
+
+  if (!raw) {
+    return fallback
+  }
+
+  if (raw === 'true') {
+    return true
+  }
+
+  if (raw === 'false') {
+    return false
+  }
+
+  throw new Error(`${name} must be true or false`)
+}
+
+function storageRequired(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+): string {
+  const value = environment[name]?.trim()
+
+  if (!value) {
+    throw new Error(`${name} is required when OBJECT_STORAGE_ENABLED=true`)
+  }
+
+  return value
+}
+
+export function readObjectStorageConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+  nodeEnv = environment.NODE_ENV?.trim() || 'development',
+): ObjectStorageConfig {
+  const enabled = booleanValue(
+    environment,
+    'OBJECT_STORAGE_ENABLED',
+    false,
+  )
+  const allowInsecureHttp = booleanValue(
+    environment,
+    'S3_ALLOW_INSECURE_HTTP',
+    false,
+  )
+  const region = environment.S3_REGION?.trim() || 'us-east-1'
+  const forcePathStyle = booleanValue(
+    environment,
+    'S3_FORCE_PATH_STYLE',
+    true,
+  )
+  const maxAttemptsRaw = environment.S3_MAX_ATTEMPTS?.trim()
+  const maxAttempts = maxAttemptsRaw ? Number(maxAttemptsRaw) : 3
+
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error('S3_MAX_ATTEMPTS must be an integer greater than or equal to 1')
+  }
+
+  const encryption = environment.S3_SERVER_SIDE_ENCRYPTION?.trim()
+
+  if (encryption && encryption !== 'AES256') {
+    throw new Error('S3_SERVER_SIDE_ENCRYPTION must be empty or AES256')
+  }
+  const serverSideEncryption = encryption === 'AES256'
+    ? encryption
+    : undefined
+
+  if (!enabled) {
+    return {
+      enabled,
+      region,
+      forcePathStyle,
+      maxAttempts,
+      serverSideEncryption,
+    }
+  }
+
+  const endpoint = storageRequired(environment, 'S3_ENDPOINT')
+  const parsedEndpoint = new URL(endpoint)
+
+  if (!['http:', 'https:'].includes(parsedEndpoint.protocol)) {
+    throw new Error('S3_ENDPOINT must use HTTP or HTTPS')
+  }
+
+  if (nodeEnv === 'production' && parsedEndpoint.protocol === 'http:') {
+    if (['localhost', '127.0.0.1', '[::1]'].includes(parsedEndpoint.hostname)) {
+      throw new Error(
+        'S3_ENDPOINT must not use a loopback host in production containers; use host.docker.internal or a Docker network service name',
+      )
+    }
+
+    if (!allowInsecureHttp) {
+      throw new Error(
+        'S3_ENDPOINT must use HTTPS in production unless S3_ALLOW_INSECURE_HTTP=true is explicitly set for a private local network',
+      )
+    }
+  }
+
+  return {
+    enabled,
+    endpoint: parsedEndpoint.toString().replace(/\/$/, ''),
+    region,
+    bucket: storageRequired(environment, 'S3_BUCKET'),
+    accessKeyId: storageRequired(environment, 'S3_ACCESS_KEY_ID'),
+    secretAccessKey: storageRequired(environment, 'S3_SECRET_ACCESS_KEY'),
+    forcePathStyle,
+    maxAttempts,
+    serverSideEncryption,
+  }
+}
+
+/**
+ * Generation leases (one model call in flight per agent run) and background
+ * gates run before the shared upstream permit. If their sum fits
+ * UPSTREAM_CONCURRENCY no caller ever waits (or times out) on the shared
+ * permit. Worker instance counts are unknown here, so only warn.
+ */
+function warnUpstreamPartition(): void {
+  const generation = positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 96)
+  const background = positiveInteger('BACKGROUND_CONCURRENCY', 2)
+  const upstream = positiveInteger('UPSTREAM_CONCURRENCY', 100)
+  if (generation + background > upstream) {
+    console.warn(
+      `GLOBAL_GENERATION_CONCURRENCY (${generation}) + BACKGROUND_CONCURRENCY (${background}) exceeds UPSTREAM_CONCURRENCY (${upstream}); model calls may wait on the shared permit and fail after 60 seconds`,
+    )
+  }
+}
+
+export function readConfig(): AppConfig {
+  const nodeEnv = process.env.NODE_ENV?.trim() || 'development'
+  const defaultAuthMode = nodeEnv === 'production' ? 'upstream' : 'mock'
+  const authMode = process.env.GPAS2_AUTH_MODE?.trim() || defaultAuthMode
+
+  if (authMode !== 'mock' && authMode !== 'upstream') {
+    throw new Error('GPAS2_AUTH_MODE must be mock or upstream')
+  }
+
+  if (nodeEnv === 'production' && authMode === 'mock') {
+    throw new Error('GPAS2_AUTH_MODE=mock is not allowed in production')
+  }
+
+  const gpas2UserInfoUrl = process.env.GPAS2_USER_INFO_URL?.trim()
+
+  if (authMode === 'upstream') {
+    if (!gpas2UserInfoUrl) {
+      throw new Error('GPAS2_USER_INFO_URL is required in upstream mode')
+    }
+
+    const parsedUrl = new URL(gpas2UserInfoUrl)
+
+    if (parsedUrl.protocol !== 'https:' && nodeEnv === 'production') {
+      throw new Error('GPAS2_USER_INFO_URL must use HTTPS in production')
+    }
+  }
+
+  const environmentName = nodeEnv === 'production' ? 'prod' : 'dev'
+  const pgPoolMax = positiveInteger('PG_POOL_MAX', 4)
+  if (pgPoolMax > 64) throw new Error('PG_POOL_MAX must not exceed 64 per process')
+  const requestEncryptionKey = required('REQUEST_ENCRYPTION_KEY')
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(requestEncryptionKey) || Buffer.from(requestEncryptionKey, 'base64').length !== 32) {
+    throw new Error('REQUEST_ENCRYPTION_KEY must be a base64-encoded 32-byte key')
+  }
+  const generationLockLeaseMs = positiveInteger(
+    'GENERATION_LOCK_LEASE_MS',
+    30_000,
+  )
+  const generationLockRenewIntervalMs = positiveInteger(
+    'GENERATION_LOCK_RENEW_INTERVAL_MS',
+    10_000,
+  )
+  if (generationLockRenewIntervalMs >= generationLockLeaseMs) {
+    throw new Error(
+      'GENERATION_LOCK_RENEW_INTERVAL_MS must be less than GENERATION_LOCK_LEASE_MS',
+    )
+  }
+
+  const qwenContextWindowTokens = positiveInteger(
+    'QWEN_CONTEXT_WINDOW_TOKENS',
+    1_000_000,
+  )
+  const qwenMaxInputTokens = positiveInteger(
+    'QWEN_MAX_INPUT_TOKENS',
+    983_616,
+  )
+  const qwenMaxOutputTokens = positiveInteger(
+    'QWEN_MAX_OUTPUT_TOKENS',
+    65_536,
+  )
+  if (qwenMaxInputTokens > qwenContextWindowTokens) {
+    throw new Error('QWEN_MAX_INPUT_TOKENS must not exceed QWEN_CONTEXT_WINDOW_TOKENS')
+  }
+  if (qwenMaxOutputTokens > qwenContextWindowTokens) {
+    throw new Error('QWEN_MAX_OUTPUT_TOKENS must not exceed QWEN_CONTEXT_WINDOW_TOKENS')
+  }
+
+  const chatHistoryTokenBudget = positiveInteger(
+    'CHAT_HISTORY_TOKEN_BUDGET',
+    131_072,
+  )
+  const chatSummaryTokenBudget = positiveInteger(
+    'CHAT_SUMMARY_TOKEN_BUDGET',
+    12_288,
+  )
+  if (chatHistoryTokenBudget + chatSummaryTokenBudget > qwenMaxInputTokens) {
+    throw new Error('Chat history and summary budgets must fit QWEN_MAX_INPUT_TOKENS')
+  }
+  // The summarizer aims for the target and may overshoot up to the budget,
+  // which is also its hard output cap.
+  const summaryTargetTokens = positiveInteger('SUMMARY_TARGET_TOKENS', 6_144)
+  if (summaryTargetTokens * 1.25 > chatSummaryTokenBudget) {
+    throw new Error('SUMMARY_TARGET_TOKENS x 1.25 must not exceed CHAT_SUMMARY_TOKEN_BUDGET')
+  }
+  const instructionsTokenBudget = positiveInteger(
+    'INSTRUCTIONS_TOKEN_BUDGET',
+    65_536,
+  )
+  const userMemoryTokenBudget = positiveInteger('USER_MEMORY_TOKEN_BUDGET', 2_048)
+  if (userMemoryTokenBudget >= instructionsTokenBudget) {
+    throw new Error('USER_MEMORY_TOKEN_BUDGET must be less than INSTRUCTIONS_TOKEN_BUDGET')
+  }
+  const userMemoryMaxItems = positiveInteger('USER_MEMORY_MAX_ITEMS', 40)
+  if (userMemoryMaxItems < 4 || userMemoryMaxItems > 200) {
+    throw new Error('USER_MEMORY_MAX_ITEMS must be between 4 and 200')
+  }
+  const contextMemoryEnabled = booleanValue(
+    process.env,
+    'CONTEXT_MEMORY_ENABLED',
+    true,
+  )
+  const userMemoryEnabled = booleanValue(
+    process.env,
+    'USER_MEMORY_ENABLED',
+    true,
+  )
+  const artifactPatchEnabled = booleanValue(
+    process.env,
+    'ARTIFACT_PATCH_ENABLED',
+    false,
+  )
+  const artifactProtocolTokenBudget = positiveInteger('ARTIFACT_PROTOCOL_TOKEN_BUDGET', 4_096)
+  // Up to this size an Artifact is attached whole; larger ones get an outline
+  // plus model-selected sections.
+  const artifactFullContentTokenBudget = positiveInteger('ARTIFACT_FULL_CONTENT_TOKEN_BUDGET', 40_960)
+  const artifactOutlineTokenBudget = positiveInteger('ARTIFACT_OUTLINE_TOKEN_BUDGET', 8_192)
+  const artifactFragmentTokenBudget = positiveInteger('ARTIFACT_FRAGMENT_TOKEN_BUDGET', 32_768)
+  const largestArtifactTier = Math.max(
+    artifactFullContentTokenBudget,
+    artifactOutlineTokenBudget + artifactFragmentTokenBudget,
+  )
+  if (artifactProtocolTokenBudget + largestArtifactTier + userMemoryTokenBudget > instructionsTokenBudget) {
+    throw new Error('Artifact and user memory budgets must fit INSTRUCTIONS_TOKEN_BUDGET')
+  }
+
+  warnUpstreamPartition()
+
+  return {
+    nodeEnv,
+    host: process.env.HOST?.trim() || '0.0.0.0',
+    port: positiveInteger('PORT', 8090),
+    serveClient: process.env.SERVE_CLIENT !== 'false',
+    databaseUrl: required('DATABASE_URL'),
+    pgPoolMax,
+    authCacheTtlSeconds: positiveInteger('AUTH_CACHE_TTL_SECONDS', 30, true),
+    requestEncryptionKey,
+    ingressConcurrency: positiveInteger('INGRESS_CONCURRENCY', 24),
+    upstreamConcurrency: positiveInteger('UPSTREAM_CONCURRENCY', 100),
+    upstreamTokensPerMinute: positiveInteger('UPSTREAM_TOKENS_PER_MINUTE', 0, true),
+    upstreamRequestsPerMinute: positiveInteger('UPSTREAM_REQUESTS_PER_MINUTE', 0, true),
+    redisUrl: required('REDIS_URL'),
+    redisPrefix:
+      process.env.REDIS_KEY_PREFIX?.trim() ||
+      `gpas2cb:${environmentName}:v3:`,
+    qwenApiKey: required('QWEN_API_KEY'),
+    qwenBaseUrl:
+      process.env.QWEN_BASE_URL?.trim() ||
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    qwenModel:
+      process.env.QWEN_MODEL?.trim() ||
+      'qwen3.6-flash',
+    qwenTokenizerPath:
+      process.env.QWEN_TOKENIZER_PATH?.trim() || 'models/qwen-tokenizer',
+    qwenContextWindowTokens,
+    qwenMaxInputTokens,
+    qwenMaxOutputTokens,
+    chatHistoryTokenBudget,
+    chatSummaryTokenBudget,
+    summaryTargetTokens,
+    summaryTriggerTokens: positiveInteger('SUMMARY_TRIGGER_TOKENS', 16_384),
+    instructionsTokenBudget,
+    artifactProtocolTokenBudget,
+    artifactFullContentTokenBudget,
+    artifactOutlineTokenBudget,
+    artifactFragmentTokenBudget,
+    contextMemoryEnabled,
+    userMemoryEnabled,
+    userMemoryTokenBudget,
+    userMemoryMaxItems,
+    artifactPatchEnabled,
+    backgroundModel:
+      process.env.BACKGROUND_MODEL?.trim() || 'qwen3.6-flash',
+    backgroundMaxOutputTokens: positiveInteger(
+      'BACKGROUND_MAX_OUTPUT_TOKENS',
+      4_096,
+    ),
+    backgroundConcurrency: positiveInteger('BACKGROUND_CONCURRENCY', 2),
+    backgroundTimeoutMs: positiveInteger('BACKGROUND_TIMEOUT_MS', 120_000),
+    gpas2AuthMode: authMode,
+    gpas2UserInfoUrl,
+    chatRateLimitPerMinute: positiveInteger('CHAT_RATE_LIMIT_PER_MINUTE', 10),
+    monthlyTokenLimit: positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true),
+    globalGenerationConcurrency: positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 96),
+    providerGenerationConcurrency: positiveInteger('PROVIDER_GENERATION_CONCURRENCY', 96),
+    modelGenerationConcurrency: positiveInteger('MODEL_GENERATION_CONCURRENCY', 96),
+    generationTimeoutMs: positiveInteger('GENERATION_TIMEOUT_MS', 180_000),
+    generationLockLeaseMs,
+    generationLockRenewIntervalMs,
+    generationCancelPollIntervalMs: positiveInteger(
+      'GENERATION_CANCEL_POLL_INTERVAL_MS',
+      5_000,
+    ),
+    generationSnapshotIntervalMs: positiveInteger(
+      'GENERATION_SNAPSHOT_INTERVAL_MS',
+      1_000,
+    ),
+    artifactProtocolEnabled: booleanValue(
+      process.env,
+      'ARTIFACT_PROTOCOL_ENABLED',
+      false,
+    ),
+    // The model calls GPAS tools in a bounded loop inside the generation
+    // lease (one model call in flight per run, see capacity notes).
+    agentMaxToolCalls: positiveInteger('AGENT_MAX_TOOL_CALLS', 4),
+    agentToolLimit: positiveInteger('AGENT_TOOL_LIMIT', 8),
+    objectStorage: readObjectStorageConfig(process.env, nodeEnv),
+  }
+}

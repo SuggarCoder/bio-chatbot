@@ -1,0 +1,629 @@
+import { expect, test } from '@playwright/test'
+
+const timestamp = '2026-08-02T00:00:00.000Z'
+
+const summaries = [
+  {
+    id: 'conversation-a',
+    title: 'Conversation A',
+    chatType: 'general',
+    status: 'active',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  },
+  {
+    id: 'conversation-b',
+    title: 'Conversation B',
+    chatType: 'general',
+    status: 'active',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  },
+]
+
+function detail(id: 'conversation-a' | 'conversation-b') {
+  const suffix = id === 'conversation-a' ? 'A' : 'B'
+  return {
+    ...summaries.find((summary) => summary.id === id),
+    messages: [{
+      id: `message-${suffix.toLowerCase()}`,
+      seq: 1,
+      role: 'assistant',
+      status: 'completed',
+      content: `Message from ${suffix}`,
+      parts: [{ type: 'text', order: 0, text: `Message from ${suffix}` }],
+      createdAt: timestamp,
+      vote: null,
+      executionSteps: [],
+    }],
+    pageInfo: { hasMore: false, beforeSeq: null },
+    activeGeneration: null,
+  }
+}
+
+test('switching directly between sessions loads the destination messages', async ({ page }) => {
+  const detailRequests: string[] = []
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
+    if (pathname.endsWith('/api/health')) {
+      await route.fulfill({ json: {
+        status: 'ok',
+        service: 'ai-chatbot',
+        commit: 'test',
+        time: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/me')) {
+      await route.fulfill({ json: {
+        id: 'test-user',
+        externalUserId: 'test-user',
+        externalTeamId: null,
+        realName: 'Test User',
+        userName: 'tester',
+        jobTitle: null,
+        researchField: null,
+        email: 'test@example.com',
+        name: 'Test User',
+        image: null,
+        gpas2Role: null,
+        serviceTier: 'free',
+        schedulingWeight: 1,
+        generationConcurrencyLimit: 1,
+        maxQueuedGenerations: 5,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations')) {
+      await route.fulfill({ json: { conversations: summaries } })
+      return
+    }
+    const match = pathname.match(/\/api\/conversations\/(conversation-[ab])$/)
+    if (match) {
+      detailRequests.push(match[1])
+      if (match[1] === 'conversation-b') {
+        await new Promise((resolve) => setTimeout(resolve, 80))
+      }
+      await route.fulfill({
+        json: detail(match[1] as 'conversation-a' | 'conversation-b'),
+      })
+      return
+    }
+    await route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/conversation-a')
+  await expect(page.getByText('Message from A')).toBeVisible()
+
+  const sidebar = page.locator('aside').first()
+  await sidebar.getByAltText('GPAS').first().click()
+  const conversationLink = page.locator(
+    'a[href="/ai-chatbot/conversation-b"]',
+  )
+  await expect(conversationLink).toBeVisible()
+  await expect.poll(async () => (
+    (await conversationLink.boundingBox())?.height ?? 0
+  )).toBeGreaterThanOrEqual(60)
+  await conversationLink.getByText('Conversation B').click()
+
+  await expect(page).toHaveURL(/\/ai-chatbot\/conversation-b$/)
+  await expect(page.getByText('Message from B')).toBeVisible()
+  await expect(page.getByText('Message from A')).toHaveCount(0)
+  expect(detailRequests).toEqual(['conversation-a', 'conversation-b'])
+})
+
+test('assistant votes can be selected, switched, cleared, and rolled back', async ({ page }) => {
+  const voteRequests: Array<{ method: string; isUpvoted?: boolean }> = []
+  let rejectNextVote = false
+
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const request = route.request()
+    const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
+    if (pathname.endsWith('/api/health')) {
+      await route.fulfill({ json: {
+        status: 'ok',
+        service: 'ai-chatbot',
+        commit: 'test',
+        time: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/me')) {
+      await route.fulfill({ json: {
+        id: 'test-user',
+        externalUserId: 'test-user',
+        externalTeamId: null,
+        realName: 'Test User',
+        userName: 'tester',
+        jobTitle: null,
+        researchField: null,
+        email: 'test@example.com',
+        name: 'Test User',
+        image: null,
+        gpas2Role: null,
+        serviceTier: 'free',
+        schedulingWeight: 1,
+        generationConcurrencyLimit: 1,
+        maxQueuedGenerations: 5,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations')) {
+      await route.fulfill({ json: { conversations: summaries } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations/conversation-a')) {
+      await route.fulfill({ json: detail('conversation-a') })
+      return
+    }
+    if (pathname.endsWith('/api/messages/message-a/vote')) {
+      if (request.method() === 'DELETE') {
+        voteRequests.push({ method: 'DELETE' })
+        await route.fulfill({ status: 204 })
+        return
+      }
+      const body = request.postDataJSON() as { isUpvoted: boolean }
+      voteRequests.push({ method: 'PUT', isUpvoted: body.isUpvoted })
+      if (rejectNextVote) {
+        rejectNextVote = false
+        await route.fulfill({
+          status: 500,
+          json: { error: { code: 'vote_failed', message: 'Vote failed' } },
+        })
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      await route.fulfill({ json: { vote: body.isUpvoted ? 'up' : 'down' } })
+      return
+    }
+    await route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/conversation-a')
+  await expect(page.getByText('Message from A')).toBeVisible()
+  const upvote = page.getByRole('button', { name: '点赞' })
+  const downvote = page.getByRole('button', { name: '点踩' })
+  const regenerate = page.getByRole('button', { name: '重新生成' })
+
+  const upvoteResponse = page.waitForResponse((response) => (
+    response.request().method() === 'PUT' &&
+    response.url().endsWith('/api/messages/message-a/vote')
+  ))
+  await upvote.click()
+  await expect(upvote).toHaveAttribute('aria-busy', 'true')
+  await expect(regenerate.locator('span')).not.toHaveClass(/generation-status-spin/)
+  await upvoteResponse
+  await expect(upvote).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('status')).toHaveText('已点赞')
+
+  await downvote.click()
+  await expect(downvote).toHaveAttribute('aria-pressed', 'true')
+  await expect(upvote).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('status')).toHaveText('已点踩')
+
+  await downvote.click()
+  await expect(downvote).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('status')).toHaveText('已取消评价')
+
+  rejectNextVote = true
+  await upvote.click()
+  await expect(upvote).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('status')).toHaveText('评价保存失败，请重试')
+  expect(voteRequests).toEqual([
+    { method: 'PUT', isUpvoted: true },
+    { method: 'PUT', isUpvoted: false },
+    { method: 'DELETE' },
+    { method: 'PUT', isUpvoted: true },
+  ])
+})
+
+test('a rejected generation start retries the original request instead of regenerating a local placeholder', async ({ page }) => {
+  // The client picks the conversation id; the mock adopts it.
+  let chatId = '11111111-1111-4111-8111-111111111111'
+  const generationId = '22222222-2222-4222-8222-222222222222'
+  const streamId = '33333333-3333-4333-8333-333333333333'
+  const userMessageId = '44444444-4444-4444-8444-444444444444'
+  const assistantMessageId = '55555555-5555-4555-8555-555555555555'
+  const generationBodies: Array<Record<string, unknown>> = []
+  const idempotencyKeys: string[] = []
+  const regenerateRequests: string[] = []
+
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const request = route.request()
+    const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
+    if (pathname.endsWith('/api/health')) {
+      await route.fulfill({ json: {
+        status: 'ok',
+        service: 'ai-chatbot',
+        commit: 'test',
+        time: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/me')) {
+      await route.fulfill({ json: {
+        id: 'test-user',
+        externalUserId: 'test-user',
+        externalTeamId: null,
+        realName: 'Test User',
+        userName: 'tester',
+        jobTitle: null,
+        researchField: null,
+        email: 'test@example.com',
+        name: 'Test User',
+        image: null,
+        gpas2Role: null,
+        serviceTier: 'free',
+        schedulingWeight: 1,
+        generationConcurrencyLimit: 1,
+        maxQueuedGenerations: 5,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations') && request.method() === 'GET') {
+      await route.fulfill({ json: { conversations: [] } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations') && request.method() === 'POST') {
+      chatId = (request.postDataJSON() as { id: string }).id
+      await route.fulfill({ json: {
+        id: chatId,
+        title: 'Retry this request',
+        chatType: 'general',
+        status: 'active',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith(`/api/conversations/${chatId}/messages`)) {
+      generationBodies.push(request.postDataJSON() as Record<string, unknown>)
+      idempotencyKeys.push(request.headers()['idempotency-key'] ?? '')
+      if (generationBodies.length === 1) {
+        await route.fulfill({
+          status: 429,
+          json: { error: {
+            code: 'generation_concurrency_exceeded',
+            message: 'Another generation is already running',
+          } },
+        })
+        return
+      }
+      await route.fulfill({
+        status: 201,
+        json: {
+          generation: {
+            id: generationId,
+            chatId,
+            streamId,
+            status: 'created',
+            effectiveStatus: 'created',
+            cancelRequestedAt: null,
+            cancelSource: null,
+          },
+          assistantMessageId,
+          userMessage: {
+            id: userMessageId,
+            seq: 1,
+            role: 'user',
+            status: 'completed',
+            content: 'Retry this request',
+            parts: [{ type: 'text', order: 0, text: 'Retry this request' }],
+            createdAt: timestamp,
+            vote: null,
+            executionSteps: [],
+          },
+          replacesMessageId: null,
+        },
+      })
+      return
+    }
+    if (pathname.includes('/api/messages/') && pathname.endsWith('/regenerations')) {
+      regenerateRequests.push(pathname)
+      await route.fulfill({ status: 404, json: { error: {
+        code: 'message_not_found',
+        message: 'Assistant message not found',
+      } } })
+      return
+    }
+    if (pathname.endsWith(`/api/generations/${generationId}/stream`)) {
+      const identity = { generationId, streamId, messageId: assistantMessageId }
+      const userMessage = {
+        id: userMessageId,
+        seq: 1,
+        role: 'user',
+        status: 'completed',
+        content: 'Retry this request',
+        parts: [{ type: 'text', order: 0, text: 'Retry this request' }],
+        createdAt: timestamp,
+        vote: null,
+        executionSteps: [],
+      }
+      const assistantMessage = {
+        id: assistantMessageId,
+        seq: 2,
+        role: 'assistant',
+        status: 'completed',
+        content: 'Recovered answer',
+        parts: [{ type: 'text', order: 0, text: 'Recovered answer' }],
+        createdAt: timestamp,
+        vote: null,
+        executionSteps: [
+          {
+            id: 'request',
+            kind: 'request',
+            label: '请求已接收',
+            status: 'completed',
+            startedAt: timestamp,
+            completedAt: timestamp,
+          },
+          {
+            id: 'context',
+            kind: 'context',
+            label: '加载会话上下文',
+            status: 'completed',
+            detail: '已加载 1 条上下文消息',
+            startedAt: timestamp,
+            completedAt: '2026-08-02T00:00:01.000Z',
+          },
+          {
+            id: 'response',
+            kind: 'response',
+            label: '生成回答',
+            status: 'completed',
+            startedAt: '2026-08-02T00:00:01.000Z',
+            completedAt: '2026-08-02T00:00:02.000Z',
+          },
+        ],
+      }
+      const events = [
+        { ...identity, eventId: 1, type: 'message.start', userMessage },
+        {
+          ...identity,
+          eventId: 2,
+          type: 'progress.step',
+          step: {
+            id: 'context',
+            kind: 'context',
+            label: '加载会话上下文',
+            status: 'active',
+            startedAt: timestamp,
+          },
+        },
+        { ...identity, eventId: 3, type: 'message.delta', sequence: 1, startIndex: 0, delta: 'Recovered answer' },
+        { ...identity, eventId: 4, type: 'message.finish', finishReason: 'stop', assistantMessage },
+      ]
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: events.map((event, index) => (
+          `id: 1-${index}\ndata: ${JSON.stringify(event)}\n\n`
+        )).join(''),
+      })
+      return
+    }
+    await route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/')
+  const composer = page.locator('textarea').first()
+  await composer.fill('Retry this request')
+  await composer.press('Enter')
+
+  await expect(page.getByText('Another generation is already running')).toBeVisible()
+  await page.locator('button:has(.i-lucide-refresh-cw)').click()
+
+  await expect(page.getByText('Recovered answer')).toBeVisible()
+  const traceButton = page.getByRole('button', { name: /已完成 · 3 个步骤/ })
+  await expect(traceButton).toHaveAttribute('aria-expanded', 'false')
+  expect(generationBodies).toHaveLength(2)
+  expect(generationBodies[0].clientMessageId).toBeUndefined()
+  expect(idempotencyKeys[1]).toBe(idempotencyKeys[0])
+  expect(regenerateRequests).toEqual([])
+})
+
+test('the home page opens the new conversation before the server confirms it, and sends once it does', async ({ page }) => {
+  let releaseCreation!: () => void
+  const creationHeld = new Promise<void>((resolve) => { releaseCreation = resolve })
+  const createdIds: string[] = []
+  const generationPaths: string[] = []
+
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const request = route.request()
+    const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
+    if (pathname.endsWith('/api/health')) return route.fulfill({ json: { status: 'ok', service: 'ai-chatbot', commit: 'test', time: timestamp } })
+    if (pathname.endsWith('/api/me')) return route.fulfill({ json: { id: 'u', externalUserId: 'u', externalTeamId: null, userName: 'tester', realName: 'Test User', name: 'Test User' } })
+    if (pathname.endsWith('/api/conversations') && request.method() === 'GET') return route.fulfill({ json: { conversations: [] } })
+    if (pathname.endsWith('/api/conversations') && request.method() === 'POST') {
+      const body = request.postDataJSON() as { id: string; title: string }
+      createdIds.push(body.id)
+      await creationHeld
+      return route.fulfill({ status: 201, json: { id: body.id, title: body.title, chatType: 'general', status: 'active', createdAt: timestamp, updatedAt: timestamp } })
+    }
+    if (pathname.endsWith('/messages') && request.method() === 'POST') {
+      generationPaths.push(pathname)
+      return route.fulfill({ status: 429, json: { error: { code: 'generation_concurrency_exceeded', message: 'Busy right now' } } })
+    }
+    return route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/')
+  const composer = page.locator('textarea').first()
+  await composer.fill('Open me right away')
+  await composer.press('Enter')
+
+  // The session page is open and shows the message while the creation is still held.
+  await expect(page).toHaveURL(/\/ai-chatbot\/[0-9a-f-]{36}$/)
+  await expect(page.getByText('Open me right away').first()).toBeVisible()
+  expect(createdIds).toHaveLength(1)
+  expect(page.url()).toContain(createdIds[0])
+  expect(generationPaths).toEqual([])
+
+  releaseCreation()
+  await expect(page.getByText('Busy right now').first()).toBeVisible()
+  expect(generationPaths).toEqual([`/ai-chatbot/api/conversations/${createdIds[0]}/messages`])
+})
+
+test('long conversations expose question anchors and preserve position while loading earlier questions', async ({ page }) => {
+  const questionTexts = [
+    '这是第一个用于定位的超长问题，请介绍研究背景',
+    '这是第二个用于定位的超长问题，请比较实验方法',
+    '这是第三个用于定位的超长问题，请分析数据质量',
+    '这是第四个用于定位的超长问题，请解释主要结论',
+    '这是第五个用于定位的超长问题，请列出潜在风险',
+    '这是第六个用于定位的超长问题，请给出后续建议',
+  ]
+  const longAnswer = Array.from(
+    { length: 12 },
+    (_, index) => `第 ${index + 1} 段回答用于构造足够长的聊天记录，以便验证提问锚点导航。`,
+  ).join('\n\n')
+  const messages = questionTexts.flatMap((content, index) => ([
+    {
+      id: `long-user-${index + 1}`,
+      seq: 51 + index * 2,
+      role: 'user',
+      status: 'completed',
+      content,
+      parts: [{ type: 'text', order: 0, text: content }],
+      createdAt: timestamp,
+      vote: null,
+      executionSteps: [],
+    },
+    {
+      id: `long-assistant-${index + 1}`,
+      seq: 52 + index * 2,
+      role: 'assistant',
+      status: 'completed',
+      content: longAnswer,
+      parts: [{ type: 'text', order: 0, text: longAnswer }],
+      createdAt: timestamp,
+      vote: null,
+      executionSteps: [],
+    },
+  ]))
+  const earlierQuestion = '这是更早加载的问题，用于验证分页锚点'
+  let olderMessageRequests = 0
+
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.route('**/ai-chatbot/api/**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname.endsWith('/requests')) return route.fulfill({ json: { requests: [] } })
+
+    if (pathname.endsWith('/api/health')) {
+      await route.fulfill({ json: {
+        status: 'ok',
+        service: 'ai-chatbot',
+        commit: 'test',
+        time: timestamp,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/me')) {
+      await route.fulfill({ json: {
+        id: 'test-user',
+        externalUserId: 'test-user',
+        externalTeamId: null,
+        realName: 'Test User',
+        userName: 'tester',
+        jobTitle: null,
+        researchField: null,
+        email: 'test@example.com',
+        name: 'Test User',
+        image: null,
+        gpas2Role: null,
+        serviceTier: 'free',
+        schedulingWeight: 1,
+        generationConcurrencyLimit: 1,
+        maxQueuedGenerations: 5,
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations')) {
+      await route.fulfill({ json: { conversations: summaries } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations/conversation-a/messages')) {
+      olderMessageRequests += 1
+      await route.fulfill({ json: {
+        messages: [
+          {
+            id: 'long-user-earlier',
+            seq: 49,
+            role: 'user',
+            status: 'completed',
+            content: earlierQuestion,
+            parts: [{ type: 'text', order: 0, text: earlierQuestion }],
+            createdAt: timestamp,
+            vote: null,
+            executionSteps: [],
+          },
+          {
+            id: 'long-assistant-earlier',
+            seq: 50,
+            role: 'assistant',
+            status: 'completed',
+            content: longAnswer,
+            parts: [{ type: 'text', order: 0, text: longAnswer }],
+            createdAt: timestamp,
+            vote: null,
+            executionSteps: [],
+          },
+        ],
+        pageInfo: { hasMore: false, beforeSeq: null },
+      } })
+      return
+    }
+    if (pathname.endsWith('/api/conversations/conversation-a')) {
+      await route.fulfill({ json: {
+        ...summaries[0],
+        messages,
+        pageInfo: { hasMore: true, beforeSeq: 51 },
+        activeGeneration: null,
+      } })
+      return
+    }
+    await route.fulfill({ status: 404, json: { error: { message: 'Not found' } } })
+  })
+
+  await page.goto('/ai-chatbot/conversation-a')
+  const rail = page.getByRole('button', { name: '打开提问导航' })
+  await expect(rail).toBeVisible()
+  await rail.hover()
+
+  const navigator = page.getByRole('navigation', { name: '提问导航' })
+  await expect(navigator).toBeVisible()
+  await expect(navigator.getByText('6 个提问')).toBeVisible()
+  await navigator.getByRole('button', { name: /跳转到提问：这是第四个/ }).click()
+
+  const messageList = page.getByTestId('conversation-message-list')
+  const targetQuestion = page.locator('[data-message-id="long-user-4"]')
+  await expect(targetQuestion).toHaveAttribute('data-anchor-highlighted', 'true')
+  await expect.poll(async () => {
+    const listBox = await messageList.boundingBox()
+    const targetBox = await targetQuestion.boundingBox()
+    return listBox && targetBox ? Math.round(targetBox.y - listBox.y) : -1
+  }).toBeGreaterThanOrEqual(12)
+  await expect.poll(async () => {
+    const listBox = await messageList.boundingBox()
+    const targetBox = await targetQuestion.boundingBox()
+    return listBox && targetBox ? Math.round(targetBox.y - listBox.y) : 999
+  }).toBeLessThanOrEqual(28)
+
+  const targetTopBeforeLoading = await targetQuestion.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  )
+  await navigator.getByRole('button', { name: '加载更早提问' }).click()
+  await expect(navigator.getByRole('button', { name: new RegExp(earlierQuestion) })).toBeVisible()
+  const targetTopAfterLoading = await targetQuestion.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  )
+  expect(Math.abs(targetTopAfterLoading - targetTopBeforeLoading)).toBeLessThan(2)
+  expect(olderMessageRequests).toBe(1)
+
+  await page.setViewportSize({ width: 800, height: 720 })
+  await expect(rail).toBeHidden()
+})

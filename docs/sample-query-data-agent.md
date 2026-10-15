@@ -1,0 +1,588 @@
+# 跨样本数据查询：可扩展的数据智能体方案
+
+本文设计一套能持续扩展的跨样本查询能力。最初的三个需求：
+
+- 请帮我找出所有做了肠道微生物检测的样本
+- 请帮我列出所有检出 xx 病原的样本
+- 请帮我找出所有鉴定到三个以上五星病原的样本
+
+它们只是第一批用例。设计目标是**一类问题**都能回答，例如“每月检出 xx 的样本数”“同时检出 A 和 B 的样本”
+“肠道和呼吸道样本的五星病原检出率对比”“在这些样本里再筛出临床样本”。
+新增问题时，不新增工具、不改智能体循环、不改提示词主干。
+
+方案从当前架构出发：Worker 内的单智能体循环、`defineGpasTool` 工具规格、只读 GPAS、身份只来自服务端。
+参照的是 Anthropic 2026 年 6 月发布的内部数据分析智能体架构
+（[How Anthropic enables self-service data analytics with Claude](https://claude.com/blog/how-anthropic-enables-self-service-data-analytics-with-claude)）。
+本文还说明为什么不对结构化数据做向量化，并列出上游 GPAS API 需要做的修改。
+
+---
+
+## 1. 问题范围：从三个问题到一类问题
+
+### 1.1 问题形状
+
+把可能被问到的问题按“形状”分类，而不是按措辞。三个初始问题分别是形状 A、B、C：
+
+| 形状 | 含义 | 例子 |
+|---|---|---|
+| **A 属性过滤** | 按样本自身字段筛选 | **所有肠道微生物检测的样本**；2026 年上传的临床样本；分析未完成的样本 |
+| **B 子实体存在 / 不存在** | 样本下是否有满足条件的检出物种 | **有 xx 病原的样本**；未检出 xx 的样本；同时检出 A 和 B；检出任一肠道致病菌 |
+| **C 子实体聚合后过滤** | 先在样本内计数或求和，再按结果筛选 | **三个以上五星病原的样本**；检出种数 > 100 的样本；病毒检出 ≥ 5 种 |
+| **D 度量阈值** | 按数值字段比较 | xx 丰度 > 1% 的样本；Reads < 100 万的样本 |
+| **E 分组统计** | 按维度分组计数或汇总 | 各检测项目的样本数；每月检出 xx 的样本数；最常见的五星病原 Top 10 |
+| **F 排名** | 按度量排序取前 N | xx 丰度最高的 10 个样本；最近 20 个分析完成的样本 |
+| **G 对比** | 两组以上按同一口径比较 | 肠道 vs 呼吸道样本的五星病原检出率；本月与上月对比 |
+| **H 结果上继续操作** | 在上一次结果集上加条件、分组或排序 | “这些样本里哪些是临床样本”；“按月份分一下” |
+| I 单样本明细 | 一个样本的完整结果 | 已有 `file.result`，保持不变 |
+
+不在范围内的：
+
+- **写操作**：仍走现有的确认表单机制。
+- **知识与解读**（“xx 病原有什么危害”“这个结果说明什么”）：属于非结构化知识，见第 4 节最后一部分。
+
+### 1.2 统一的数据视角
+
+A 到 H 都可以表达为**同一个实体图上的结构化查询**：
+
+```text
+team ─1:n─ sample（分析任务）─1:n─ detection（样本 × 物种的一条检出）─n:1─ taxon（物种，含分类谱系、危害等级）
+                │
+                ├─ 维度：检测项目、样本类型、上传/分析时间、分析状态、Reads……
+                └─ 以后可接：project、batch、采样地点、宿主、耐药基因、毒力因子、质控指标……
+```
+
+所以扩展性的关键是两件事，而不是逐个问题去适配：
+
+1. 一份**描述这张实体图的语义层**：有哪些实体、字段、关系和业务口径。
+2. 一种**能表达 A 到 H 的查询表示**（下文称“查询 IR”）。
+
+---
+
+## 2. 现状为什么答不了
+
+1. **缺少维度。** `file.list`（`GET file/dual/merge/list`）只能按 `fileName`、`status`、`qcStatus`、`analysisStatus` 过滤。
+   `sampleType` 只有临床、虫媒、环境、实验室四类，没有“检测项目”字段。
+2. **brief 是展示摘要，不能用来过滤。** `briefAnalysis` 每个类别只带 `topInfos`（目前 3 条）和 `maxHazandIndex`。
+   用它判断“是否检出”，会漏掉低丰度病原，用户也察觉不到；用它也数不出每个危害等级有几种。
+3. **明细只能逐个样本查询。** `file.result` 每次只查一个 `taskId`、一页。
+   一次回答最多调用 `AGENT_MAX_TOOL_CALLS = 4` 次工具，单个结果超过 32 KB 会从列表末尾整条删减。
+4. **已经在用扫描凑合。** `analyzedOnly` 最多翻 10 页、500 行后在服务端过滤，结果带 `scan.complete`。
+   这种做法扩展不到病原、危害等级和统计。
+5. **每类问题都要单独写代码。** 现在每种查询都要写一个新工具或新参数（`analyzedOnly` 就是这样加的）。
+   照这个方式继续，工具数会不断增长；每次运行都把全部工具交给模型，工具越多，定义越长，模型也越容易选错。
+6. **数数的变成了模型。** 把数据塞给模型筛选和计数，违反“业务数据只能来自工具结果”的规则。
+
+---
+
+## 3. Anthropic 数据智能体架构要点
+
+原文（[How Anthropic enables self-service data analytics with Claude](https://claude.com/blog/how-anthropic-enables-self-service-data-analytics-with-claude)）的要点：
+
+- **结果**：约 95% 的业务分析问题由 Claude 回答，准确率约 95%。没有 skill 时，准确率不超过 21%。
+- **核心判断**：难点不在写查询，而在“把用户的问题映射到具体且最新的实体”。
+  分析问题“往往只有一个正确答案”，而且“没有确定性的方法证明它是对的”。
+- **架构**：
+
+| 层 | 作用 | 本项目对应 |
+|---|---|---|
+| 语义层 | 人工维护的指标和维度定义。智能体必须先用它；问题能对上已定义的指标时，调用函数返回一个一致的数 | 注册表（§5.2）和 `data.query` |
+| Skills | 按需读取的 markdown：knowledge 写字段和口径，runbook 写分析流程和澄清规则 | `skills/sample-query`（§5.7） |
+| 验证与评测 | 来源脚注、审查、离线评测、漂移监控 | §5.8、§5.9。不用审查子智能体，因为现有并发预算不允许 |
+
+### 3.1 为什么它不用向量查询
+
+原文没有用 embedding、向量检索或 RAG，也没有专门讨论这个选择。下面是根据原文内容推断的原因：
+
+1. **它要解决的失败不是“找不到资料”。** 他们做过一次实验：让智能体能 grep 全部看板、数据转换和分析笔记里的 SQL。
+   结果准确率变化不到 1 个百分点；答错的问题里，约 80% 的答案其实就在这些语料里。
+   原文的结论是：瓶颈不是能否访问以往的工作，而是结构，也就是把问题映射到正确的实体。
+   向量检索只是另一种更模糊的“访问”方式，能提高找到资料的概率，解决不了映射问题。
+2. **答案只有一个，必须稳定一致。** 语义层保证同一个问题得到同一个数。
+   向量检索返回的是“相似”的候选，结果会随措辞和模型变化。
+3. **结果无法事后证明，所以过程必须是确定的。** 既然没法证明答案正确，就尽量减少不确定的环节：
+   定义由人维护，查询由定义编译，结果附上来源。向量相似度会再加一层无法解释的不确定性。
+4. **歧义和陈旧要靠治理来解决，而不是靠检索质量。** 原文的做法是每个概念只保留一个权威定义，
+   并且在修改数据模型的同一个 PR 里同步更新这些定义。
+
+这些理由同样适用于本项目，第 4 节结合样本数据展开。结论一致：结构化数据走语义层和精确查询；
+向量检索只用于词表候选和非结构化文档。
+
+---
+
+## 4. 为什么结构化数据不适合向量化
+
+一个看起来顺手的做法是：把每个样本的检测结果拼成文本，用 BGE 做 embedding 存进 pgvector，再按相似度检索。
+这条路对 A 到 H 都行不通：
+
+1. **“所有”和 top-k 冲突。** 向量检索返回最相似的 k 条，近似索引本身也不保证完全召回。用户要的是不多不少的完整集合。
+2. **精确谓词在向量空间里没有意义。** `hazardIndex = 5` 和 `= 4` 的 embedding 几乎一样。
+   “三个以上”（C）、“丰度 > 1%”（D）、“未检出”（B 的否定）、“同时检出 A 和 B”（B 的合取），相似度都表达不了。
+3. **统计、排名、对比根本不是检索问题。** E、F、G 需要分组、排序和聚合，向量库只能返回文档片段。
+4. **相近的物种名会互相混淆。** 大肠埃希菌、大肠埃希菌噬菌体、志贺菌在文本上很接近，病原性完全不同。物种的身份是 `taxId`。
+5. **答案不稳定，无法审计。** 换模型或调阈值，同一个问题会得到不同的样本集合，也解释不了为什么某个样本被选中。
+6. **数据陈旧，越过隔离边界。** 做向量化需要把业务结果复制到本地。这破坏了“业务数据只在 GPAS”的边界，
+   还要重新处理团队隔离、权限回收，以及分析重跑后的索引失效。
+7. **越扩展越糟。** 每加一个字段或问题形状，就要重新设计拼接文本、重建索引，而且照样无法保证正确。
+   结构化查询加一个字段只需要一条声明。
+
+**向量检索在这里的正确位置：**
+
+- **词表映射**：把“金葡”“MRSA”“肠道菌群检测”召回为受控词表中的候选（物种 `taxId`、检测项目代码），
+  再由精确的字典查询确认，或者请用户选择。向量化的对象是词表，不是数据。
+  向量只用来缩小候选范围，不做判断。
+- **非结构化知识**：病原知识库、SOP、报告解读规范这类文档，适合向量检索（RAG），可以作为以后的一个独立能力。
+  它回答“是什么、为什么”，结构化查询回答“有哪些、有多少”，两者不混用。
+
+---
+
+## 5. 可扩展架构
+
+### 5.1 设计原则
+
+1. **工具集固定。** 不管以后支持多少种问题，跨样本查询只用两个工具：`data.catalog` 和 `data.query`。
+   现有 6 个工具加这 2 个共 8 个，正好等于 `AGENT_TOOL_LIMIT`，不需要调大上限。
+2. **定义只写一处。** 实体、字段、关系、业务口径都写在语义层注册表里。下面这些都从注册表派生：
+   - 工具参数的校验
+   - 查询编译时的检查
+   - 口径复述的中文措辞
+   - 结果列的类型和展示方式
+   - skill 中的字段目录
+   - 评测用例模板
+3. **按需加载上下文。** 字段越来越多时，不把整份目录塞进提示词。模型用 `data.catalog` 只查当前需要的部分。
+4. **模型不碰身份，也不写查询语言。** IR 里没有团队字段，只能引用注册表里的字段和运算符。团队由编译器从会话中注入。
+5. **形状可以逐步支持。** 上游通过元数据声明支持哪些运算符；不支持的形状返回明确的“暂不支持”，不做近似查询。
+
+### 5.2 语义层注册表（声明式，人工评审）
+
+注册表的统一格式、分层和命名规则以《[GPAS 接口语义注册表规划](gpas-semantic-platform.md)》§3 为准，本节只给出样本查询涉及的两个领域。
+
+- **L1**：字段类型、单位、取值范围、字典、允许的运算符、实体关系，来自上游数据目录（§6.1），这里不重复写。
+- **L2**：本节只写中文名、同义词、敏感级别、业务口径、隐含条件和展示方式。
+- **命名**：模型和 IR 使用 L2 的键名（如 `hazardLevel`、`taxon`），编译时按 `ref` 换成上游名称（如 `hazardIndex`、`taxId`）。
+
+```ts
+// src/server/semantic/domains/sample.ts（示意）
+export const sampleDomain = defineDomain({
+  id: 'sample', label: '样本',
+  owners: { gpas: '样本服务负责人', app: '本仓库负责人' },
+  skill: { knowledge: 'skills/sample/knowledge.md', runbook: 'skills/sample/runbook.md' },
+  entities: {
+    sample: {
+      ref: 'sample', label: '样本', synonyms: ['分析任务'],
+      // 一个样本 = 一个分析任务，双端两个文件算一个样本（上游以 analysisId 为主键保证，与 mergeDuplicateRows 一致）
+      binding: { kind: 'adapter', adapter: 'fileMergeList' },   // query/execute 上线后改为 { kind: 'generic' }
+      fields: {
+        sampleName:     { label: '样本名', sensitivity: 'public' },
+        analysisId:     { label: '分析 ID', sensitivity: 'internal', note: '只用于调用详情，不展示给用户' },
+        detectionType:  { label: '检测项目', synonyms: ['检测类型', '检测套餐'], sensitivity: 'public' },
+        sampleType:     { label: '样本类型', sensitivity: 'public' },
+        analysisStatus: { label: '分析状态', sensitivity: 'public' },
+        uploadTime:     { label: '上传时间', sensitivity: 'public' },
+        analysisTime:   { label: '分析完成时间', sensitivity: 'public' },
+        totalReads:     { label: 'Reads', sensitivity: 'public' },
+      },
+      measures: {
+        sampleCount: { label: '样本数', agg: 'count' },
+        // 派生度量：分子、分母都写死，模型不自己做除法
+        fiveStarSampleRate: { label: '五星病原检出率', ratio: {
+          numerator: { measure: 'sampleCount', where: { has: 'detection', where: { segment: 'fiveStarPathogen' } } },
+          denominator: 'sampleCount',
+        } },
+      },
+      defaultSelect: ['sampleName', 'sampleType', 'detectionType', 'analysisStatus', 'uploadTime'],
+      view: 'sampleTable',                       // 复用现有多样本表格
+    },
+  },
+  segments: {
+    identified: { label: '已鉴定样本', synonyms: ['分析完成', '有结果'], entity: 'sample',
+                  where: { field: 'analysisStatus', op: 'eq', value: 'analysisverified' } },
+  },
+})
+
+// src/server/semantic/domains/analysis.ts（示意）
+export const analysisDomain = defineDomain({
+  id: 'analysis', label: '分析结果',
+  owners: { gpas: '分析服务负责人', app: '本仓库负责人' },
+  skill: { knowledge: 'skills/analysis/knowledge.md', runbook: 'skills/analysis/runbook.md' },
+  entities: {
+    detection: {
+      ref: 'detection', label: '检出物种', synonyms: ['检出', '鉴定到'],
+      binding: { kind: 'adapter', adapter: 'fileResultList' },
+      // 只有分析已完成的样本才有可信的检出记录
+      requiresParent: { segment: 'identified' },
+      fields: {
+        taxon:       { ref: 'taxId', label: '物种', synonyms: ['病原', '微生物'], sensitivity: 'public',
+                       note: '用户说属名时，按业务方确认的规则决定是否展开到下级物种（under）' },
+        hazardLevel: { ref: 'hazardIndex', label: '危害等级', synonyms: ['星级', '风险等级'], sensitivity: 'public' },
+        abundance:   { label: '相对丰度', sensitivity: 'public', note: '单位与含义以上游目录为准（类别内还是样本内，待确认）' },
+        category:    { ref: 'microbialType', label: '大类', sensitivity: 'public' },
+      },
+      measures: {
+        detectionCount: { label: '检出数', agg: 'count' },
+        taxonCount:     { label: '物种数', agg: 'count_distinct', field: 'taxon' },
+      },
+      view: 'resultPanel',
+    },
+  },
+  segments: {
+    fiveStarPathogen: { label: '五星病原', synonyms: ['五星', '5 级病原'], entity: 'detection',
+                        where: { field: 'hazardLevel', op: 'eq', value: 5 } },
+  },
+})
+```
+
+- 启动时合并全部领域并校验。登记的字段、运算符、字典必须在上游目录快照（§6.1）中存在；
+  `segments` 名称在全部领域中唯一。任何一项不通过，服务启动失败。
+- “三个以上”按“以上含本数”解析为 ≥ 3，写在 runbook 里，并通过口径复述展示给用户。
+- 需要业务方确认的口径：
+  - 检测项目在上游的实际字段。
+  - `hazardIndex` 的取值范围：代码里截断到 0–9，文档写的是 1–5 级。
+  - “检出”要不要设丰度或可信度下限。
+  - 用户说属名时，是否默认展开到下级物种。
+
+### 5.3 查询 IR
+
+一种小而封闭的 JSON 结构，覆盖 A 到 H，用 zod 定义、由注册表校验：
+
+```ts
+type Predicate =
+  | { field: string, op: Op, value: unknown }                                  // A、D
+  | { segment: string }                                                        // 命名口径
+  | { and: Predicate[] } | { or: Predicate[] } | { not: Predicate }            // 组合与否定
+  | { has: ChildEntity, where?: Predicate }                                    // B：存在
+  | { count: ChildEntity, where?: Predicate, distinct?: string, cmp: Cmp }     // C：聚合后过滤
+
+type Query = {
+  entity: 'sample' | 'detection' | 'taxon'
+  where?: Predicate
+  groupBy?: Array<{ field: string, grain?: TimeGrain }>                        // E
+  measures?: string[]                                                          // E、G
+  compare?: Array<{ label: string, where: Predicate }>                         // G：每组同口径
+  orderBy?: Array<{ by: string, dir: 'asc' | 'desc' }>                         // F
+  select?: Array<string | { as: string, count: ChildEntity, where?: Predicate, distinct?: string }>  // 返回列；省略时用 defaultSelect
+  limit?: number, page?: number, pageSize?: number
+}
+```
+
+示例。三个初始问题和几个后续问题都用同一种结构表达：
+
+```jsonc
+// A 所有肠道微生物检测的样本
+{ "entity": "sample", "where": { "field": "detectionType", "op": "in", "value": ["GUT_MICROBIOME"] } }
+
+// B 所有检出金黄色葡萄球菌的样本
+{ "entity": "sample", "where": { "has": "detection", "where": { "field": "taxon", "op": "in", "value": ["1280"] } } }
+
+// C 所有鉴定到三个以上五星病原的样本
+{ "entity": "sample", "where": { "count": "detection", "where": { "segment": "fiveStarPathogen" },
+                                  "distinct": "taxon", "cmp": { "op": "gte", "value": 3 } } }
+
+// B 同时检出 A 和 B，且未检出 C
+{ "entity": "sample", "where": { "and": [
+  { "has": "detection", "where": { "field": "taxon", "op": "in", "value": ["A"] } },
+  { "has": "detection", "where": { "field": "taxon", "op": "in", "value": ["B"] } },
+  { "not": { "has": "detection", "where": { "field": "taxon", "op": "in", "value": ["C"] } } } ] } }
+
+// E 每月检出 xx 的样本数
+{ "entity": "sample", "where": { "has": "detection", "where": { "field": "taxon", "op": "in", "value": ["xx"] } },
+  "groupBy": [{ "field": "uploadTime", "grain": "month" }], "measures": ["sampleCount"] }
+
+// E/F 最常见的五星病原 Top 10（按检出样本数）
+{ "entity": "detection", "where": { "segment": "fiveStarPathogen" },
+  "groupBy": [{ "field": "taxon" }], "measures": ["sampleCount"], "orderBy": [{ "by": "sampleCount", "dir": "desc" }], "limit": 10 }
+
+// G 肠道 vs 呼吸道样本的五星病原检出率（比例由注册表中的派生度量定义，见下文）
+{ "entity": "sample", "measures": ["sampleCount", "fiveStarSampleRate"],
+  "compare": [
+    { "label": "肠道", "where": { "field": "detectionType", "op": "in", "value": ["GUT_MICROBIOME"] } },
+    { "label": "呼吸道", "where": { "field": "detectionType", "op": "in", "value": ["RESPIRATORY"] } } ] }
+```
+
+**H（在结果上继续操作）**：`data.query` 的结果会带回规范化后的 IR。用户说“这些样本里再筛临床样本”时，
+模型在原 IR 的 `where` 上用 `and` 加一个条件，再查一次。上一轮的条件保存在本轮工具结果中，随会话上下文延续，
+服务端不需要保存查询状态。
+
+**检出率**这类比例指标在注册表里定义为派生度量（见 §5.2 的 `fiveStarSampleRate`），分子和分母都是固定的。
+模型只引用度量名，不自己做除法，以避免“分母是什么”的歧义。
+
+### 5.4 两个固定工具
+
+| 工具 | 作用 | 说明 |
+|---|---|---|
+| `data.catalog` | 查语义层：某个实体有哪些字段、运算符、度量、命名口径；或在某个字典里查值（检测项目、物种名到 `taxId`、属下物种） | 候选由字典接口按关键词、别名匹配给出（本地已不再加载 BGE；词表很大且别名难以穷举时再评估向量召回），最终以字典精确匹配为准。多个候选时返回候选列表，由模型请用户选择，不自行猜测 |
+| `data.query` | 执行查询 IR，返回精确的 `total`、行或分组、`asOf`、口径复述、规范化后的 IR | 参数先用 zod 校验结构，再按注册表校验字段、运算符和值域，然后编译 |
+
+典型调用次数：常见问题 1 到 2 次（catalog 查词，然后 query），在结果上继续操作 1 次。都在 4 次的上限之内。
+
+`file.list` 中 `analyzedOnly` 这类为单个问题加的参数，以后可以改成 `data.query` 的预设，减少重复的入口。
+`file.result` 仍负责单样本明细（形状 I）。
+
+### 5.5 编译与执行流程
+
+```text
+IR ─▶ ① 结构校验（zod）
+   ─▶ ② 语义校验（注册表：字段、运算符、值域、字典代码是否存在）
+   ─▶ ③ 规范化（展开命名口径；应用 requiresParent，例如有检出条件时自动加上“已鉴定”；补默认列和分页）
+   ─▶ ④ 成本检查（谓词深度 ≤ 4、IN 列表 ≤ 50、分组基数、compare 组数 ≤ 5）
+   ─▶ ⑤ 编译为上游请求（L2 名称按 ref 换成上游名称；附 catalogVersion；不含团队，团队由上游从会话中取）
+   ─▶ ⑥ 执行，并做一致性断言
+   ─▶ ⑦ 整形：按注册表生成列类型；按 IR 生成中文口径复述
+```
+
+- 编译器和口径复述都是纯函数，完全可单测。新增字段时，这两部分不需要改代码。
+- 校验失败时返回可解释的错误码，例如 `unknown_field`、`unsupported_op`、`ambiguous_value`、`too_expensive`、
+  `upstream_unsupported`。模型据此向用户澄清，或说明暂不支持。
+
+### 5.6 通用展示
+
+新增一种通用的 `query` 消息 part，内容是 `{ columns, rows | groups, total, asOf, criteria, ir }`。
+前端根据结果的形状选择展示方式，不需要为每类问题写专门的界面：
+
+| 结果形状 | 展示 |
+|---|---|
+| 样本列表 | 复用现有多样本表格（`FileAnalysisCards`），追加命中条件相关的列（如匹配到的病原、五星数），每行可“查看详情” |
+| 按类别分组 | 横向条形图加表格 |
+| 按时间分组 | 折线图（复用 `ProjectProgressCard` 的图表做法） |
+| compare | 分组条形图，加口径和分母说明 |
+
+翻页由服务端路由用同一份 IR 执行，数据不进入模型上下文，与现有 `gpas/file/results` 的做法相同。
+
+### 5.7 Skills
+
+- `src/server/skills/sample-query/knowledge.md`：
+  - 字段目录由注册表生成（`npm run semantic:docs`），保证与代码一致。
+  - 人工补充常见误读，例如 brief 的 top 3 不能用来判断“是否检出”，种数占比不是丰度占比。
+- `src/server/skills/sample-query/runbook.md`：按形状写流程和示例 IR，以及何时澄清（歧义词、属与种、时间范围不明）。
+  另外写明：结果为空时不放宽条件；回复只引用 `total` 和口径复述。
+- 只在本次工具集包含 `data.query` 时注入。以后新的领域（项目进度、质控等）各自一对 skill，互不干扰。
+
+### 5.8 验证（确定性，不用子智能体）
+
+- **口径复述**：由编译器根据规范化后的 IR 生成，例如“已完成分析的样本中，危害等级 5 级的物种数 ≥ 3”。
+  模型必须原样给出，用户可以立刻发现理解上的偏差。
+- **来源脚注**：“数据来源 GPAS · 截至 {asOf} · 共 {total} 个样本 · 结果完整”。
+- **一致性断言**：`total` 等于上游返回的总数；分组之和与总数一致（不适用时跳过）；抽查当页行是否满足条件。
+  断言失败时工具报错，不把结果交给模型。
+- **结果为空不等于不存在**：结果为 0 时，复述口径并提示可能的原因，不自动放宽条件重查。
+
+### 5.9 评测与防漂移
+
+- **评测矩阵**：形状（A 到 H）× 字段 × 措辞（同义、口语、缩写），每条用例包含问题、期望的 IR 和期望的口径复述。
+  注册表新增字段时，脚本自动生成该字段的模板用例，再由人补充真实措辞。
+- **确定性部分**（校验、编译、复述、断言）由 `npm test` 运行。
+- **模型部分**（问题 → IR）用 mock GPAS 定期运行并记录准确率。新增形状或领域时，评测准确率 ≥ 90% 才开放。
+- **上游契约测试**：拉取上游元数据（§6.1）与注册表比对。字段改名、枚举变化、运算符被撤销时，CI 直接失败。
+- **收集用户纠错**：用户的纠正（例如“我说的是属”）记入别名表和评测集。
+
+---
+
+## 6. 上游 GPAS API 修改建议
+
+原则：**过滤、关联、聚合放在数据所在的地方完成；接口是通用的，能力用元数据声明。**
+如果按问题逐个加接口，N 种问题就要 N 个接口；通用接口只需要一个，新增问题由加字段和加运算符来支持。
+
+### 6.1 P0：数据目录 `GET meta/catalog`
+
+这是注册表的 L1 数据目录（见平台规划 §3）。上游公布可查询的实体、主键、字段类型、单位、取值范围、字典、
+运算符、实体关系、查询能力和版本，作为两边对齐的契约。字段使用上游自己的名称：
+
+```jsonc
+{
+  "catalogVersion": "2026-10-01",
+  "entities": {
+    "sample": {
+      "key": "analysisId",
+      "fields": {
+        "analysisId":     { "type": "string", "ops": ["eq", "in"] },
+        "sampleName":     { "type": "string", "ops": ["eq", "in"] },
+        "detectionType":  { "type": "enum", "dict": "detection-types", "ops": ["in", "not_in"] },
+        "sampleType":     { "type": "enum", "dict": "sample-types", "ops": ["in", "not_in"] },
+        "analysisStatus": { "type": "enum", "dict": "analysis-status", "ops": ["eq", "in"] },
+        "uploadTime":     { "type": "time", "ops": ["between", "gte", "lte"], "grains": ["day", "month", "year"] },
+        "analysisTime":   { "type": "time", "ops": ["between", "gte", "lte"], "grains": ["day", "month", "year"] },
+        "totalReads":     { "type": "integer", "unit": "reads", "ops": ["gte", "lte", "between"] }
+      },
+      "relations": { "detection": { "cardinality": "1:n", "on": { "analysisId": "analysisId" } } }
+    },
+    "detection": {
+      "key": ["analysisId", "taxId"],
+      "fields": {
+        "taxId":         { "type": "string", "dict": "species", "ops": ["in", "not_in", "under"] },
+        "hazardIndex":   { "type": "integer", "range": [1, 5], "dict": "hazard-levels", "ops": ["eq", "gte", "lte"] },
+        "abundance":     { "type": "number", "unit": "percent", "range": [0, 100], "ops": ["gte", "lte"] },
+        "microbialType": { "type": "enum", "dict": "microbial-types", "ops": ["in"] }
+      }
+    }
+  },
+  "capabilities": { "predicates": ["and", "or", "not", "has", "count"], "groupBy": true, "compare": false, "maxPageSize": 100 }
+}
+```
+
+- 本地用 `npm run semantic:sync` 把它保存为仓库中的快照，L2 只引用快照中存在的实体和字段。
+- 中文名、同义词和业务口径仍由本地人工维护。
+- 上游声明不支持的能力（如上例中的 `compare: false`），本地直接返回“暂不支持”。
+
+### 6.2 P0：通用查询接口 `POST query/execute`
+
+- **请求头**：会话 Cookie（身份的唯一来源）、`Content-Type: application/json`，以及用于两边对照日志的 `X-Request-Id`。
+- **请求体**：§5.3 的 IR，已经过本地规范化（口径展开、隐含条件、默认列和分页），字段名已换成上游名称，并附 `catalogVersion`。
+  **请求体中没有团队**；出现团队字段时，上游返回 400。
+
+  ```json
+  {
+    "catalogVersion": "2026-10-01",
+    "entity": "sample",
+    "where": { "and": [
+      { "field": "analysisStatus", "op": "eq", "value": "analysisverified" },
+      { "count": "detection", "where": { "field": "hazardIndex", "op": "eq", "value": 5 },
+        "distinct": "taxId", "cmp": { "op": "gte", "value": 3 } } ] },
+    "select": ["analysisId", "sampleName", "analysisTime",
+               { "as": "fiveStarCount", "count": "detection",
+                 "where": { "field": "hazardIndex", "op": "eq", "value": 5 }, "distinct": "taxId" }],
+    "orderBy": [{ "by": "analysisTime", "dir": "desc" }],
+    "page": 1, "pageSize": 20
+  }
+  ```
+
+- **响应**：采用平台规划 §7 的统一返回结构 `{ code, message, data }`。
+
+  ```json
+  {
+    "code": 200,
+    "message": "ok",
+    "data": {
+      "catalogVersion": "2026-10-01",
+      "asOf": "2026-10-15T09:30:00+08:00",
+      "columns": [
+        { "name": "analysisId", "type": "string" },
+        { "name": "sampleName", "type": "string" },
+        { "name": "analysisTime", "type": "time" },
+        { "name": "fiveStarCount", "type": "integer" }
+      ],
+      "rows": [{ "analysisId": "A1001", "sampleName": "KY14599-1-T233R",
+                 "analysisTime": "2026-10-12T16:02:11+08:00", "fiveStarCount": 4 }],
+      "groups": null,
+      "page": { "page": 1, "pageSize": 20, "total": 37 }
+    }
+  }
+  ```
+
+- **错误**：业务错误码来自固定的错误码表，并在 `data.path` 指出 IR 中出错的位置，
+  例如 `{ "code": 40011, "message": "unsupported_op", "data": { "path": "where.and[1].count" } }`。
+- **不接受 SQL 或任意表达式**，只接受数据目录中声明的字段和运算符，值一律参数绑定。
+- **团队过滤**：上游从 Cookie 确定团队，加在根查询和每个子查询上，最好再加数据库行级安全。
+- **限额**：谓词深度、IN 列表长度、分组基数、超时时间。超限返回明确的错误码（`too_expensive`、`unsupported_op`），
+  不静默截断。
+- `page.total` 必须是精确值；分页有上限（`pageSize` ≤ 100）。
+- 上游可以**分期实现**：第一期只支持 sample 和 detection 两个实体，以及 `has`、`count`、`and`、`not`
+  （覆盖 A、B、C、D）；第二期支持 `groupBy`、度量、`orderBy`（E、F）；第三期支持 `compare` 和更多实体。
+  每一期在数据目录的 `capabilities` 中声明，本地不需要发版就能识别。
+
+完整的请求时序见《[注册表运行时时序](semantic-runtime-sequence.md)》。
+
+### 6.3 P0：通用字典接口 `GET dict/{name}?keyword=&limit=`
+
+| 字典 | 每项内容 | 用途 |
+|---|---|---|
+| `detection-types` | `code, name, aliases[]` | “肠道”指哪个检测项目 |
+| `species` | `taxId, taxCname, taxEname, synonyms[], rank, parentTaxId, lineage[], hazardIndex` | 俗名、缩写到 `taxId`；按属或科展开（`under`） |
+| `hazard-levels` | `level, name, description` | 固定“五星”的含义和取值范围 |
+| `microbial-types`、`sample-types` | `code, name` | 大类和样本类型 |
+
+以后新增字典（地区、宿主、耐药基因等）沿用同一个接口，本地不需要新代码。
+
+样本需要**增加检测项目字段**：上传时由用户填写或由项目继承，作为受控枚举保存。
+目前四类 `sampleType` 表达不了“肠道微生物检测”。
+
+### 6.4 上游数据模型建议
+
+```sql
+-- 维度：样本（分析任务）与物种
+CREATE TABLE sample (analysis_id text PRIMARY KEY, team_id bigint, detection_type text, sample_type text,
+                     analysis_status text, upload_time timestamptz, analysis_time timestamptz, total_reads bigint);
+CREATE TABLE taxon  (tax_id text PRIMARY KEY, cname text, ename text, rank text, parent_tax_id text,
+                     lineage text[], hazard_index smallint);
+
+-- 事实：样本 × 物种的检出记录（完整结果，不是 brief 的 top 3）
+CREATE TABLE detection (team_id bigint, analysis_id text, tax_id text, hazard_index smallint,
+                        abundance numeric, only_matching int, category text,
+                        PRIMARY KEY (analysis_id, tax_id));
+CREATE INDEX ON detection (team_id, tax_id);         -- 物种 → 样本（形状 B）
+CREATE INDEX ON detection (team_id, hazard_index);   -- 按危害等级（形状 C）
+CREATE INDEX ON sample (team_id, detection_type, upload_time);
+
+-- 热点聚合的预计算：分析完成或重跑时更新（形状 C、E）
+CREATE TABLE sample_detection_summary (analysis_id text PRIMARY KEY, team_id bigint,
+                                       h1 int, h2 int, h3 int, h4 int, h5 int, taxon_count int);
+```
+
+以后接耐药基因、毒力因子、质控指标时，各加一张事实表，并在元数据中声明与 `sample` 的关系。
+查询接口和本地工具都不需要改。
+
+### 6.5 P0：修正现有接口的契约
+
+- `file/dual/merge/list`：每个样本只返回一行，`totalData` 按样本计数；`analysisStatus` 支持服务端过滤。
+- 团队范围**只从会话中取**：现在 `merge/list` 由调用方传 `ownTeamId`，`file/result/list` 是否校验 `taskId`
+  属于当前团队仍待确认（`docs/gpas-project-chat.md` 验收清单第 16 项）。新接口必须在服务端校验，跨团队请求返回 403。
+- 统一字段名和单位：`taxid`/`taxId` 只保留一种；写明 `abundance`、`coverage` 的单位和 `hazardIndex` 的取值范围；
+  时间统一用带时区的 ISO 8601。
+
+### 6.6 版本与演进
+
+- 元数据带 `version`。新增字段和运算符是兼容变更；改名或删除要先标记 `deprecated`，至少保留一个版本周期。
+- 枚举代码一旦发布不再改名。
+- p95 延迟 < 1 s（本应用的 GPAS 请求超时是 10 s）；返回 `asOf`，用于来源脚注和判断数据是否陈旧。
+
+---
+
+## 7. 新增一类问题时怎么做
+
+按改动大小分级。越往下越少见，大多数新问题落在前两级：
+
+| 级别 | 情况 | 例子 | 需要做的 |
+|---|---|---|---|
+| L0 新说法 | 已有形状和字段能表达 | “帮我捞一下有沙门的样本”“丰度超过 1% 的金葡样本” | 加评测用例；必要时在别名表里加俗名 |
+| L1 新字段或度量 | 已有实体上多了一个字段 | 按采样省份筛选或统计；按测序平台筛选 | 上游在元数据和查询接口中加字段（有字典的加字典）→ 本地注册表加一条声明 → 自动生成的评测模板补上措辞 |
+| L2 新业务口径 | 一个说法对应固定定义 | “高危样本” = 五星病原 ≥ 1 或四星 ≥ 3 | 注册表 `segments` 加一条，经业务方评审 |
+| L3 新实体或关系 | 实体图里多了一种对象 | “检出 mecA 耐药基因的样本”“按项目或批次统计” | 上游加事实表或维度，并在元数据中声明关系 → 本地注册表加实体 → 补 skill 和评测 |
+| L4 新查询形状 | IR 表达不了 | “同一患者 30 天内复检均阳性”这类时间窗口关联 | 扩展 IR 和编译器，上游实现对应运算符并在 `capabilities` 中声明，补评测。需要评审 |
+
+每一级都**不新增工具、不改智能体循环**。L0 到 L2 不改 TypeScript 逻辑，只改声明和数据。
+
+---
+
+## 8. 本仓库改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `src/server/semantic/domains/sample.ts`、`analysis.ts` | 两个领域的 L2 声明（格式见平台规划 §3.2） |
+| `src/server/semantic/registry.ts` | `defineDomain`、合并全部领域并在启动时校验 |
+| `src/server/semantic/upstream/` | 上游数据目录的快照（`npm run semantic:sync` 生成） |
+| `src/server/semantic/ir.ts` | 查询 IR 的 zod 定义、语义校验、规范化、成本检查 |
+| `src/server/semantic/compile.ts`、`criteria.ts` | 编译为上游请求、生成口径复述（纯函数） |
+| `src/server/semantic/sync.ts` | 拉取上游数据目录写入快照；每日漂移检查 |
+| `src/server/gpas/tools/data.catalog.ts`、`data.query.ts` | 两个固定工具，加入 `tools/index.ts` |
+| `src/server/skills/sample-query/*.md` | knowledge（字段目录由脚本生成）和 runbook |
+| `src/server/agent/tools.ts` | 按工具集注入 skill；instructions 增加“回复只引用 total 和口径复述” |
+| `src/server/gpasContracts.ts` | `query` part 的 schema |
+| `src/client/features/gpasQuery/` | 通用结果渲染：样本表格复用 `FileAnalysisCards`，分组和对比用图表 |
+| `src/server/app.ts` | 查询结果翻页路由 |
+| `tests/evals/sample-query/`、`src/server/semantic/*.test.ts` | 评测矩阵、编译器单测、上游契约测试（mock GPAS） |
+
+---
+
+## 9. 实施顺序
+
+1. **对齐口径**：业务方、上游和本项目一起确认 §5.2 中待确认的各项，以及第一批要支持的形状（建议 A、B、C、D）。
+2. **上游第一期**：元数据接口、`query/execute`（sample 和 detection；`has`/`count`/`and`/`not`）、字典接口、
+   检测项目字段、现有接口契约修正。
+3. **本项目第一期**：注册表、IR 与编译器（先写单测）→ `data.catalog`、`data.query` → skill → 通用结果展示 → 评测矩阵。
+   上线门槛是评测准确率 ≥ 90%。
+4. **第二期**：`groupBy`、度量、排名（E、F），图表展示。
+5. **第三期**：对比（G）和新实体（项目、批次、耐药基因等），按第 7 节的 L3 流程逐个接入。
+
+**过渡方案**（上游第一期上线前）：可以在 `data.query` 内部为形状 B、C 做有上限的服务端扇出：
+先扫描出已完成分析的样本，再逐个请求 `file/result/list` 的全部页，在服务端过滤和计数。
+上限设为 ≤ 50 个样本、≤ 200 次请求、并发 4，超出上限返回 `complete: false`，回复中必须说明。
+工具接口和 IR 与正式版完全一致，上游接口就绪后只需要替换编译目标。
+形状 A 中的“检测项目”需要等上游加字段；E 到 G 不做过渡。

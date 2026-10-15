@@ -1,0 +1,810 @@
+openapi: 3.1.0
+info:
+  title: GPAS 接口（现状描述草稿）
+  version: 0.1.0-draft
+  description: |
+    本文件根据 bio-chatbot 当前实际调用的 GPAS 接口和收到的返回数据整理，描述的是“现在的样子”，
+    不是目标设计。目标设计见 gpas-target.openapi.yaml，使用说明见 docs/gpas-openapi-plan.md。
+
+    请 GPAS 团队逐项核对：
+    - `x-gpas-confirm`：我们不确定、需要你们确认或更正的问题。
+    - `x-gpas-issue`：已知的问题，计划在目标版本中修正，现状接口不需要立即修改。
+    - 示例中的人名、账号、ID、状态取值和数值都是虚构的占位值，不代表真实取值。
+
+    扩展字段（x-gpas-*）的含义见 docs/gpas-openapi-plan.md 第 4 节。
+servers:
+  - url: /api/gpas2/v1
+    description: 与 GPAS Web 同源的接口前缀（bio-chatbot 服务端使用 /user/info 的同源前缀）
+
+tags:
+  - name: identity
+    description: 登录用户与团队
+  - name: project
+    description: 项目、计划与提交进度
+  - name: sample
+    description: 上传文件、样本与状态
+  - name: analysis
+    description: 样本分析结果
+  - name: upload
+    description: 分片上传（浏览器直接调用）
+
+security:
+  - gpasSession: []
+
+paths:
+  /user/info:
+    get:
+      tags: [identity]
+      operationId: getUserInfo
+      summary: 当前登录用户与团队
+      x-gpas-kind: identity
+      x-gpas-scope: user
+      x-gpas-confirm:
+        - "`status` 的全部取值与含义（当前按 0 = 正常处理，其它值视为不可用）"
+        - "`role`、`natureId`、`sex` 的取值与含义"
+        - "一个用户是否可能属于多个团队？`ownteamId` 是否就是当前生效的团队？"
+      x-gpas-issue:
+        - 返回了 lastIP、lastUA 等登录痕迹，调用方并不需要，建议不在本接口返回（最小化个人信息）
+      responses:
+        "200":
+          description: 成功。业务状态见 `code`
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/UserInfo" }
+              example:
+                code: 200
+                message: get user info success
+                data:
+                  userId: user-0000000000000000000000000000demo
+                  realName: 张三
+                  userName: "100001"
+                  ownteamId: team-00000000000000000000000000000demo
+                  ownteamName: 示例团队
+                  email: user@example.com
+                  phone: "13800000000"
+                  status: 0
+                  jobTitle: 研究员
+                  role: 1
+                  researchField: ""
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /project/exist/{ownteamId}:
+    get:
+      tags: [project]
+      operationId: getProjectExistence
+      summary: 团队项目是否已初始化，并给出初始化所需的默认信息
+      x-gpas-kind: data
+      x-gpas-scope: team
+      x-gpas-team-source: path
+      x-gpas-confirm:
+        - 路径中的 ownteamId 与登录用户的团队不一致时，接口是否拒绝（403）？
+        - "`info.userName` 被 GPAS Web 用作默认项目名称，它的真实含义是什么？与 `info.projectName` 有何区别？"
+        - 项目已存在（data = true）时是否仍返回 info？
+      x-gpas-issue:
+        - 团队 ID 由调用方放在路径里，目标版本改为从会话中获取
+        - "`data` 与 `info` 是返回体顶层的两个字段，`info` 不在 `data` 里，与其它接口的结构不一致"
+      parameters:
+        - $ref: "#/components/parameters/OwnTeamIdPath"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: boolean
+                        description: true 表示团队已有项目
+                      info: { $ref: "#/components/schemas/ProjectSeed" }
+              example:
+                code: 200
+                message: success
+                data: false
+                info:
+                  projectCode: PRJ-DEMO-001
+                  userName: 示例项目
+                  phone: "13800000000"
+                  teamId: team-00000000000000000000000000000demo
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /summary/submit/info/{ownteamId}:
+    post:
+      tags: [project]
+      operationId: getSubmitSummary
+      summary: 项目计划与按月提交量（只读，但使用 POST）
+      description: 请求体为空（不发送 `{}`），`Content-Type` 为 `application/json`。
+      x-gpas-kind: data
+      x-gpas-scope: team
+      x-gpas-team-source: path
+      x-gpas-confirm:
+        - "`projectPlanInfo` 什么时候是对象、什么时候是数组？多项目团队是否总是数组？"
+        - "`realSubmitInfo` 同一年月是否可能出现多行（当前按年月累加）？缺少的样本类型是否表示 0？"
+        - 月份 `month` 是否为 1–12？年月按什么时区和日期口径（上传时间、审核时间）统计？
+        - 四类样本 clinic、media、environment、lab 是否为全部类型？以后会不会增加？
+      x-gpas-issue:
+        - 只读接口使用 POST，目标版本改为 GET
+        - "`projectPlanInfo`、`realSubmitInfo` 在返回体顶层，不在 `data` 里"
+        - "`projectPlanInfo` 有时是对象、有时是数组，目标版本统一为数组"
+      parameters:
+        - $ref: "#/components/parameters/OwnTeamIdPath"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    required: [projectPlanInfo, realSubmitInfo]
+                    properties:
+                      projectPlanInfo:
+                        oneOf:
+                          - $ref: "#/components/schemas/ProjectPlan"
+                          - type: array
+                            minItems: 1
+                            items: { $ref: "#/components/schemas/ProjectPlan" }
+                      realSubmitInfo:
+                        type: array
+                        items: { $ref: "#/components/schemas/MonthlySubmit" }
+              example:
+                code: 200
+                message: success
+                projectPlanInfo:
+                  id: plan-demo-1
+                  name: 示例项目
+                  clinic: 100
+                  media: 50
+                  environment: 30
+                  lab: 0
+                realSubmitInfo:
+                  - { year: 2026, month: 8, clinic: 12, media: 3 }
+                  - { year: 2026, month: 9, clinic: 20, environment: 5 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /project/create:
+    post:
+      tags: [project]
+      operationId: createProject
+      summary: 首次初始化团队项目
+      x-gpas-kind: action
+      x-gpas-effect: create
+      x-gpas-scope: team
+      x-gpas-team-source: body
+      x-gpas-idempotency: none
+      x-gpas-preconditions: [project.notExists]
+      x-gpas-confirm:
+        - 同一团队重复提交时返回什么（错误码？还是返回已有项目）？服务端是否保证一个团队只有一个项目？
+        - 成功时 `data` 返回什么（项目 ID？）
+        - "`projectCode` 是否必须与 /project/exist 返回的一致？`ownTeamId` 与登录团队不一致时是否拒绝？"
+        - 字段长度限制、电话格式要求、计划数量上限
+      x-gpas-issue:
+        - 不支持幂等键，网络超时后无法判断是否已创建；目标版本支持请求头 Idempotency-Key
+        - "`planContent` 是 JSON 字符串，目标版本改为对象"
+        - 团队 ID 由调用方放在请求体里，目标版本改为从会话中获取
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProjectCreateRequest" }
+            example:
+              projectCode: PRJ-DEMO-001
+              projectName: 示例项目
+              projectDesc: 示例说明
+              ownTeamId: team-00000000000000000000000000000demo
+              phone: "13800000000"
+              planContent: '{"clinic":100,"media":50,"environment":30,"lab":0}'
+      responses:
+        "200":
+          description: 业务结果见 `code`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /file/dual/merge/list:
+    get:
+      tags: [sample]
+      operationId: listMergedFiles
+      summary: 上传文件列表（单端为一行，双端合并为一行）
+      x-gpas-kind: data
+      x-gpas-entity: file
+      x-gpas-scope: team
+      x-gpas-team-source: query
+      x-gpas-confirm:
+        - "`fileName` 是精确匹配还是模糊匹配？能否用样本名（文件名前缀）查到双端两个文件？"
+        - 同一对双端文件会按 R1/R2、R2/R1 各返回一行，这是预期行为吗？`totalData` 按行数还是按样本数计？
+        - "`status`、`qcStatus`、`analysisStatus`、`metaStatus` 的全部取值与中文含义；查询参数能否直接按这些值过滤？"
+        - "`orderBy` 的可选值与默认值（当前不传，观察到为上传时间倒序）"
+        - "`size` 的单位是否为字节？`uploadTime` 的格式和时区？"
+        - "`analysisId` 是否就是 /file/result/list 的 `taskId`？未分析时是否为空？"
+        - "`pageSize` 的上限是多少？"
+      x-gpas-issue:
+        - 团队 ID 由调用方放在查询参数里，目标版本改为从会话中获取
+        - "`dataPage` 在返回体顶层，不在 `data` 里"
+        - 同一样本返回两行，调用方需要自己去重
+        - "`briefAnalysis` 是字符串形式的 JSON，偶尔被编码两次"
+      parameters:
+        - name: ownTeamId
+          in: query
+          required: true
+          schema: { type: string }
+          description: 团队 ID（现状由调用方传入）
+        - name: fileName
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: qcStatus
+          in: query
+          schema: { type: string }
+        - name: analysisStatus
+          in: query
+          schema: { type: string }
+          x-gpas-dict: analysis-status
+        - name: orderBy
+          in: query
+          schema: { type: string }
+          description: 观察到的默认排序为 `-update_time,-create_time`
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    required: [dataPage]
+                    properties:
+                      dataPage:
+                        type: object
+                        required: [dataList, totalData]
+                        properties:
+                          dataList:
+                            type: array
+                            items: { $ref: "#/components/schemas/MergedFileRow" }
+                          totalData:
+                            type: integer
+                            minimum: 0
+                            description: 总行数（是否按样本计数待确认）
+              example:
+                code: 200
+                message: success
+                dataPage:
+                  totalData: 1
+                  dataList:
+                    - isPair: true
+                      file1:
+                        fileId: "10001"
+                        fileName: DEMO-001_R1.clean.fastq.gz
+                        groupId: "20001"
+                        analysisId: "30001"
+                        sampleType: clinic
+                        size: 1073741824
+                        status: uploaded
+                        qcStatus: passed
+                        analysisStatus: analysisverified
+                        metaStatus: complete
+                        uploadTime: "2026-09-01 10:00:00"
+                        briefAnalysis: '{"code":"0","msg":"success","microbialInfo":[],"totalReads":"38959015","dataVolume":"10677513218","tool":[]}'
+                      file2:
+                        fileId: "10002"
+                        fileName: DEMO-001_R2.clean.fastq.gz
+                        groupId: "20001"
+                        analysisId: "30001"
+                        sampleType: clinic
+                        size: 1073741824
+                        status: uploaded
+                        qcStatus: passed
+                        analysisStatus: analysisverified
+                        metaStatus: complete
+                        uploadTime: "2026-09-01 10:00:00"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /file/result/list:
+    get:
+      tags: [analysis]
+      operationId: listAnalysisResults
+      summary: 单个样本的物种检出明细（分页）
+      x-gpas-kind: data
+      x-gpas-entity: detection
+      x-gpas-scope: team
+      x-gpas-team-source: none
+      x-gpas-confirm:
+        - 是否校验 taskId 属于当前登录团队？（taskId 可能来自用户输入，未校验会造成跨团队读取）
+        - "`speciesType` 的取值是否与 briefAnalysis 的 `microbialType`（bacteria、viral、fungi……）一致？"
+        - "`coverage` 的格式：百分比字符串（如 12.5%）还是 0–1 的小数？"
+        - "`abundance` 是百分数吗？是样本内丰度还是类别内丰度？"
+        - "`unifPvalue` 是原始 P 值还是 −log10 之后的值？"
+        - "`hazardIndex` 的取值范围（当前文档写 1–5 级，数据中出现过 0）"
+        - "`selfAlignRatio`、`onlyMatching`、`ani95SpeciesNums` 的含义与单位"
+        - "`colonization` 与 `colonizationE` 的取值（中文与英文？）"
+      x-gpas-issue:
+        - 参数名是 `taskId`，列表接口里同一个值叫 `analysisId`，目标版本统一命名
+        - "物种编号字段叫 `taxid`，brief 里叫 `taxId`；中文名字段叫 `taxCname`，brief 里叫 `taxCnName`"
+        - "`dataPage` 在返回体顶层，不在 `data` 里"
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema: { type: string, maxLength: 128 }
+          description: 分析任务 ID（即列表接口中的 analysisId，待确认）
+        - name: speciesType
+          in: query
+          schema: { type: string }
+          x-gpas-dict: microbial-types
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    required: [dataPage]
+                    properties:
+                      dataPage:
+                        type: object
+                        properties:
+                          dataList:
+                            type: [array, "null"]
+                            items: { $ref: "#/components/schemas/AnalysisResultRow" }
+                          page: { type: integer }
+                          pageSize: { type: integer }
+                          totalData: { type: integer, minimum: 0 }
+                          totalPage: { type: integer, minimum: 0 }
+              example:
+                code: 200
+                message: success
+                dataPage:
+                  page: 1
+                  pageSize: 20
+                  totalData: 1
+                  totalPage: 1
+                  dataList:
+                    - id: "1"
+                      speciesType: bacteria
+                      taxCname: 空肠普雷沃菌
+                      taxEname: Prevotella jejuni
+                      taxid: "1177574"
+                      coverage: "12.5%"
+                      colonization: 定植
+                      colonizationE: colonizer
+                      hazardIndex: 3
+                      selfAlignRatio: 0.92
+                      onlyMatching: 1520
+                      unifPvalue: 3.2
+                      abundance: 36.3
+                      ani95SpeciesNums: 1
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /file/task:
+    post:
+      tags: [upload]
+      operationId: createSingleUploadTask
+      summary: 创建单端文件上传任务
+      x-gpas-kind: transfer
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-confirm:
+        - "`sampleType` 是否接受 clinic、media、environment、lab？"
+        - "`fileMN` 的用途与校验规则（当前为文件前 3072 字节的 base64）"
+        - 哪些业务 code 表示可以重试（例如系统繁忙）？
+        - 同一文件重复创建任务会怎样？
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UploadTaskRequest" }
+      responses:
+        "200":
+          description: 成功时 `data` 为上传任务 ID（字符串或数字）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { type: [string, integer] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /file/dual/task:
+    post:
+      tags: [upload]
+      operationId: createPairedUploadTask
+      summary: 创建双端文件上传任务（R1、R2 一组）
+      x-gpas-kind: transfer
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-confirm:
+        - "`fileList[].name` 是否原样返回请求中的文件名？顺序是否与请求一致？"
+        - "`endType` 的取值（1/2？R1/R2？）"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [files, sampleType]
+              properties:
+                files:
+                  type: array
+                  minItems: 2
+                  maxItems: 2
+                  items: { $ref: "#/components/schemas/UploadFileMeta" }
+                sampleType: { $ref: "#/components/schemas/SampleTypeKey" }
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [groupId, fileList]
+                        properties:
+                          groupId: { type: [string, integer] }
+                          fileList:
+                            type: array
+                            items:
+                              type: object
+                              required: [fileId, name]
+                              properties:
+                                fileId: { type: [string, integer] }
+                                name: { type: string }
+                                endType: { type: [string, integer, "null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /file/upload/{uploadId}:
+    post:
+      tags: [upload]
+      operationId: uploadSingleChunk
+      summary: 上传单端文件的一个分片
+      x-gpas-kind: transfer
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-confirm:
+        - 同一分片 `no` 重复上传是否安全（覆盖而不是重复追加）？
+        - 失败后能否在同一任务中补传缺失分片？任务多久过期？
+        - 分片编号从 0 还是 1 开始（当前客户端从 0 开始）？
+        - 分片大小上限（当前 5 MB）
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/UploadChunk" }
+      responses:
+        "200":
+          description: 业务结果见 `code`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /file/dual/upload/{fileId}:
+    post:
+      tags: [upload]
+      operationId: uploadPairedChunk
+      summary: 上传双端文件中某一端的一个分片
+      x-gpas-kind: transfer
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-confirm:
+        - 与单端分片接口相同的问题
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string }
+          description: /file/dual/task 返回的 fileList[].fileId
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/UploadChunk" }
+      responses:
+        "200":
+          description: 业务结果见 `code`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    gpasSession:
+      type: apiKey
+      in: cookie
+      name: GPAS_SESSION
+      description: GPAS 登录会话 Cookie（实际 Cookie 名称待确认）。所有接口都只依赖这个 Cookie 鉴权。
+      x-gpas-confirm:
+        - 会话 Cookie 的实际名称与有效期
+
+  parameters:
+    OwnTeamIdPath:
+      name: ownteamId
+      in: path
+      required: true
+      schema: { type: string }
+      description: 团队 ID（现状由调用方传入；目标版本从会话中获取）
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1 }
+      x-gpas-confirm:
+        - 默认值与上限
+
+  responses:
+    Unauthorized:
+      description: 未登录或会话失效（部分接口返回 HTTP 200 且 `code` 为 401）
+    Forbidden:
+      description: 无权访问（部分接口返回 HTTP 200 且 `code` 为 403）
+
+  schemas:
+    Envelope:
+      type: object
+      required: [code]
+      description: 所有接口的外层结构。HTTP 2xx 时仍需看 `code`：200 表示成功。
+      properties:
+        code:
+          type: integer
+          description: 业务状态码。200 成功，401/403 鉴权失败，其它为业务错误
+          x-gpas-confirm:
+            - 请提供完整的业务错误码表，并注明哪些可以重试
+        message:
+          type: [string, "null"]
+
+    UserInfo:
+      type: object
+      required: [userId, status]
+      properties:
+        userId: { type: string }
+        realName: { type: [string, "null"], x-gpas-sensitivity: personal }
+        userName: { type: [string, "null"], description: 登录账号 }
+        ownteamId: { type: [string, "null"] }
+        ownteamName: { type: [string, "null"] }
+        email: { type: [string, "null"], x-gpas-sensitivity: personal }
+        emailBindStatus: { type: [integer, "null"] }
+        phone: { type: [string, "null"], x-gpas-sensitivity: personal }
+        phoneBindStatus: { type: [integer, "null"] }
+        status: { type: integer, description: 0 表示正常（其它取值待确认） }
+        jobTitle: { type: [string, "null"] }
+        researchField: { type: [string, "null"] }
+        role: { type: [integer, "null"] }
+        natureId: { type: [string, "null"] }
+        sex: { type: [integer, "null"], x-gpas-sensitivity: personal }
+        workUnit: { type: [string, "null"] }
+        correspondenceAddress: { type: [string, "null"], x-gpas-sensitivity: personal }
+        image: { type: [string, "null"] }
+        lastIP: { type: [string, "null"], x-gpas-sensitivity: personal }
+        lastUA: { type: [string, "null"], x-gpas-sensitivity: personal }
+        lastLogin: { type: [string, "null"], format: date-time }
+        createTime: { type: [string, "null"], format: date-time }
+        updateTime: { type: [string, "null"], format: date-time }
+
+    SampleTypeKey:
+      type: string
+      enum: [clinic, media, environment, lab]
+      description: 样本类型：临床、虫媒、环境、实验室
+      x-gpas-dict: sample-types
+
+    SampleCounts:
+      type: object
+      properties:
+        clinic: { type: integer, minimum: 0 }
+        media: { type: integer, minimum: 0 }
+        environment: { type: integer, minimum: 0 }
+        lab: { type: integer, minimum: 0 }
+
+    ProjectSeed:
+      type: object
+      required: [projectCode, userName, teamId]
+      description: 初始化项目时的默认信息
+      properties:
+        projectCode: { type: string, description: 项目编码（只读） }
+        userName: { type: string, description: GPAS Web 用作默认项目名称（含义待确认） }
+        projectName: { type: [string, "null"] }
+        phone: { type: [string, "null"], x-gpas-sensitivity: personal }
+        teamId: { type: string }
+
+    ProjectPlan:
+      allOf:
+        - $ref: "#/components/schemas/SampleCounts"
+        - type: object
+          required: [id, name, clinic, media, environment, lab]
+          properties:
+            id: { type: string }
+            name: { type: string, description: 项目名称 }
+
+    MonthlySubmit:
+      allOf:
+        - $ref: "#/components/schemas/SampleCounts"
+        - type: object
+          required: [year, month]
+          properties:
+            year: { type: integer }
+            month: { type: integer, minimum: 1, maximum: 12 }
+
+    ProjectCreateRequest:
+      type: object
+      required: [projectCode, projectName, ownTeamId, phone, planContent]
+      properties:
+        projectCode: { type: string }
+        projectName: { type: string, maxLength: 200 }
+        projectDesc: { type: string, maxLength: 2000 }
+        ownTeamId: { type: string }
+        phone: { type: string, maxLength: 32, x-gpas-sensitivity: personal }
+        planContent:
+          type: string
+          contentMediaType: application/json
+          description: 四类样本计划数量的 JSON 字符串，内容结构同 SampleCounts
+
+    MergedFileRow:
+      type: object
+      required: [isPair, file1]
+      properties:
+        isPair: { type: boolean, description: true 表示双端 }
+        file1: { $ref: "#/components/schemas/UploadedFile" }
+        file2:
+          oneOf:
+            - $ref: "#/components/schemas/UploadedFile"
+            - type: "null"
+
+    UploadedFile:
+      type: object
+      required: [fileId, fileName]
+      properties:
+        fileId: { type: [string, integer] }
+        fileName: { type: string }
+        groupId: { type: [string, integer, "null"], description: 双端文件的组 ID }
+        analysisId: { type: [string, integer, "null"], description: 分析任务 ID（未分析时为空，待确认） }
+        sampleType: { type: [string, "null"], x-gpas-dict: sample-types }
+        size: { type: [integer, "null"], x-gpas-unit: byte }
+        status: { type: [string, "null"], x-gpas-dict: file-status }
+        qcStatus: { type: [string, "null"], x-gpas-dict: qc-status }
+        analysisStatus:
+          type: [string, "null"]
+          x-gpas-dict: analysis-status
+          description: 已确认 analysisverified 表示分析完成，其它取值待确认
+        metaStatus: { type: [string, "null"], x-gpas-dict: meta-status }
+        uploadTime: { type: [string, "null"], description: 格式与时区待确认 }
+        briefAnalysis:
+          type: [string, "null"]
+          contentMediaType: application/json
+          contentSchema: { $ref: "#/components/schemas/BriefAnalysis" }
+          description: 分析摘要，字符串形式的 JSON，偶尔被编码两次
+
+    BriefAnalysis:
+      type: object
+      description: |
+        分析摘要（briefAnalysis 字符串解析后的内容）。只是摘要：每个类别只含丰度前几位的物种，
+        不能用来判断某个物种是否被检出。
+      x-gpas-issue:
+        - 外层用 code "0"（字符串）表示成功，与接口 code 200 不一致
+        - "`maxHazandIndex` 拼写错误（应为 maxHazardIndex）"
+        - "`abundance` 是带 % 的字符串，`totalReads`、`dataVolume` 是数字字符串"
+        - "`tool_name`、`tool_code` 使用下划线命名"
+      x-gpas-confirm:
+        - "每个类别的 `topInfos` 最多几条（当前观察到 3 条）？按什么排序？"
+        - "`abundance` 是类别内相对丰度吗？"
+        - "`dataVolume` 的单位（当前按字节理解，显示为 G）"
+      properties:
+        code: { type: string, description: '"0" 表示成功' }
+        msg: { type: [string, "null"] }
+        microbialInfo:
+          type: [array, "null"]
+          items:
+            type: object
+            properties:
+              microbialType: { type: string, x-gpas-dict: microbial-types, description: 如 bacteria、viral、fungi、animals }
+              microbialName: { type: string, description: 类别中文名 }
+              microbialNum: { type: integer, description: 该类别检出物种数 }
+              maxHazandIndex: { type: integer, description: 该类别最高危害等级 }
+              topInfos:
+                type: [array, "null"]
+                items:
+                  type: object
+                  properties:
+                    taxCnName: { type: string }
+                    taxEnName: { type: string }
+                    taxId: { type: string }
+                    abundance: { type: string, description: 如 "36.3%" }
+                    hazardIndex: { type: integer }
+        totalReads: { type: string, description: 数字字符串 }
+        dataVolume: { type: string, description: 数字字符串，单位待确认 }
+        tool:
+          type: [array, "null"]
+          items:
+            type: object
+            properties:
+              tool_name: { type: string }
+              tool_code: { type: string }
+
+    AnalysisResultRow:
+      type: object
+      properties:
+        id: { type: [string, integer] }
+        speciesType: { type: string, x-gpas-dict: microbial-types }
+        taxCname: { type: [string, "null"], description: 物种中文名 }
+        taxEname: { type: [string, "null"], description: 物种英文名 }
+        taxid: { type: [string, integer, "null"], description: NCBI 物种编号（注意字段名为小写 taxid） }
+        coverage: { type: [string, number, "null"], description: 基因组覆盖度，格式待确认 }
+        coverageUrl: { type: [string, "null"], format: uri, description: 覆盖度图链接 }
+        colonization: { type: [string, "null"], description: 定植特性（中文） }
+        colonizationE: { type: [string, "null"], description: 定植特性（英文） }
+        color: { type: [string, "null"], description: 展示颜色 }
+        barcodeId: { type: [string, "null"] }
+        hazardIndex: { type: [integer, "null"], x-gpas-dict: hazard-levels, description: 危害等级，范围待确认 }
+        selfAlignRatio: { type: [number, "null"], description: 物种自比对率（0–1，待确认） }
+        onlyMatching: { type: [integer, "null"], description: 唯一匹配 reads 数 }
+        unifPvalue: { type: [number, "null"], description: 基因组均一度，是否已取 −log10 待确认 }
+        abundance: { type: [number, "null"], description: 相对丰度，单位与口径待确认 }
+        ani95SpeciesNums: { type: [integer, "null"], description: ANI 95% 范围内的近缘物种数 }
+
+    UploadFileMeta:
+      type: object
+      required: [name, size, totalPieces, fileMN]
+      properties:
+        name: { type: string, maxLength: 255, pattern: "^[\\w\\u4e00-\\u9fa5.-]+$" }
+        size: { type: integer, minimum: 1, x-gpas-unit: byte }
+        totalPieces: { type: integer, minimum: 1, description: 分片总数（5 MB 一片） }
+        fileMN: { type: string, contentEncoding: base64, description: 文件前 3072 字节，用于识别文件类型 }
+
+    UploadTaskRequest:
+      allOf:
+        - $ref: "#/components/schemas/UploadFileMeta"
+        - type: object
+          required: [sampleType]
+          properties:
+            sampleType: { $ref: "#/components/schemas/SampleTypeKey" }
+
+    UploadChunk:
+      type: object
+      required: [file, no, hash]
+      properties:
+        file:
+          type: string
+          contentMediaType: application/octet-stream
+          description: 分片内容，文件名为 `<文件名>_<no>.part`
+        no: { type: integer, minimum: 0, description: 分片序号（当前从 0 开始） }
+        hash: { type: string, pattern: "^[0-9a-f]{64}$", description: 分片内容的 SHA-256（十六进制） }

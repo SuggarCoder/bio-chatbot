@@ -1,0 +1,5 @@
+# 用法：npx @redocly/cli@1.34.0 lint --config docs/gpas-openapi/redocly.yaml docs/gpas-openapi/*.openapi.yaml
+extends:
+  - recommended
+rules:
+  info-license: off          # 内部接口，不需要许可证字段

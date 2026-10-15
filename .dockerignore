@@ -1,0 +1,14 @@
+node_modules
+dist
+models
+
+.git
+.github
+
+.env
+.env.*
+
+*.log
+
+.vscode
+.idea

@@ -1,0 +1,665 @@
+openapi: 3.1.0
+info:
+  title: GPAS 接口（目标版本草稿）
+  version: 1.0.0-draft
+  description: |
+    GPAS 接口的目标设计，供 GPAS 团队分期实现。现状接口见 gpas-current.openapi.yaml，
+    实施顺序和现状 → 目标对照见 docs/gpas-openapi-plan.md。
+
+    共同约定：
+    - 所有响应使用统一结构 `{ code, message, data }`，分页放在 `data.page`，`total` 为精确值。
+    - 团队和用户只从会话 Cookie 中确定。路径、查询参数、请求体中都不出现团队 ID；出现时返回 400。
+    - 按 ID 访问对象时，服务端校验对象属于当前团队，否则返回 403。
+    - 读接口用 GET；条件复杂的只读查询用 POST /query/execute。写接口支持请求头 `Idempotency-Key`。
+    - 同一个对象在所有接口中同名：分析任务统一叫 analysisId，物种编号统一叫 taxId。
+    - 数值用数字类型（不用带单位的字符串），单位写在 `x-gpas-unit`；时间用带时区的 ISO 8601。
+    - 本文件新增的路径都是新接口，与现状接口并存，迁移完成后现状接口再标记 deprecated。
+servers:
+  - url: /api/gpas2/v1
+
+tags:
+  - name: meta
+    description: 数据目录与字典
+  - name: query
+    description: 通用只读查询
+  - name: project
+    description: 项目、计划与提交进度
+  - name: analysis
+    description: 样本分析结果
+
+security:
+  - gpasSession: []
+
+x-gpas-catalog-version: "2026-10-01"
+
+paths:
+  /meta/catalog:
+    get:
+      tags: [meta]
+      operationId: getCatalog
+      summary: 数据目录（可查询的实体、字段、关系、能力）
+      description: |
+        描述 /query/execute 能查询什么。bio-chatbot 把它保存为仓库中的快照，并每天比对一次。
+        字段名使用 GPAS 自己的名称。新增字段是兼容变更；改名或删除要先在这里标记 deprecated。
+      x-gpas-kind: meta
+      x-gpas-scope: public
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Catalog" }
+              example:
+                code: 200
+                message: ok
+                data:
+                  catalogVersion: "2026-10-01"
+                  entities:
+                    sample:
+                      key: [analysisId]
+                      fields:
+                        analysisId: { type: string, ops: [eq, in] }
+                        sampleName: { type: string, ops: [eq, in] }
+                        detectionType: { type: enum, dict: detection-types, ops: [in, not_in] }
+                        sampleType: { type: enum, dict: sample-types, ops: [in, not_in] }
+                        analysisStatus: { type: enum, dict: analysis-status, ops: [eq, in] }
+                        uploadTime: { type: time, ops: [between, gte, lte], grains: [day, month, year] }
+                        analysisTime: { type: time, ops: [between, gte, lte], grains: [day, month, year] }
+                        totalReads: { type: integer, unit: reads, ops: [gte, lte, between] }
+                      relations:
+                        detection: { cardinality: "1:n", on: { analysisId: analysisId } }
+                    detection:
+                      key: [analysisId, taxId]
+                      fields:
+                        taxId: { type: string, dict: species, ops: [in, not_in, under] }
+                        hazardIndex: { type: integer, range: [1, 5], dict: hazard-levels, ops: [eq, gte, lte] }
+                        abundance: { type: number, unit: percent, range: [0, 100], ops: [gte, lte] }
+                        microbialType: { type: enum, dict: microbial-types, ops: [in] }
+                  capabilities:
+                    predicates: [and, or, not, has, count]
+                    groupBy: false
+                    compare: false
+                    maxPageSize: 100
+                    maxDepth: 4
+                    maxInItems: 50
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /dict/{name}:
+    get:
+      tags: [meta]
+      operationId: getDictionary
+      summary: 字典（枚举值、物种、检测项目等）
+      x-gpas-kind: meta
+      x-gpas-scope: public
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [detection-types, sample-types, analysis-status, qc-status, file-status, meta-status, microbial-types, hazard-levels, species]
+        - name: keyword
+          in: query
+          schema: { type: string, maxLength: 100 }
+          description: 按名称、别名、拼音或编码匹配；不传时返回全部（species 必须传）
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/DictItem" }
+              examples:
+                detectionTypes:
+                  summary: 检测项目
+                  value:
+                    code: 200
+                    message: ok
+                    data:
+                      items:
+                        - { code: GUT_MICROBIOME, name: 肠道微生物检测, aliases: [肠道菌群检测, 肠道] }
+                species:
+                  summary: 物种（含分类谱系与危害等级）
+                  value:
+                    code: 200
+                    message: ok
+                    data:
+                      items:
+                        - code: "1280"
+                          name: 金黄色葡萄球菌
+                          aliases: [金葡, Staphylococcus aureus]
+                          attributes: { rank: species, parentCode: "1279", lineage: ["2", "1239", "1279"], hazardIndex: 4 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /query/execute:
+    post:
+      tags: [query]
+      operationId: executeQuery
+      summary: 通用只读查询
+      description: |
+        请求体是结构化查询，只能使用 /meta/catalog 中声明的实体、字段和运算符。
+        服务端从会话确定团队，加在根查询和每个子查询上；所有值都做参数绑定，不接受 SQL。
+        查询格式见 docs/sample-query-data-agent.md §5.3 和 §6.2。
+      x-gpas-kind: data
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-safe: true
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Query" }
+            example:
+              catalogVersion: "2026-10-01"
+              entity: sample
+              where:
+                and:
+                  - { field: analysisStatus, op: eq, value: analysisverified }
+                  - count: detection
+                    where: { field: hazardIndex, op: eq, value: 5 }
+                    distinct: taxId
+                    cmp: { op: gte, value: 3 }
+              select:
+                - analysisId
+                - sampleName
+                - analysisTime
+                - { as: fiveStarCount, count: detection, where: { field: hazardIndex, op: eq, value: 5 }, distinct: taxId }
+              orderBy: [{ by: analysisTime, dir: desc }]
+              page: 1
+              pageSize: 20
+      responses:
+        "200":
+          description: 成功或业务错误（见 `code`）
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Envelope"
+                      - type: object
+                        properties:
+                          data: { $ref: "#/components/schemas/QueryResult" }
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                ok:
+                  summary: 成功
+                  value:
+                    code: 200
+                    message: ok
+                    data:
+                      catalogVersion: "2026-10-01"
+                      asOf: "2026-10-15T09:30:00+08:00"
+                      columns:
+                        - { name: analysisId, type: string }
+                        - { name: sampleName, type: string }
+                        - { name: analysisTime, type: time }
+                        - { name: fiveStarCount, type: integer }
+                      rows:
+                        - { analysisId: A1001, sampleName: DEMO-001, analysisTime: "2026-10-12T16:02:11+08:00", fiveStarCount: 4 }
+                      groups: null
+                      page: { page: 1, pageSize: 20, total: 37 }
+                unsupported:
+                  summary: 不支持的运算
+                  value:
+                    code: 40011
+                    message: unsupported_op
+                    data: { path: "where.and[1].count", detail: count is not supported on detection }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /project/existence:
+    get:
+      tags: [project]
+      operationId: getProjectExistenceV2
+      summary: 当前团队项目是否已初始化（替代 /project/exist/{ownteamId}）
+      x-gpas-kind: data
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-replaces: "GET /project/exist/{ownteamId}"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [exists]
+                        properties:
+                          exists: { type: boolean }
+                          seed:
+                            type: [object, "null"]
+                            description: 未初始化时给出初始化表单的默认值
+                            properties:
+                              projectCode: { type: string }
+                              defaultProjectName: { type: string }
+                              phone: { type: [string, "null"], x-gpas-sensitivity: personal }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /project/summary:
+    get:
+      tags: [project]
+      operationId: getProjectSummaryV2
+      summary: 项目计划与按月提交量（替代 POST /summary/submit/info/{ownteamId}）
+      x-gpas-kind: data
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-replaces: "POST /summary/submit/info/{ownteamId}"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [plans, monthly]
+                        properties:
+                          plans:
+                            type: array
+                            description: 团队的全部项目计划，单项目时也是数组
+                            items:
+                              type: object
+                              required: [projectId, projectName, counts]
+                              properties:
+                                projectId: { type: string }
+                                projectName: { type: string }
+                                counts: { $ref: "#/components/schemas/SampleCounts" }
+                          monthly:
+                            type: array
+                            description: 每个年月一行（服务端已合并），缺少的样本类型为 0，按年月升序
+                            items:
+                              type: object
+                              required: [month, counts]
+                              properties:
+                                month: { type: string, pattern: "^\\d{4}-\\d{2}$", example: "2026-09" }
+                                counts: { $ref: "#/components/schemas/SampleCounts" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /project:
+    post:
+      tags: [project]
+      operationId: createProjectV2
+      summary: 首次初始化团队项目（替代 POST /project/create）
+      x-gpas-kind: action
+      x-gpas-effect: create
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-idempotency: header
+      x-gpas-preconditions: [project.notExists]
+      x-gpas-replaces: "POST /project/create"
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+          description: 相同的键在 24 小时内重复提交时，返回第一次的结果，不重复创建
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectCode, projectName, phone, plan]
+              properties:
+                projectCode: { type: string, description: 必须与 /project/existence 返回的 seed.projectCode 一致 }
+                projectName: { type: string, minLength: 1, maxLength: 200 }
+                projectDesc: { type: string, maxLength: 2000 }
+                phone: { type: string, maxLength: 32, x-gpas-sensitivity: personal }
+                plan: { $ref: "#/components/schemas/SampleCounts" }
+      responses:
+        "200":
+          description: 成功返回新项目；项目已存在返回 code 40901
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: [object, "null"]
+                        properties:
+                          projectId: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /analysis/{analysisId}/detections:
+    get:
+      tags: [analysis]
+      operationId: listDetections
+      summary: 单个样本的物种检出明细（替代 GET /file/result/list）
+      x-gpas-kind: data
+      x-gpas-entity: detection
+      x-gpas-scope: team
+      x-gpas-team-source: session
+      x-gpas-replaces: "GET /file/result/list"
+      parameters:
+        - name: analysisId
+          in: path
+          required: true
+          schema: { type: string, maxLength: 128 }
+          description: 分析任务 ID；不属于当前团队时返回 403
+        - name: microbialType
+          in: query
+          schema: { type: string }
+          x-gpas-dict: microbial-types
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items, page]
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/Detection" }
+                          page: { $ref: "#/components/schemas/Page" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    gpasSession:
+      type: apiKey
+      in: cookie
+      name: GPAS_SESSION
+      description: GPAS 登录会话 Cookie（实际名称以 GPAS 为准）
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    RequestId:
+      name: X-Request-Id
+      in: header
+      schema: { type: string, maxLength: 128 }
+      description: 调用方生成的请求 ID，GPAS 记录到日志中，便于两边对照排查
+
+  responses:
+    BadRequest:
+      description: 请求格式错误（如出现团队字段、JSON 无法解析）
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthorized:
+      description: 未登录或会话失效
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: 对象不属于当前团队
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    Envelope:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: 200 表示成功；其它值见错误码表（x-gpas-error-codes）
+        message: { type: string }
+        data: {}
+      x-gpas-error-codes:
+        - { code: 40001, message: bad_request, retryable: false, description: 请求格式错误 }
+        - { code: 40002, message: team_in_request, retryable: false, description: 请求中出现了团队字段 }
+        - { code: 40010, message: unknown_field, retryable: false, description: 字段不在数据目录中 }
+        - { code: 40011, message: unsupported_op, retryable: false, description: 运算或能力不支持 }
+        - { code: 40012, message: invalid_value, retryable: false, description: 值的类型或范围不正确 }
+        - { code: 40013, message: too_expensive, retryable: false, description: 超出深度、IN 列表或分组限额 }
+        - { code: 40014, message: catalog_version_mismatch, retryable: false, description: 目录版本不兼容 }
+        - { code: 40100, message: unauthorized, retryable: false, description: 未登录或会话失效 }
+        - { code: 40300, message: forbidden, retryable: false, description: 对象不属于当前团队 }
+        - { code: 40901, message: already_exists, retryable: false, description: 对象已存在 }
+        - { code: 42900, message: rate_limited, retryable: true, description: 请求过于频繁 }
+        - { code: 50300, message: busy, retryable: true, description: 系统繁忙 }
+        - { code: 50400, message: query_timeout, retryable: false, description: 查询超时，应缩小范围 }
+
+    ErrorEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: [object, "null"]
+              properties:
+                path: { type: string, description: "出错位置，如 where.and[1].count" }
+                detail: { type: string }
+
+    Page:
+      type: object
+      required: [page, pageSize, total]
+      properties:
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1 }
+        total: { type: integer, minimum: 0, description: 精确总数 }
+
+    SampleCounts:
+      type: object
+      required: [clinic, media, environment, lab]
+      properties:
+        clinic: { type: integer, minimum: 0 }
+        media: { type: integer, minimum: 0 }
+        environment: { type: integer, minimum: 0 }
+        lab: { type: integer, minimum: 0 }
+
+    DictItem:
+      type: object
+      required: [code, name]
+      properties:
+        code: { type: string, description: 稳定代码，发布后不改名 }
+        name: { type: string, description: 中文名 }
+        aliases: { type: array, items: { type: string } }
+        description: { type: string }
+        deprecated: { type: boolean }
+        attributes:
+          type: object
+          description: 字典特有的属性，例如物种的 rank、parentCode、lineage、hazardIndex
+
+    Catalog:
+      type: object
+      required: [catalogVersion, entities, capabilities]
+      properties:
+        catalogVersion: { type: string }
+        entities:
+          type: object
+          additionalProperties:
+            type: object
+            required: [key, fields]
+            properties:
+              key: { type: array, items: { type: string } }
+              fields:
+                type: object
+                additionalProperties: { $ref: "#/components/schemas/CatalogField" }
+              relations:
+                type: object
+                additionalProperties:
+                  type: object
+                  required: [cardinality, on]
+                  properties:
+                    cardinality: { type: string, enum: ["1:1", "1:n", "n:1"] }
+                    on: { type: object, additionalProperties: { type: string } }
+        capabilities:
+          type: object
+          properties:
+            predicates: { type: array, items: { type: string, enum: [and, or, not, has, count] } }
+            groupBy: { type: boolean }
+            compare: { type: boolean }
+            maxPageSize: { type: integer }
+            maxDepth: { type: integer }
+            maxInItems: { type: integer }
+
+    CatalogField:
+      type: object
+      required: [type, ops]
+      properties:
+        type: { type: string, enum: [string, integer, number, boolean, enum, time] }
+        unit: { type: string, description: 如 percent、byte、reads }
+        range: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+        dict: { type: string, description: "对应 /dict/{name}" }
+        ops: { type: array, items: { type: string, enum: [eq, in, not_in, gte, lte, between, under] } }
+        grains: { type: array, items: { type: string, enum: [day, month, year] } }
+        deprecated: { type: boolean }
+
+    Predicate:
+      description: 查询条件树
+      oneOf:
+        - type: object
+          required: [field, op, value]
+          properties:
+            field: { type: string }
+            op: { type: string }
+            value: {}
+        - type: object
+          required: [and]
+          properties:
+            and: { type: array, items: { $ref: "#/components/schemas/Predicate" } }
+        - type: object
+          required: [or]
+          properties:
+            or: { type: array, items: { $ref: "#/components/schemas/Predicate" } }
+        - type: object
+          required: [not]
+          properties:
+            not: { $ref: "#/components/schemas/Predicate" }
+        - type: object
+          required: [has]
+          properties:
+            has: { type: string, description: 子实体名 }
+            where: { $ref: "#/components/schemas/Predicate" }
+        - type: object
+          required: [count, cmp]
+          properties:
+            count: { type: string, description: 子实体名 }
+            where: { $ref: "#/components/schemas/Predicate" }
+            distinct: { type: string }
+            cmp:
+              type: object
+              required: [op, value]
+              properties:
+                op: { type: string, enum: [eq, gte, lte] }
+                value: { type: integer, minimum: 0 }
+
+    Query:
+      type: object
+      required: [catalogVersion, entity]
+      properties:
+        catalogVersion: { type: string }
+        entity: { type: string }
+        where: { $ref: "#/components/schemas/Predicate" }
+        select:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - type: object
+                required: [as, count]
+                properties:
+                  as: { type: string }
+                  count: { type: string }
+                  where: { $ref: "#/components/schemas/Predicate" }
+                  distinct: { type: string }
+        groupBy:
+          type: array
+          items:
+            type: object
+            required: [field]
+            properties:
+              field: { type: string }
+              grain: { type: string, enum: [day, month, year] }
+        orderBy:
+          type: array
+          items:
+            type: object
+            required: [by, dir]
+            properties:
+              by: { type: string }
+              dir: { type: string, enum: [asc, desc] }
+        page: { type: integer, minimum: 1, default: 1 }
+        pageSize: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+    QueryResult:
+      type: object
+      required: [catalogVersion, asOf, columns, page]
+      properties:
+        catalogVersion: { type: string }
+        asOf: { type: string, format: date-time, description: 数据快照时间 }
+        columns:
+          type: array
+          items:
+            type: object
+            required: [name, type]
+            properties:
+              name: { type: string }
+              type: { type: string }
+              unit: { type: string }
+              dict: { type: string }
+        rows: { type: [array, "null"], items: { type: object } }
+        groups: { type: [array, "null"], items: { type: object } }
+        page: { $ref: "#/components/schemas/Page" }
+
+    Detection:
+      type: object
+      required: [analysisId, taxId, hazardIndex]
+      x-gpas-entity: detection
+      properties:
+        analysisId: { type: string }
+        taxId: { type: string, x-gpas-dict: species }
+        taxCnName: { type: [string, "null"] }
+        taxEnName: { type: [string, "null"] }
+        microbialType: { type: string, x-gpas-dict: microbial-types }
+        hazardIndex: { type: integer, minimum: 1, maximum: 5, x-gpas-dict: hazard-levels }
+        abundance: { type: number, minimum: 0, maximum: 100, x-gpas-unit: percent }
+        coverage: { type: number, minimum: 0, maximum: 1, x-gpas-unit: ratio }
+        coverageUrl: { type: [string, "null"], format: uri }
+        colonization: { type: [string, "null"], x-gpas-dict: colonization }
+        selfAlignRatio: { type: [number, "null"], minimum: 0, maximum: 1, x-gpas-unit: ratio }
+        onlyMatchingReads: { type: [integer, "null"], minimum: 0, x-gpas-unit: reads }
+        uniformityNegLog10P: { type: [number, "null"], minimum: 0, description: 基因组均一度检验 P 值的 −log10 }
+        ani95SpeciesCount: { type: [integer, "null"], minimum: 0 }
