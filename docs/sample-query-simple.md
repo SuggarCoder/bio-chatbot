@@ -267,12 +267,14 @@ export const sampleSearchConditions = defineConditions({
 })
 ```
 
-### 6.2 一个工具：`sample.search`
+### 6.2 查询工具：`gpas.query`
 
-工具参数：
+样本查询不单独做成一个工具，而是作为通用查询工具 `gpas.query` 的一个接口（`api: 'sample.search'`），
+原因见第 8 节。工具参数：
 
 ```ts
 {
+  api: 'sample.search',  // 接口名，来自接口注册表（第 8.3 节）
   all?:   条件组,      // 所有组共同的条件（可选）
   anyOf?: 条件组[],    // 备选条件组，1–5 个（可选；不传时只用 all）
   orderBy?, page?, pageSize?
@@ -300,14 +302,14 @@ export const sampleSearchConditions = defineConditions({
   例如“样本类型为临床样本，并且（检出金黄色葡萄球菌，或者危害等级 5 级的物种数 ≥ 3）”。
 - 结果以多样本表格展示（复用现有表格）；有 `matchedGroups` 时在表格里标出命中的条件。
   翻页由服务端用同一组条件重新请求，不经过模型。
-- 加上这个工具共 7 个，不超过 `AGENT_TOOL_LIMIT = 8`。
+- 工具数量见第 8 节：新接口都登记到 `gpas.query` 下，不再新增工具。
 
 ### 6.3 一次请求的样子
 
 用户问：“临床样本里，检出金葡或者五星病原三个以上的有哪些？”
 
 ```text
-模型 → sample.search  { "all": { "sampleType": ["clinic"] },
+模型 → gpas.query     { "api": "sample.search", "all": { "sampleType": ["clinic"] },
                         "anyOf": [ { "taxNames": ["金黄色葡萄球菌"] }, { "hazardLevel": 5, "minHazardCount": 3 } ] }
 服务端 → GPAS        GET /species/search?keyword=金黄色葡萄球菌   → 唯一匹配 taxId 1280
 服务端校验、合并共同条件、生成口径说明
@@ -327,5 +329,109 @@ GPAS → 服务端        { code: 200, dataPage: { totalData: 12, dataList: [...
 
 1. **对齐约定表**（1–2 次会议）：上游填写“上游列名”和“确认”两列、检测项目的全部代码、返回字段的单位和时区。
 2. **上游**：样本查询接口（含条件组）、物种名查询接口；检测项目字段；`file/result/list` 补团队校验。
-3. **本项目**：注册表文件、`sample.search` 工具（含共同条件合并）、表格展示、评测用例（初始问题、“或者”类问题及其常见说法）。
+3. **本项目**：注册表文件、`gpas.query` 工具及其中的 `sample.search` 接口（含共同条件合并）、表格展示、评测用例（初始问题、“或者”类问题及其常见说法）。
 4. **第二期**：样本统计接口；按需要往约定表一加条件。
+
+---
+
+## 8. 接入更多接口：工具数量不随接口增长
+
+### 8.1 问题
+
+现在每个 GPAS 接口对应一个工具：已有 6 个，加上样本查询就是 7 个。`AGENT_TOOL_LIMIT` 默认是 8，工具数超过它时服务启动失败。
+照这样每接一个接口加一个工具，很快会超限。
+
+上限本身可以调大（`docs/agent.md` 提到 qwen3.6-flash 能处理几十个工具），但工具越多，每次请求的提示越长，
+模型选错工具的概率也越高。所以更好的做法是让工具数量固定，不随接口数量增长。
+
+### 8.2 做法：按“接口类别”设工具，而不是按接口
+
+| 工具 | 覆盖 | 说明 |
+|---|---|---|
+| `user.profile` | 当前用户与团队 | 保留现状 |
+| `gpas.query` | **所有只读查询接口** | 用 `api` 参数指定查哪个接口；条件、翻页、口径说明、展示的处理方式都一样 |
+| `gpas.prepare` | **所有写操作** | 只生成确认表单，用户确认后才执行（现有 `project.initialize` 的机制）；用 `action` 参数指定哪个操作 |
+
+不管以后接多少接口，工具都是这 3 个。名称到代码的查找（如物种名换成 taxId）在服务端内部完成，不需要单独的工具。
+
+### 8.3 接口注册表
+
+每个查询接口在注册表里登记一条，内容来自与上游约定的那张条件表：
+
+```ts
+// src/server/semantic/gpasApis.ts（示意）
+export const gpasApis = defineApis({
+  'sample.search': {
+    label: '跨样本查询',
+    use: '按检测项目、物种、危害等级等条件筛选团队的样本',
+    examples: ['所有肠道微生物检测的样本', '检出金葡的样本', '三个以上五星病原的样本'],
+    request: { method: 'POST', path: 'sample/search', conditions: sampleSearchConditions, groups: true },
+    result: { parse: parseSampleRows, view: 'sampleTable' },
+  },
+  'sample.detail': {
+    label: '单个样本的检出明细',
+    use: '查看某个样本检出了哪些物种、风险等级和可信度',
+    examples: ['KY14599 的检测结果', '这个样本的细菌明细'],
+    request: { method: 'GET', path: 'file/result/list',
+               conditions: { analysisId: { label: '分析 ID', upstream: 'taskId', required: true },
+                             speciesType: { label: '大类', type: 'enumList', values: { bacteria: '细菌', viral: '病毒', fungi: '真菌' } } } },
+    result: { parse: parseResultRows, view: 'resultPanel' },
+  },
+  'project.progress': {
+    label: '项目样本提交进度',
+    use: '四类样本的计划数量、已提交数量和完成率',
+    examples: ['我的任务进度', '我们组临床样本还差多少'],
+    request: { method: 'POST', path: 'summary/submit/info/{team}', conditions: {} },
+    result: { parse: parseSummary, view: 'progressChart' },
+  },
+})
+```
+
+每条登记只写五样东西：
+
+- 给模型看的用途和例句；
+- 上游地址和方法；
+- 条件表；
+- 解析函数；
+- 展示方式。
+
+解析函数和展示组件都复用现有代码：现有工具里的 `run`、`toModel`、`toReply` 拆进 `parse` 和 `view`，不用重写。
+
+### 8.4 模型怎么知道有哪些接口和条件
+
+- **接口目录**：`gpas.query` 的工具说明里列出全部接口，每个接口一行（名称、用途、一两个例句）。
+  20 个接口也只有一两千字，比 20 个独立工具的说明短得多。
+- **条件说明**：接口不多时，直接写在工具说明里。接口多了以后改为按需提供：
+  模型传了不认识的条件或漏了必填条件时，服务端返回该接口的条件清单（中文名和取值），模型据此改正后再调用一次；
+  模型也可以传 `describe: true` 直接取某个接口的条件清单。
+- **参数校验**：工具的参数结构保持通用（`api`、`all`、`anyOf`、分页），具体条件由服务端按注册表逐个接口校验。
+  这样工具定义不会随接口增多而膨胀。
+
+### 8.5 新接口接入流程
+
+| 步骤 | 谁做 | 内容 |
+|---|---|---|
+| 1 | 双方 | 约定条件表（格式同第 2.2 节）和一份真实的返回示例 |
+| 2 | 上游 | 实现接口。请求沿用 `{ ownTeamId, anyOf, page, pageSize }`；不需要“或者”的接口只用一个组，也可以用 GET 平铺参数。返回沿用 `dataPage` 结构 |
+| 3 | 本项目 | 在接口注册表里加一条。返回格式是新的就写一个解析函数；展示优先复用已有组件 |
+| 4 | 本项目 | 加评测用例：这个接口的常见问法，检查模型能选对 `api`、填对条件 |
+
+**不新增工具**。只有两种情况例外：写操作走 `gpas.prepare` 的表单；文件上传这类有特殊交互的继续用专用通道。
+
+### 8.6 现有工具怎么迁移
+
+按接口逐个迁移，每迁一个先用评测确认效果不变：
+
+1. 样本查询一开始就做成 `gpas.query` 的 `sample.search`，不单独建工具；
+2. `file.list`、`file.result`、`project.progress`、`project.status` 逐个改为注册表条目；
+3. `project.initialize` 改为 `gpas.prepare` 的一个操作；
+4. 全部迁完后，工具从 7 个减到 3 个。
+
+**风险**：模型从“选工具”变成“在一个工具里选 `api`”，难度差不多，但接口目录的写法会直接影响准确率。
+所以每一步迁移前都要先有评测基线，迁移后准确率不低于基线再切换。
+
+### 8.7 接口非常多以后
+
+单个工具里的接口超过三十个左右时，可以按领域拆成几个查询工具，例如 `gpas.query_sample`、`gpas.query_project`。
+工具数量仍然只随领域增长，不随接口增长。
+
