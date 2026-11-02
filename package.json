@@ -27,6 +27,7 @@
     "start:worker": "node dist/server/worker.js",
     "test:concurrency-stages": "node tests/concurrency-stages.mjs",
     "eval:memory": "tsx tests/memory-eval.ts",
+    "search:reindex": "tsx src/server/searchReindex.ts",
     "test:concurrency-sql": "node --import tsx tests/concurrency-pglite.mjs"
   },
   "repository": {

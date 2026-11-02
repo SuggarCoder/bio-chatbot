@@ -2,15 +2,15 @@ import type OpenAI from 'openai'
 import { z } from 'zod'
 
 import type { Database } from '../db/client.js'
+import { listRecentUserChats, searchUserChats } from '../chatSearch.js'
+import type { Embedder } from '../embeddings.js'
 import {
   deleteUserMemories,
   generatedMemoryKey,
-  listRecentUserChats,
   lockUserMemories,
   type MemoryAccess,
   normalizeMemoryContent,
   normalizeMemoryKey,
-  searchUserChats,
   upsertUserMemory,
   USER_MEMORY_CATEGORIES,
   USER_MEMORY_CONTENT_MAX_CHARS,
@@ -26,6 +26,10 @@ type LocalToolContext = {
   database: Database
   userId: string
   chatId: string
+  /** Null: keyword search only. */
+  embedder?: Embedder | null
+  minSimilarity?: number
+  signal?: AbortSignal
 }
 
 type LocalTool<Input extends z.ZodObject> = {
@@ -99,19 +103,21 @@ export const chatSearchTool = defineLocalTool({
   name: 'chat__search',
   label: '搜索历史对话',
   description: [
-    '按关键词搜索该用户以前的其他对话，返回匹配的对话标题、日期和片段。',
-    '用户提到以前聊过的内容，或回答需要过去对话中的信息时调用。用具体名词作关键词，没有结果时可换同义词再试一次。',
+    '按语义和关键词搜索该用户以前的其他对话，返回匹配的对话标题、日期和片段（similarity 越高越相关）。',
+    '用户提到以前聊过的内容，或回答需要过去对话中的信息时调用。query 写成描述要找内容的一句话或几个关键词；没有结果时可换个说法再试一次。'
   ].join(''),
   input: z.object({
-    query: z.string().trim().min(1).max(200).describe('关键词，多个词用空格分隔'),
+    query: z.string().trim().min(1).max(200).describe('要找的内容，一句话或几个关键词'),
     limit: z.number().int().min(1).max(10).optional().describe('最多返回的对话数，默认 5'),
   }),
   async run(context, input) {
-    const results = await searchUserChats(context.database, {
+    const results = await searchUserChats(context.database, context.embedder ?? null, {
       userId: context.userId,
       query: input.query,
       excludeChatId: context.chatId,
       limit: input.limit,
+      minSimilarity: context.minSimilarity,
+      signal: context.signal,
     })
     return {
       results,
@@ -154,7 +160,7 @@ function memoryInstructions(access: MemoryAccess): string {
   }
   if (access.searchChats) {
     lines.push(
-      '- 用户提到以前的对话（“上次”“之前说过”“我们讨论过的……”），或回答需要过去对话中的信息时，先调用 chat__search（按关键词）或 chat__recent（按时间），再基于结果回答。',
+      '- 用户提到以前的对话（“上次”“之前说过”“我们讨论过的……”），或回答需要过去对话中的信息时，先调用 chat__search（按内容）或 chat__recent（按时间），再基于结果回答。',
       '- 引用历史对话时说明出自哪次对话（标题和日期）；没有找到就如实说明，不要编造。',
     )
   }

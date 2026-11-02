@@ -14,7 +14,9 @@ const api = await import('../src/server/db.ts');
 const queue = await import('../src/server/generationQueue.ts');
 const { mockUserInfoResponse } = await import('../src/server/auth.ts');
 const watchdog = setTimeout(() => { console.error('SQL regression timed out'); process.exit(1) }, 120_000);
-const client = new PGlite();
+// Migration 0001 creates the pgvector extension, which PGlite ships separately.
+const { vector } = await import('../node_modules/.review-db/node_modules/@electric-sql/pglite/dist/vector/index.js');
+const client = new PGlite({ extensions: { vector } });
 const db = drizzle(client, { schema });
 try {
  await migrate(db, { migrationsFolder: 'drizzle' });

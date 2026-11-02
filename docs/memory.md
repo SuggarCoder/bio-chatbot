@@ -68,18 +68,28 @@ instructions 的顺序按变化频率从低到高排列：工具规则 → 用�
 
 | 工具 | 作用 |
 |---|---|
-| `chat__search(query, limit?)` | 关键词检索用户的其他会话，返回标题、日期和命中片段 |
+| `chat__search(query, limit?)` | 语义 + 关键词混合检索用户的其他会话，返回标题、日期、命中片段和相似度 |
 | `chat__recent(limit?, before?, after?)` | 按时间列出最近会话，概要优先取滚动摘要的“用户目标” |
 | `memory__save` / `memory__delete` | 用户明确要求时即时增删记忆 |
 
-检索是词法检索：
+### 索引
 
-- 拉丁词整体匹配；
-- 中文连续字串整体（≤4 字）加二元切分匹配；
-- 按命中词长度打分，按会话聚合，再按最近时间排序；
-- 排除当前会话、无痕会话、已删除会话和被替换的旧回复。
+- 每次生成完成后排一个 `chat.index` 任务，把这一轮（用户消息和回复）写成一个 `MessageChunk`，再调用 `EMBEDDING_MODEL`（默认 DashScope `text-embedding-v4`，1024 维）写入 `embedding`。
+- 块先写入、后算向量：embedding 服务失败时任务会重试，在此期间这一轮仍能按关键词搜到。
+- 每个块记录生成它的 `embeddingModel`。换模型后旧向量不再参与比较，需要运行 `npm run search:reindex` 重新生成（生产镜像中用 `node dist/server/searchReindex.js`）。
+- 无痕会话和已删除会话不建索引；删除会话时，它的块和向量一起删除。
 
-没有用向量检索，是因为它要求数据库装 pgvector。部署方的 PostgreSQL 支持之后，可以给 `Message` 加 embedding 列做混合检索，工具接口不需要改。
+### 检索
+
+`chat__search` 做混合检索：
+
+1. **语义：** 把查询向量化，在该用户的块里按余弦距离做精确扫描，取前 40 个，丢弃相似度低于 `CHAT_SEARCH_MIN_SIMILARITY`（默认 0.35）的结果。
+2. **关键词：** 拉丁词整体匹配；中文连续字串整体（≤4 字）加二元切分匹配，按命中词长度打分，取前 40 个。
+3. **融合：** 两组结果用倒数排名融合（RRF，k=60）合并，再按会话聚合。每个会话取最好的一轮，其余命中的轮次少量加分。每个会话最多返回 3 个片段，片段带 `similarity`。
+
+两组都会排除当前会话、无痕会话、已删除会话和被替换的旧回复。查询向量化失败时自动退回纯关键词检索。
+
+**为什么不建 HNSW 索引：** 按用户过滤后再做 ANN 检索，会因为过滤发生在索引扫描之后而丢失结果。单个用户的块通常只有几千条，精确扫描只需毫秒级，而且结果完整。如果将来单用户数据量大到需要 ANN，可以加 HNSW 索引，并启用 pgvector 0.8 的 `hnsw.iterative_scan`。
 
 ## 4. 用户控制
 
@@ -117,7 +127,11 @@ instructions 的顺序按变化频率从低到高排列：工具规则 → 用�
 | `USER_MEMORY_ENABLED` | `true` | 跨会话记忆总开关 |
 | `USER_MEMORY_TOKEN_BUDGET` | `2048` | 注入记忆的 token 上限 |
 | `USER_MEMORY_MAX_ITEMS` | `40` | 条目上限 |
-| `CHAT_SEARCH_ENABLED` | `true` | 历史会话检索工具 |
+| `CHAT_SEARCH_ENABLED` | `true` | 历史会话检索工具和索引任务 |
+| `EMBEDDING_MODEL` | `text-embedding-v4` | 向量模型（需支持 1024 维输出） |
+| `EMBEDDING_BASE_URL` | DashScope 兼容模式地址 | OpenAI 兼容的 embeddings 接口 |
+| `EMBEDDING_API_KEY` | 同 `QWEN_API_KEY` | |
+| `CHAT_SEARCH_MIN_SIMILARITY` | `0.35` | 只靠语义命中的结果的最低余弦相似度 |
 | `MEMORY_EXTRACTION_DELAY_SECONDS` | `300` | 提取前等待会话安静的秒数 |
 | `MEMORY_EXTRACTION_MAX_PENDING_TURNS` | `6` | 积压多少轮时不再等待 |
 | `MEMORY_CONSOLIDATION_INTERVAL_HOURS` | `24` | 例行整理的最小间隔 |

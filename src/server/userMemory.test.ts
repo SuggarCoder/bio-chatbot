@@ -7,10 +7,7 @@ import {
   normalizeMemoryContent,
   normalizeMemoryKey,
   renderUserMemoryInstructions,
-  scoreText,
-  searchTerms,
   selectMemoriesWithinBudget,
-  snippetAround,
   type UserMemoryEntry,
 } from './userMemory.js'
 
@@ -22,23 +19,6 @@ const entry = (
   source: UserMemoryEntry['source'] = 'auto',
   updatedAt = at,
 ): UserMemoryEntry => ({ key, category, content, source, updatedAt })
-
-test('search terms keep Latin words and split CJK runs into bigrams', () => {
-  assert.deepEqual(searchTerms('Kraken2 宏基因组'), ['kraken2', '宏基因组', '宏基', '基因', '因组'])
-  assert.deepEqual(searchTerms('耐药，16S'), ['耐药', '16s'])
-  // Single Latin characters and punctuation carry no signal.
-  assert.deepEqual(searchTerms('a , 。'), [])
-  assert.ok(searchTerms('一 二 三 四 五 六 七 八 九 十 甲 乙 丙 丁 戊 己 庚 辛').length <= 16)
-})
-
-test('scoring prefers longer matched terms and snippets centre on the first match', () => {
-  const terms = searchTerms('宏基因组 耐药')
-  assert.ok(scoreText('我们讨论了宏基因组和耐药基因', terms) > scoreText('基因', terms))
-  assert.equal(scoreText('完全无关', terms), 0)
-  const text = `${'前文'.repeat(100)}宏基因组分析结果${'后文'.repeat(100)}`
-  const snippet = snippetAround(text, terms, 10)
-  assert.match(snippet, /^….*宏基因组.*…$/)
-})
 
 test('memory rendering is grouped by category and independent of input order', () => {
   const entries = [

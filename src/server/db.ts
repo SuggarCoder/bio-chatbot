@@ -72,6 +72,7 @@ export {
 } from './db/client.js'
 export type { Database } from './db/client.js'
 import { forgetChatMemories, lockUserMemories } from './userMemory.js'
+import { deleteChatChunks } from './chatSearch.js'
 
 type MessageRow = {
   id: string
@@ -312,6 +313,7 @@ export async function deleteChat(
     // What the model learned from a deleted chat goes with it.
     await lockUserMemories(transaction, userId)
     await forgetChatMemories(transaction, userId, chatId)
+    await deleteChatChunks(transaction, userId, chatId)
     return true
   })
 }
@@ -1863,6 +1865,8 @@ export type FinalizeGenerationInput = {
   executionSteps?: MessageExecutionStep[]
   enqueueSummaryJob?: boolean
   enqueueUserMemoryJob?: boolean
+  /** Index the finished turn for cross-chat search. */
+  enqueueChatIndexJob?: boolean
   /** Extraction waits for the chat to go quiet, so a burst is read once. */
   userMemoryJobDelaySeconds?: number
 }
@@ -2067,6 +2071,18 @@ export async function finalizeGeneration(
               generationId: input.generationId,
               assistantMessageId: messageId,
               assistantSeq: Number(messageRow.seq),
+            },
+          })
+        }
+        if (finalStatus === 'completed' && input.enqueueChatIndexJob) {
+          await enqueueBackgroundJob(transaction, {
+            userId: input.userId,
+            type: 'chat.index',
+            dedupeKey: `chat.index:${input.generationId}`,
+            chatId: row.chatId,
+            payload: {
+              userMessageId: row.userMessageId,
+              assistantMessageId: messageId,
             },
           })
         }

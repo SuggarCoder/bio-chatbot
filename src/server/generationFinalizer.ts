@@ -28,6 +28,7 @@ export class GenerationFinalizer {
       enqueueSummaryJob: this.config.contextMemoryEnabled,
       enqueueUserMemoryJob: this.config.userMemoryEnabled,
       userMemoryJobDelaySeconds: this.config.memoryExtractionDelaySeconds,
+      enqueueChatIndexJob: this.config.chatSearchEnabled,
     })
     const generation = result.generation
 

@@ -1,11 +1,10 @@
-import { and, desc, eq, gt, inArray, isNull, lt, ne, notExists, or, sql } from 'drizzle-orm'
-import { alias } from 'drizzle-orm/pg-core'
+import { and, desc, eq, inArray, notExists, sql } from 'drizzle-orm'
+import { alias, type AnyPgColumn } from 'drizzle-orm/pg-core'
 
 import type { DatabaseTransaction } from './backgroundJobs.js'
 import type { Database } from './db/client.js'
 import {
   chats,
-  chatSummaries,
   generations,
   messages,
   USER_MEMORY_CATEGORIES,
@@ -386,11 +385,17 @@ export async function forgetChatMemories(
 }
 
 // ---------------------------------------------------------------------------
-// Cross-chat retrieval
+// Shared filters
 // ---------------------------------------------------------------------------
 
-/** Excludes assistant replies that a completed regeneration replaced. */
-export function notSupersededMessage(database: Executor) {
+/**
+ * Excludes assistant replies that a completed regeneration replaced.
+ * `messageId` is the column holding the assistant message id in the outer query.
+ */
+export function notSupersededMessage(
+  database: Executor,
+  messageId: AnyPgColumn = messages.id,
+) {
   const original = alias(generations, 'superseded_original')
   const replacement = alias(generations, 'superseded_replacement')
   return notExists(
@@ -399,259 +404,8 @@ export function notSupersededMessage(database: Executor) {
       .from(original)
       .innerJoin(replacement, eq(replacement.supersedesGenerationId, original.id))
       .where(and(
-        eq(original.assistantMessageId, messages.id),
+        eq(original.assistantMessageId, messageId),
         eq(replacement.status, 'completed'),
       )),
   )
-}
-
-const CJK = /[㐀-鿿豈-﫿]/
-
-/**
- * Splits a query into search terms. Latin words are kept whole; a run of CJK
- * characters is kept whole when short and also split into bigrams, since
- * PostgreSQL has no Chinese word segmentation by default.
- */
-export function searchTerms(query: string): string[] {
-  const terms = new Set<string>()
-  for (const raw of query.toLowerCase().split(/[\s,，。.;；:：!！?？、"“”'‘’()（）[\]【】<>《》/\\|]+/)) {
-    if (!raw) continue
-    let latin = ''
-    let cjk = ''
-    const flush = () => {
-      if (latin.length >= 2) terms.add(latin)
-      if (cjk.length >= 1) {
-        if (cjk.length <= 4) terms.add(cjk)
-        if (cjk.length >= 3) {
-          for (let index = 0; index < cjk.length - 1; index += 1) terms.add(cjk.slice(index, index + 2))
-        }
-        if (cjk.length === 1) terms.add(cjk)
-      }
-      latin = ''
-      cjk = ''
-    }
-    for (const char of raw) {
-      if (CJK.test(char)) {
-        if (latin) flush()
-        cjk += char
-      } else {
-        if (cjk) flush()
-        latin += char
-      }
-    }
-    flush()
-  }
-  return [...terms].filter((term) => term.length >= 2 || CJK.test(term)).slice(0, 16)
-}
-
-function escapeLike(term: string): string {
-  return term.replace(/[\\%_]/g, (char) => `\\${char}`)
-}
-
-export function scoreText(text: string, terms: string[]): number {
-  const lower = text.toLowerCase()
-  let score = 0
-  for (const term of terms) {
-    if (!lower.includes(term)) continue
-    // Longer terms are more specific than a bigram.
-    score += Math.min(4, term.length)
-  }
-  return score
-}
-
-export function snippetAround(text: string, terms: string[], radius = 120): string {
-  const flat = text.replace(/\s+/g, ' ').trim()
-  const lower = flat.toLowerCase()
-  const positions = terms
-    .map((term) => lower.indexOf(term))
-    .filter((index) => index >= 0)
-  const center = positions.length ? Math.min(...positions) : 0
-  const start = Math.max(0, center - radius)
-  const end = Math.min(flat.length, center + radius)
-  return `${start > 0 ? '…' : ''}${flat.slice(start, end)}${end < flat.length ? '…' : ''}`
-}
-
-export type ChatSearchHit = {
-  chatId: string
-  title: string
-  updatedAt: string
-  matches: Array<{ role: 'user' | 'assistant'; seq: number; createdAt: string; excerpt: string }>
-}
-
-/** Chats the user can still see, excluding incognito ones and the current one. */
-function searchableChat(userId: string, excludeChatId?: string) {
-  return and(
-    eq(chats.userId, userId),
-    isNull(chats.deletedAt),
-    eq(chats.incognito, false),
-    excludeChatId ? ne(chats.id, excludeChatId) : undefined,
-  )
-}
-
-export async function searchUserChats(
-  database: Database,
-  input: {
-    userId: string
-    query: string
-    excludeChatId?: string
-    limit?: number
-    scanLimit?: number
-  },
-): Promise<ChatSearchHit[]> {
-  const terms = searchTerms(input.query)
-  if (terms.length === 0) return []
-  const limit = Math.min(Math.max(input.limit ?? 5, 1), 10)
-  const rows = await database
-    .select({
-      chatId: messages.chatId,
-      title: chats.title,
-      chatUpdatedAt: chats.updatedAt,
-      role: messages.role,
-      seq: messages.seq,
-      content: messages.content,
-      createdAt: messages.createdAt,
-    })
-    .from(messages)
-    .innerJoin(chats, eq(chats.id, messages.chatId))
-    .where(and(
-      eq(messages.userId, input.userId),
-      searchableChat(input.userId, input.excludeChatId),
-      or(
-        eq(messages.role, 'user'),
-        and(eq(messages.role, 'assistant'), eq(messages.status, 'completed')),
-      ),
-      notSupersededMessage(database),
-      or(
-        ...terms.map((term) => sql`${messages.content} ilike ${`%${escapeLike(term)}%`}`),
-        ...terms.map((term) => sql`${chats.title} ilike ${`%${escapeLike(term)}%`}`),
-      ),
-    ))
-    .orderBy(desc(messages.createdAt))
-    .limit(input.scanLimit ?? 400)
-
-  const byChat = new Map<string, {
-    title: string
-    updatedAt: Date
-    score: number
-    matches: Array<{ role: 'user' | 'assistant'; seq: number; createdAt: Date; score: number; content: string }>
-  }>()
-  for (const row of rows) {
-    const content = row.content ?? ''
-    const score = scoreText(content, terms)
-    const titleScore = scoreText(row.title, terms)
-    const entry = byChat.get(row.chatId) ?? {
-      title: row.title,
-      updatedAt: row.chatUpdatedAt,
-      score: titleScore * 2,
-      matches: [],
-    }
-    if (score > 0) {
-      entry.matches.push({
-        role: row.role as 'user' | 'assistant',
-        seq: Number(row.seq),
-        createdAt: row.createdAt,
-        score,
-        content,
-      })
-    }
-    entry.score = Math.max(entry.score, titleScore * 2 + score)
-    byChat.set(row.chatId, entry)
-  }
-
-  return [...byChat.entries()]
-    .sort(([, left], [, right]) =>
-      right.score - left.score || right.updatedAt.getTime() - left.updatedAt.getTime())
-    .slice(0, limit)
-    .map(([chatId, entry]) => ({
-      chatId,
-      title: entry.title,
-      updatedAt: entry.updatedAt.toISOString(),
-      matches: entry.matches
-        .sort((left, right) => right.score - left.score || right.seq - left.seq)
-        .slice(0, 3)
-        .sort((left, right) => left.seq - right.seq)
-        .map((match) => ({
-          role: match.role,
-          seq: match.seq,
-          createdAt: match.createdAt.toISOString(),
-          excerpt: snippetAround(match.content, terms),
-        })),
-    }))
-}
-
-export type RecentChat = {
-  chatId: string
-  title: string
-  createdAt: string
-  updatedAt: string
-  overview: string
-}
-
-function summaryOverview(summary: string): string {
-  // The first section of the rolling summary is the user's goal.
-  const goal = summary.match(/^##\s*用户目标\s*[:：]?\s*\n([\s\S]*?)(?=^##\s)/m)?.[1] ?? summary
-  return goal.replace(/\s+/g, ' ').trim().slice(0, 300)
-}
-
-export async function listRecentUserChats(
-  database: Database,
-  input: {
-    userId: string
-    excludeChatId?: string
-    limit?: number
-    before?: Date
-    after?: Date
-  },
-): Promise<RecentChat[]> {
-  const limit = Math.min(Math.max(input.limit ?? 10, 1), 20)
-  const rows = await database
-    .select({
-      chatId: chats.id,
-      title: chats.title,
-      createdAt: chats.createdAt,
-      updatedAt: chats.updatedAt,
-    })
-    .from(chats)
-    .where(and(
-      searchableChat(input.userId, input.excludeChatId),
-      input.before ? lt(chats.updatedAt, input.before) : undefined,
-      input.after ? gt(chats.updatedAt, input.after) : undefined,
-    ))
-    .orderBy(desc(chats.updatedAt))
-    .limit(limit)
-  if (rows.length === 0) return []
-
-  const ids = rows.map((row) => row.chatId)
-  const summaries = await database
-    .selectDistinctOn([chatSummaries.chatId], {
-      chatId: chatSummaries.chatId,
-      summary: chatSummaries.summary,
-    })
-    .from(chatSummaries)
-    .where(and(eq(chatSummaries.userId, input.userId), inArray(chatSummaries.chatId, ids)))
-    .orderBy(chatSummaries.chatId, desc(chatSummaries.coveredMaxSeq), desc(chatSummaries.version))
-  const firstMessages = await database
-    .selectDistinctOn([messages.chatId], {
-      chatId: messages.chatId,
-      content: messages.content,
-    })
-    .from(messages)
-    .where(and(
-      eq(messages.userId, input.userId),
-      inArray(messages.chatId, ids),
-      eq(messages.role, 'user'),
-    ))
-    .orderBy(messages.chatId, messages.seq)
-  const summaryByChat = new Map(summaries.map((row) => [row.chatId, summaryOverview(row.summary)]))
-  const firstByChat = new Map(firstMessages.map((row) => [
-    row.chatId,
-    (row.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
-  ]))
-  return rows.map((row) => ({
-    chatId: row.chatId,
-    title: row.title,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-    overview: summaryByChat.get(row.chatId) ?? firstByChat.get(row.chatId) ?? '',
-  }))
 }

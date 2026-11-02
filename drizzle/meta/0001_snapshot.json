@@ -1,5 +1,5 @@
 {
-  "id": "dc21009d-491d-4bcf-bdb9-843a5f3ee664",
+  "id": "15671d07-ab25-46a4-8ff3-cbc1a45d85dd",
   "prevId": "04dc059e-54d2-47ea-9994-da071841b6e9",
   "version": "7",
   "dialect": "postgresql",
@@ -1831,7 +1831,7 @@
       "checkConstraints": {
         "chk_background_job_type": {
           "name": "chk_background_job_type",
-          "value": "\"BackgroundJob\".\"type\" in ('chat.summary', 'user.memory')"
+          "value": "\"BackgroundJob\".\"type\" in ('chat.summary', 'user.memory', 'chat.index')"
         },
         "chk_background_job_status": {
           "name": "chk_background_job_status",
@@ -3488,6 +3488,185 @@
       },
       "isRLSEnabled": false
     },
+    "public.MessageChunk": {
+      "name": "MessageChunk",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "chatId": {
+          "name": "chatId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "assistantMessageId": {
+          "name": "assistantMessageId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "seq": {
+          "name": "seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "embedding": {
+          "name": "embedding",
+          "type": "vector(1024)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "embeddingModel": {
+          "name": "embeddingModel",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_message_chunk_user_created": {
+          "name": "idx_message_chunk_user_created",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_message_chunk_chat": {
+          "name": "idx_message_chunk_chat",
+          "columns": [
+            {
+              "expression": "chatId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "MessageChunk_userId_User_id_fk": {
+          "name": "MessageChunk_userId_User_id_fk",
+          "tableFrom": "MessageChunk",
+          "tableTo": "User",
+          "columnsFrom": [
+            "userId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "MessageChunk_chatId_Chat_id_fk": {
+          "name": "MessageChunk_chatId_Chat_id_fk",
+          "tableFrom": "MessageChunk",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "chatId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "MessageChunk_assistantMessageId_Message_id_fk": {
+          "name": "MessageChunk_assistantMessageId_Message_id_fk",
+          "tableFrom": "MessageChunk",
+          "tableTo": "Message",
+          "columnsFrom": [
+            "assistantMessageId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "fk_message_chunk_user_chat": {
+          "name": "fk_message_chunk_user_chat",
+          "tableFrom": "MessageChunk",
+          "tableTo": "Chat",
+          "columnsFrom": [
+            "userId",
+            "chatId"
+          ],
+          "columnsTo": [
+            "userId",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "MessageChunk_assistantMessageId_unique": {
+          "name": "MessageChunk_assistantMessageId_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "assistantMessageId"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_message_chunk_content": {
+          "name": "chk_message_chunk_content",
+          "value": "length(\"MessageChunk\".\"content\") > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.Message": {
       "name": "Message",
       "schema": "",
@@ -4297,7 +4476,7 @@
         },
         "chk_usage_kind": {
           "name": "chk_usage_kind",
-          "value": "\"UsageEvent\".\"kind\" in ('chat', 'summary', 'memory')"
+          "value": "\"UsageEvent\".\"kind\" in ('chat', 'summary', 'memory', 'embedding')"
         }
       },
       "isRLSEnabled": false

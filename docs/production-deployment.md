@@ -10,7 +10,9 @@
 npm run db:init
 ```
 
-初始化脚本为 `src/server/initDatabase.ts`，实际基线为 `drizzle/0000_baseline.sql`。首次初始化后，未来增量变更才使用 `npm run db:migrate`。PostgreSQL 不需要任何扩展（包括 pgvector）。
+初始化脚本为 `src/server/initDatabase.ts`，按顺序执行 `drizzle/` 下的迁移（基线 `0000_baseline.sql` 和 `0001_memory_v2.sql`）。首次初始化后，未来增量变更才使用 `npm run db:migrate`。
+
+PostgreSQL 必须安装 **pgvector**（跨会话检索用，`0001` 会执行 `CREATE EXTENSION IF NOT EXISTS vector`）。自建实例可以安装 `postgresql-<版本>-pgvector` 包，或改用 `pgvector/pgvector:pg16` 镜像；云数据库在控制台启用 vector 扩展即可。pgvector 0.6 及更早的版本不是 trusted 扩展，`DATABASE_URL` 的用户需要能创建它：可以是超级用户，或云厂商提供的等价管理角色。重建数据库会把 `public` 下的扩展一起删除，再由初始化重新创建，所以这个权限每次重建都要用到。重建数据库的预检步骤会检查 pgvector 是否已安装。
 
 ### 2026-10：迁移历史合并为单一基线
 
@@ -90,6 +92,10 @@ USER_MEMORY_ENABLED=true
 USER_MEMORY_TOKEN_BUDGET=2048
 USER_MEMORY_MAX_ITEMS=40
 CHAT_SEARCH_ENABLED=true
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# EMBEDDING_API_KEY defaults to QWEN_API_KEY
+CHAT_SEARCH_MIN_SIMILARITY=0.35
 MEMORY_EXTRACTION_DELAY_SECONDS=300
 MEMORY_EXTRACTION_MAX_PENDING_TURNS=6
 MEMORY_CONSOLIDATION_INTERVAL_HOURS=24

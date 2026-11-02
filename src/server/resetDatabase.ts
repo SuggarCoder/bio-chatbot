@@ -11,8 +11,9 @@ import { closeDatabase, createDatabase } from './db.js'
  * Runs only when RESET_DATABASE_CONFIRM equals the database name in
  * DATABASE_URL, and only while the API and Worker are stopped.
  * With RESET_DATABASE_CHECK_ONLY=true it changes nothing: it verifies the
- * confirmation, both connections and the right to drop the schemas, so the
- * deploy workflow can fail before it stops any service.
+ * confirmation, both connections, the right to drop the schemas and that
+ * pgvector is installed, so the deploy workflow can fail before it stops
+ * any service.
  */
 const databaseUrl = process.env.DATABASE_URL?.trim()
 const redisUrl = process.env.REDIS_URL?.trim()
@@ -45,6 +46,21 @@ try {
         `The DATABASE_URL user cannot drop schema ${blocked.rows.map((row) => row.schema).join(', ')}; ` +
         `make it the owner of database "${databaseName}"`,
       )
+    }
+    // initDatabase creates the vector extension for cross-chat search.
+    const vector = await database.execute<{ available: boolean; creatable: boolean }>(sql`
+      select
+        exists(select 1 from pg_available_extension_versions where name = 'vector') as available,
+        coalesce((select rolsuper from pg_roles where rolname = current_user), false)
+          or exists(select 1 from pg_available_extension_versions where name = 'vector' and trusted)
+          as creatable
+    `)
+    if (!vector.rows[0]?.available) {
+      throw new Error('The PostgreSQL server has no pgvector extension; install pgvector before resetting')
+    }
+    if (!vector.rows[0]?.creatable) {
+      // Managed services often allow it through their own admin role.
+      console.warn('The DATABASE_URL user is not a superuser and pgvector is not marked trusted; CREATE EXTENSION vector may fail')
     }
   } else await database.transaction(async (transaction) => {
     await transaction.execute(sql`drop schema if exists drizzle cascade`)

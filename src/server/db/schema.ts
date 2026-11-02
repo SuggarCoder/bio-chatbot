@@ -21,6 +21,7 @@ import {
   uniqueIndex,
   uuid,
   varchar,
+  vector,
 } from 'drizzle-orm/pg-core'
 
 export type JsonRecord = Record<string, unknown>
@@ -585,6 +586,50 @@ export const userMemories = pgTable(
   ],
 )
 
+/** Requested from the embedding model; the column type depends on it. */
+export const EMBEDDING_DIMENSIONS = 1024
+
+/**
+ * One searchable unit per completed turn (the user message and its reply),
+ * for cross-chat search. Incognito chats are never indexed.
+ */
+export const messageChunks = pgTable(
+  'MessageChunk',
+  {
+    id: bigserial('id', { mode: 'bigint' }).primaryKey(),
+    userId: uuid('userId')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    chatId: uuid('chatId')
+      .notNull()
+      .references(() => chats.id, { onDelete: 'cascade' }),
+    assistantMessageId: uuid('assistantMessageId')
+      .notNull()
+      .unique()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    /** Seq of the assistant reply that closes the turn. */
+    seq: bigintValue('seq').notNull(),
+    content: text('content').notNull(),
+    /** Null until embedded; such chunks are still found by keywords. */
+    embedding: vector('embedding', { dimensions: EMBEDDING_DIMENSIONS }),
+    /** Vectors from another model are not comparable and are skipped. */
+    embeddingModel: varchar('embeddingModel', { length: 64 }),
+    createdAt: timestampTz('createdAt').notNull().defaultNow(),
+  },
+  (table) => [
+    check('chk_message_chunk_content', sql`length(${table.content}) > 0`),
+    foreignKey({
+      name: 'fk_message_chunk_user_chat',
+      columns: [table.userId, table.chatId],
+      foreignColumns: [chats.userId, chats.id],
+    }).onDelete('cascade'),
+    // Search scans one user's chunks exactly (no ANN index), so per-user
+    // results are complete regardless of how many other users there are.
+    index('idx_message_chunk_user_created').on(table.userId, table.createdAt.desc()),
+    index('idx_message_chunk_chat').on(table.chatId, table.seq),
+  ],
+)
+
 export const outboxEvents = pgTable(
   'OutboxEvent',
   {
@@ -984,7 +1029,7 @@ export const backgroundJobs = pgTable(
     unique('uq_background_job_user_id').on(table.userId, table.id),
     check(
       'chk_background_job_type',
-      sql`${table.type} in ('chat.summary', 'user.memory')`,
+      sql`${table.type} in ('chat.summary', 'user.memory', 'chat.index')`,
     ),
     check(
       'chk_background_job_status',
@@ -1038,7 +1083,7 @@ export const usageEvents = pgTable(
       .where(sql`${table.backgroundJobId} is not null`),
     check(
       'chk_usage_kind',
-      sql`${table.kind} in ('chat', 'summary', 'memory')`,
+      sql`${table.kind} in ('chat', 'summary', 'memory', 'embedding')`,
     ),
     foreignKey({
       name: 'fk_usage_user_generation',

@@ -17,6 +17,7 @@ import {
   outboxEvents,
   usageEvents,
   userMemories,
+  messageChunks,
   users,
 } from './schema.js'
 
@@ -104,6 +105,7 @@ export async function verifyCoreSchema(database: Database): Promise<void> {
       database.select({ chatId: chatSummaries.chatId }).from(chatSummaries).limit(1),
       database.select({ id: backgroundJobs.id }).from(backgroundJobs).limit(1),
       database.select({ userId: userMemories.userId }).from(userMemories).limit(1),
+      database.select({ id: messageChunks.id }).from(messageChunks).limit(1),
     ])
   } catch (error) {
     if (

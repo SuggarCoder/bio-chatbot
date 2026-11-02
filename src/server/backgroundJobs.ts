@@ -9,7 +9,7 @@ import {
   usageEvents,
 } from './db/schema.js'
 
-export type BackgroundJobType = 'chat.summary' | 'user.memory'
+export type BackgroundJobType = 'chat.summary' | 'user.memory' | 'chat.index'
 export type DatabaseTransaction = Parameters<
   Parameters<Database['transaction']>[0]
 >[0]
@@ -296,7 +296,7 @@ export async function claimBackgroundJob(
 export async function completeBackgroundJob(
   database: Database,
   job: BackgroundWorkItem,
-  usage?: { kind: 'summary' | 'memory'; inputTokens: number; outputTokens: number },
+  usage?: { kind: 'summary' | 'memory' | 'embedding'; inputTokens: number; outputTokens: number },
 ): Promise<void> {
   await database.transaction(async (transaction) => {
     await transaction

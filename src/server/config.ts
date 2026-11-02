@@ -37,6 +37,13 @@ export type AppConfig = {
   userMemoryMaxItems: number
   /** Lets the model search and list the user's other chats. */
   chatSearchEnabled: boolean
+  /** OpenAI-compatible embeddings endpoint for cross-chat search. */
+  embeddingBaseUrl: string
+  embeddingApiKey: string
+  embeddingModel: string
+  embeddingTimeoutMs: number
+  /** Vector-only hits below this cosine similarity are not returned. */
+  chatSearchMinSimilarity: number
   /** Extraction waits this long after a turn, so a burst of turns is read once. */
   memoryExtractionDelaySeconds: number
   /** Extract anyway once this many turns are waiting, even mid-burst. */
@@ -97,6 +104,15 @@ function positiveInteger(name: string, fallback: number, allowZero = false): num
     throw new Error(`${name} must be an integer greater than or equal to ${minimum}`)
   }
 
+  return value
+}
+
+function unitInterval(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim()
+  const value = raw ? Number(raw) : fallback
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`${name} must be a number between 0 and 1`)
+  }
   return value
 }
 
@@ -410,6 +426,13 @@ export function readConfig(): AppConfig {
     userMemoryTokenBudget,
     userMemoryMaxItems,
     chatSearchEnabled,
+    embeddingBaseUrl:
+      process.env.EMBEDDING_BASE_URL?.trim() ||
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    embeddingApiKey: process.env.EMBEDDING_API_KEY?.trim() || required('QWEN_API_KEY'),
+    embeddingModel: process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-v4',
+    embeddingTimeoutMs: positiveInteger('EMBEDDING_TIMEOUT_MS', 15_000),
+    chatSearchMinSimilarity: unitInterval('CHAT_SEARCH_MIN_SIMILARITY', 0.35),
     memoryExtractionDelaySeconds,
     memoryExtractionMaxPendingTurns,
     memoryConsolidationIntervalHours,

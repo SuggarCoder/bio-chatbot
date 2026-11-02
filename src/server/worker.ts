@@ -8,6 +8,7 @@ import {
   listQueuedBackgroundJobs,
   markBackgroundOutboxFailed,
   markBackgroundOutboxPublished,
+  type BackgroundWorkItem,
 } from './backgroundJobs.js'
 import { createRedisClient } from './cache.js'
 import { readConfig } from './config.js'
@@ -19,6 +20,8 @@ import {
 import { GenerationService } from './generation.js'
 import { GenerationFinalizer } from './generationFinalizer.js'
 import { MemoryProcessor } from './memoryWorker.js'
+import { indexChatTurn } from './chatSearch.js'
+import { createEmbedder } from './embeddings.js'
 import {
   claimGeneration,
   claimOutboxBatch,
@@ -86,6 +89,19 @@ const generations = new GenerationService(
 const queue = new GenerationQueue(config, redis)
 const backgroundQueue = new BackgroundQueue(config, redis)
 const memoryProcessor = new MemoryProcessor(config, database, tokenCounter, redis)
+const embedder = createEmbedder(config)
+
+async function indexJob(job: BackgroundWorkItem) {
+  const assistantMessageId = typeof job.payload.assistantMessageId === 'string' ? job.payload.assistantMessageId : ''
+  if (!job.chatId || !assistantMessageId) return undefined
+  const indexed = await indexChatTurn(database, embedder, {
+    userId: job.userId,
+    chatId: job.chatId,
+    assistantMessageId,
+    userMessageId: typeof job.payload.userMessageId === 'string' ? job.payload.userMessageId : undefined,
+  })
+  return indexed ? { kind: 'embedding' as const, inputTokens: indexed.tokens, outputTokens: 0 } : undefined
+}
 const active = new Set<Promise<void>>()
 const backgroundActive = new Set<Promise<void>>()
 const heartbeatIntervalMs = 10_000
@@ -181,12 +197,15 @@ async function scheduleBackgroundOne(): Promise<boolean> {
     try {
       if (
         (job.type === 'chat.summary' && !config.contextMemoryEnabled) ||
-        (job.type === 'user.memory' && !config.userMemoryEnabled)
+        (job.type === 'user.memory' && !config.userMemoryEnabled) ||
+        (job.type === 'chat.index' && !config.chatSearchEnabled)
       ) {
         await completeBackgroundJob(database, job)
         return
       }
-      const usage = await memoryProcessor.process(job)
+      const usage = job.type === 'chat.index'
+        ? await indexJob(job)
+        : await memoryProcessor.process(job)
       await completeBackgroundJob(database, job, usage)
     } catch (error) {
       await failBackgroundJob(database, job, error)

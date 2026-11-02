@@ -19,6 +19,7 @@ import {
   resolveMemoryAccess,
 } from './userMemory.js'
 import { createMemoryToolRunner } from './agent/memoryTools.js'
+import { createEmbedder, type Embedder } from './embeddings.js'
 import {
   assembleArtifactContext,
   type AssembledArtifactContext,
@@ -257,6 +258,7 @@ export class GenerationService {
   private readonly streams: GenerationStreamStore
   private readonly queue: GenerationQueue
   private readonly tokenCounter: TokenCounter
+  private readonly embedder: Embedder | null
 
   constructor(
     private readonly config: AppConfig,
@@ -278,6 +280,7 @@ export class GenerationService {
     this.streams = new GenerationStreamStore(config, redis)
     this.queue = new GenerationQueue(config, redis)
     this.tokenCounter = tokenCounter ?? new QwenTokenCounter(config)
+    this.embedder = createEmbedder(config)
   }
 
   async create(input: StartGenerationInput): Promise<GenerationStartDto> {
@@ -1079,7 +1082,14 @@ export class GenerationService {
         patchMode
           ? null
           : createMemoryToolRunner(
-              { database: this.database, userId: input.user.id, chatId: input.chatId },
+              {
+                database: this.database,
+                userId: input.user.id,
+                chatId: input.chatId,
+                embedder: this.embedder,
+                minSimilarity: this.config.chatSearchMinSimilarity,
+                signal: runtime.controller.signal,
+              },
               memoryAccess,
             ),
       )

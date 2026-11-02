@@ -11,19 +11,44 @@ import {
   deleteChat,
   migrateDatabase,
 } from './db.js'
-import { chats, messages, userMemories, users } from './db/schema.js'
+import { chats, EMBEDDING_DIMENSIONS, messageChunks, messages, userMemories, users } from './db/schema.js'
 import { MemoryProcessor, type BackgroundModelClient } from './memoryWorker.js'
 import { CharacterTokenCounter } from './tokenBudget.js'
 import {
-  listRecentUserChats,
   listUserMemories,
   resolveMemoryAccess,
-  searchUserChats,
   updateMemorySettings,
   upsertUserMemory,
 } from './userMemory.js'
+import { indexChatTurn, listRecentUserChats, searchUserChats } from './chatSearch.js'
+import type { Embedder } from './embeddings.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
+
+/**
+ * A deterministic stand-in for the embedding model: each concept owns one
+ * dimension, recognised in Chinese or English, so a query in one language
+ * can only match the other through the vector.
+ */
+const CONCEPTS: RegExp[] = [/耐药|resistance|antibiotic/i, /定量|qpcr|\bpcr\b/i, /真菌|fung/i]
+const fakeEmbedder: Embedder = {
+  model: 'fake-concepts',
+  async embed(texts) {
+    return {
+      tokens: texts.length,
+      vectors: texts.map((text) => {
+        const vector = new Array<number>(EMBEDDING_DIMENSIONS).fill(0)
+        CONCEPTS.forEach((concept, index) => { if (concept.test(text)) vector[index] = 1 })
+        if (!vector.some(Boolean)) vector[EMBEDDING_DIMENSIONS - 1] = 1
+        return vector
+      }),
+    }
+  },
+}
+const failingEmbedder: Embedder = {
+  model: 'fake-concepts',
+  async embed() { throw new Error('embedding service down') },
+}
 
 const config = {
   userMemoryEnabled: true,
@@ -88,32 +113,59 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
     const addTurns = async (chatId: string, turns: Array<[string, string]>) => {
       const [chat] = await database.select({ next: chats.nextMessageSeq }).from(chats).where(eq(chats.id, chatId))
       let seq = chat!.next
+      const assistantIds: string[] = []
       for (const [user, assistant] of turns) {
-        await database.insert(messages).values([
+        const rows = await database.insert(messages).values([
           { userId, chatId, seq: seq++, role: 'user', content: user },
           { userId, chatId, seq: seq++, role: 'assistant', status: 'completed', content: assistant },
-        ])
+        ]).returning({ id: messages.id, role: messages.role })
+        assistantIds.push(rows.find((row) => row.role === 'assistant')!.id)
       }
       await database.update(chats).set({ nextMessageSeq: seq }).where(eq(chats.id, chatId))
+      return assistantIds
+    }
+    const index = async (chatId: string, assistantIds: string[]) => {
+      for (const assistantMessageId of assistantIds) {
+        await indexChatTurn(database, fakeEmbedder, { userId, chatId, assistantMessageId })
+      }
     }
 
     const current = await newChat('当前对话')
     const metagenome = await newChat('土壤样本分析')
     const incognito = await newChat('无痕的宏基因组讨论', { incognito: true })
     const deleted = await newChat('已删除的宏基因组', { deletedAt: new Date() })
-    await addTurns(current, [['宏基因组还要再看吗', '可以']])
-    await addTurns(metagenome, [
+    await index(current, await addTurns(current, [['宏基因组还要再看吗', '可以']]))
+    await index(metagenome, await addTurns(metagenome, [
       ['帮我看下这批土壤宏基因组样本的耐药基因', '检出了 tetM 和 sul1'],
       ['下一步做什么', '建议做定量 PCR 验证'],
-    ])
-    await addTurns(incognito, [['宏基因组的秘密', '好的']])
-    await addTurns(deleted, [['宏基因组旧问题', '旧回答']])
+    ]))
+    await index(incognito, await addTurns(incognito, [['宏基因组的耐药秘密', '好的']]))
+    await index(deleted, await addTurns(deleted, [['宏基因组耐药旧问题', '旧回答']]))
+    const chunkCount = async (chatId: string) =>
+      (await database.select({ id: messageChunks.id }).from(messageChunks).where(eq(messageChunks.chatId, chatId))).length
+    assert.equal(await chunkCount(metagenome), 2)
+    assert.equal(await chunkCount(incognito), 0, 'incognito chats are never indexed')
+    assert.equal(await chunkCount(deleted), 0, 'deleted chats are never indexed')
+    // Re-indexing the same turn keeps its vector and makes no second call.
+    const [first] = await database.select({ id: messageChunks.assistantMessageId }).from(messageChunks).where(eq(messageChunks.chatId, metagenome)).limit(1)
+    assert.equal(await indexChatTurn(database, fakeEmbedder, { userId, chatId: metagenome, assistantMessageId: first!.id }), undefined)
 
-    // Search: only visible, non-incognito chats other than the current one.
-    const hits = await searchUserChats(database, { userId, query: '宏基因组 耐药', excludeChatId: current })
+    const search = (query: string, embedder: Embedder | null = fakeEmbedder) =>
+      searchUserChats(database, embedder, { userId, query, excludeChatId: current, minSimilarity: 0.35 })
+    // Keywords: only visible, non-incognito chats other than the current one.
+    const hits = await search('宏基因组 耐药')
     assert.deepEqual(hits.map((hit) => hit.chatId), [metagenome])
     assert.match(hits[0]!.matches[0]!.excerpt, /耐药/)
-    assert.deepEqual(await searchUserChats(database, { userId, query: '，。' }), [])
+    // Semantics: an English query finds the Chinese turn through its vector
+    // alone, and the unrelated turn of that chat stays below the threshold.
+    const semantic = await search('antibiotic resistance genes')
+    assert.deepEqual(semantic.map((hit) => hit.chatId), [metagenome])
+    assert.equal(semantic[0]!.matches.length, 1)
+    assert.equal(semantic[0]!.matches[0]!.similarity, 1)
+    assert.match(semantic[0]!.matches[0]!.excerpt, /tetM/)
+    // Without the embedding service, keyword search still answers.
+    assert.deepEqual((await search('耐药', failingEmbedder)).map((hit) => hit.chatId), [metagenome])
+    assert.deepEqual(await search('，。', null), [])
     const recent = await listRecentUserChats(database, { userId, excludeChatId: current })
     assert.deepEqual(recent.map((chat) => chat.chatId), [metagenome])
     assert.match(recent[0]!.overview, /土壤宏基因组/)
@@ -137,7 +189,7 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
 
     // Tools: save and delete through the model-facing runner.
     const runner = createMemoryToolRunner(
-      { database, userId, chatId: current },
+      { database, userId, chatId: current, embedder: fakeEmbedder, minSimilarity: 0.35 },
       { readMemory: true, editMemory: true, searchChats: true },
     )!
     const saved = await runner.execute({
@@ -146,7 +198,7 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
       arguments: JSON.stringify({ content: '用户偏好用 R 做差异分析', category: 'preference', key: 'analysis_tool' }),
     })
     assert.equal(saved.ok, true, saved.error ?? "")
-    const searched = await runner.execute({ call_id: 's2', name: 'chat__search', arguments: '{"query":"耐药"}' })
+    const searched = await runner.execute({ call_id: 's2', name: 'chat__search', arguments: '{"query":"antibiotic resistance"}' })
     assert.match(searched.output, /tetM|耐药/)
     const removed = await runner.execute({ call_id: 's3', name: 'memory__delete', arguments: '{"keys":["analysis_tool"]}' })
     assert.match(removed.output, /"deleted":1/)
@@ -156,6 +208,7 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
     await upsertUserMemory(database, { userId, key: 'typed', category: 'identity', content: '在某研究所工作', source: 'user', sourceChatId: null })
     assert.equal(await deleteChat(database, userId, metagenome), true)
     assert.deepEqual((await listUserMemories(database, userId)).map((row) => row.key), ['typed'])
+    assert.equal(await chunkCount(metagenome), 0, 'a deleted chat drops its chunks and vectors')
 
     // Extraction: a burst of turns is read once, by the job of its last turn.
     const burst = await newChat('新课题')
