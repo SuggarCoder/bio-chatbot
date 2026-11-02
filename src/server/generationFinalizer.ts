@@ -10,7 +10,7 @@ import {
   type FinalizeGenerationInput,
   type FinalizedGeneration,
 } from './db.js'
-import type { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
+import type { GenerationRuntime, GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
 
 export class GenerationFinalizer {
   constructor(
@@ -22,6 +22,7 @@ export class GenerationFinalizer {
 
   async finalize(
     input: FinalizeGenerationInput,
+    runtime?: GenerationRuntime,
   ): Promise<FinalizedGeneration> {
     const result = await finalizeGeneration(this.database, {
       ...input,
@@ -51,7 +52,7 @@ export class GenerationFinalizer {
       ])
     }
 
-    this.runtimes.delete(input.generationId)
+    this.runtimes.delete(input.generationId, runtime)
     return result
   }
 }

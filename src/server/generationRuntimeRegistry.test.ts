@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import type { RedisClient } from './cache.js'
 import type { AppConfig } from './config.js'
-import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
+import { GenerationRuntimeRegistry, type GenerationRuntime } from './generationRuntimeRegistry.js'
 
 test('runtime cancellation is generation-scoped and idempotent', () => {
   const registry = new GenerationRuntimeRegistry(
@@ -66,4 +66,31 @@ test('100 running generations share one durable cancellation query even without 
   assert.equal(registry.get(ids[0])?.controller.signal.aborted, true)
   assert.equal(registry.get(ids[1])?.controller.signal.aborted, false)
   await registry.close()
+})
+
+test('a late run of a generation cannot unregister its replacement', () => {
+  const registry = new GenerationRuntimeRegistry({} as AppConfig, {} as RedisClient)
+  const runtime = (id: string): GenerationRuntime => ({
+    generationId: id,
+    streamId: 's',
+    chatId: 'c',
+    userId: 'u',
+    controller: new AbortController(),
+    partialOutput: '',
+    executionSteps: [],
+    usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, reasoningTokens: 0 },
+  })
+  const first = runtime('g1')
+  const second = runtime('g1')
+  registry.register(first)
+  registry.register(second)
+  assert.equal(first.controller.signal.aborted, true)
+  assert.equal(first.abortReason, 'lease_lost', 'the replaced run knows why it stopped')
+
+  registry.delete('g1', first)
+  assert.equal(registry.get('g1'), second, 'the old run finishing leaves the new one registered')
+  registry.abortAll('shutdown')
+  assert.equal(second.controller.signal.aborted, true)
+  registry.delete('g1', second)
+  assert.equal(registry.get('g1'), undefined)
 })

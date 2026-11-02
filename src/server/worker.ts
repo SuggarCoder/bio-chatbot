@@ -92,7 +92,7 @@ const backgroundQueue = new BackgroundQueue(config, redis)
 const memoryProcessor = new MemoryProcessor(config, database, tokenCounter, redis)
 const embedder = createEmbedder(config)
 
-async function indexJob(job: BackgroundWorkItem) {
+async function indexJob(job: BackgroundWorkItem, signal: AbortSignal) {
   const assistantMessageId = typeof job.payload.assistantMessageId === 'string' ? job.payload.assistantMessageId : ''
   if (!job.chatId || !assistantMessageId) return undefined
   const indexed = await indexChatTurn(database, embedder, {
@@ -100,11 +100,15 @@ async function indexJob(job: BackgroundWorkItem) {
     chatId: job.chatId,
     assistantMessageId,
     userMessageId: typeof job.payload.userMessageId === 'string' ? job.payload.userMessageId : undefined,
-  })
+  }, signal)
   return indexed ? { kind: 'embedding' as const, inputTokens: indexed.tokens, outputTokens: 0 } : undefined
 }
 const active = new Set<Promise<void>>()
 const backgroundActive = new Set<Promise<void>>()
+/** Aborts the model calls of running background jobs (deadline or shutdown). */
+const backgroundControllers = new Set<AbortController>()
+/** Settles when mainLoop has returned; shutdown waits for it before draining. */
+let mainLoopDone: Promise<void> = Promise.resolve()
 const heartbeatIntervalMs = 10_000
 const outboxPollIntervalMs = 250
 const reconcileIntervalMs = 15_000
@@ -179,23 +183,42 @@ async function dispatchOutbox(): Promise<void> {
 }
 
 async function scheduleBackgroundOne(): Promise<boolean> {
-  if (backgroundActive.size >= config.backgroundConcurrency) return false
+  if (stopping || backgroundActive.size >= config.backgroundConcurrency) return false
   const queued = await backgroundQueue.pop()
   if (!queued) return false
+  if (stopping) {
+    // Popped while shutdown began: hand it back for another worker.
+    await backgroundQueue.enqueue(queued)
+    return false
+  }
   const token = await backgroundQueue.acquire(queued.jobId)
   if (!token) {
     await backgroundQueue.enqueue(queued)
     return false
   }
-  const job = await claimBackgroundJob(
-    database,
-    queued,
-    backgroundQueue.workerId,
-  )
+  let job: Awaited<ReturnType<typeof claimBackgroundJob>>
+  try {
+    job = await claimBackgroundJob(
+      database,
+      queued,
+      backgroundQueue.workerId,
+    )
+  } catch (error) {
+    await backgroundQueue.release(queued.jobId, token).catch(() => undefined)
+    throw error
+  }
   if (!job) {
     await backgroundQueue.release(queued.jobId, token)
     return true
   }
+  // The job must end before its lease (backgroundTimeoutMs) can expire and
+  // let another worker run it again.
+  const controller = new AbortController()
+  const deadline = setTimeout(() => {
+    controller.abort(new Error('Background job exceeded BACKGROUND_TIMEOUT_MS'))
+  }, config.backgroundTimeoutMs)
+  deadline.unref()
+  backgroundControllers.add(controller)
   const running = (async () => {
     try {
       if (
@@ -207,15 +230,21 @@ async function scheduleBackgroundOne(): Promise<boolean> {
         return
       }
       const usage = job.type === 'chat.index'
-        ? await indexJob(job)
-        : await memoryProcessor.process(job)
+        ? await indexJob(job, controller.signal)
+        : await memoryProcessor.process(job, controller.signal)
       await completeBackgroundJob(database, job, usage)
     } catch (error) {
       await failBackgroundJob(database, job, error)
     } finally {
+      clearTimeout(deadline)
+      backgroundControllers.delete(controller)
       await backgroundQueue.release(queued.jobId, token).catch(() => undefined)
     }
-  })().finally(() => {
+  })().catch((error) => {
+    // Recording the failure failed too (e.g. PostgreSQL is down). The job
+    // stays 'running' and reconcile retries it; the worker must not crash.
+    console.error('Background job could not be recorded', { jobId: job.jobId, error })
+  }).finally(() => {
     backgroundActive.delete(running)
     wakeScheduler()
   })
@@ -253,11 +282,16 @@ async function runGeneration(
 }
 
 async function scheduleOne(): Promise<boolean> {
-  if (active.size >= config.globalGenerationConcurrency) return false
+  if (stopping || active.size >= config.globalGenerationConcurrency) return false
   const job = await queue.pop()
   if (!job) return false
   const item = await loadGenerationWorkItem(database, job)
   if (!item) return true
+  if (stopping) {
+    // Popped while shutdown began: hand it back for another worker.
+    await queue.defer(job, item.user.schedulingWeight)
+    return false
+  }
   const lease: QueueLease = {
     userId: item.user.id,
     generationId: item.generationId,
@@ -278,10 +312,17 @@ async function scheduleOne(): Promise<boolean> {
     // loading and deferring up to 16 jobs per tick against PostgreSQL.
     return acquired === 'tenant_blocked'
   }
-  if (!await claimGeneration(database, item, queue.workerId)) {
+  let claimed: boolean
+  try {
+    claimed = !stopping && await claimGeneration(database, item, queue.workerId)
+  } catch (error) {
+    await queue.release(lease).catch(() => undefined)
+    throw error
+  }
+  if (!claimed) {
     await queue.release(lease)
     await queue.defer(job, item.user.schedulingWeight)
-    return true
+    return !stopping
   }
   const running = runGeneration(item, lease)
     .catch((error) => {
@@ -378,7 +419,7 @@ async function mainLoop(): Promise<void> {
     }
 
     // Keep looking past blocked tenants, but bound scans when all are blocked.
-    for (let scanned = 0; scanned < 16 && active.size < config.globalGenerationConcurrency; scanned += 1) {
+    for (let scanned = 0; scanned < 16 && !stopping && active.size < config.globalGenerationConcurrency; scanned += 1) {
       if (!await scheduleOne()) break
     }
 
@@ -387,6 +428,7 @@ async function mainLoop(): Promise<void> {
       backgroundScheduled = await scheduleBackgroundOne()
     } while (
       backgroundScheduled &&
+      !stopping &&
       backgroundActive.size < config.backgroundConcurrency
     )
 
@@ -404,7 +446,13 @@ async function shutdown(signal: string): Promise<void> {
   stopping = true
   wakeScheduler()
   console.info('Worker shutting down', { signal })
+  // Let the loop finish its current step, so nothing it was starting is
+  // missed by the drain below.
+  await Promise.race([mainLoopDone, wait(5_000)])
   runtimes.abortAll('shutdown')
+  for (const controller of backgroundControllers) {
+    controller.abort(new Error('Worker shutting down'))
+  }
   await Promise.race([
     Promise.allSettled([...active, ...backgroundActive]),
     wait(15_000),
@@ -426,7 +474,9 @@ process.on('SIGTERM', () => {
 })
 
 try {
-  await mainLoop()
+  const loop = mainLoop()
+  mainLoopDone = loop.then(() => undefined, () => undefined)
+  await loop
 } catch (error) {
   console.error('Worker failed', error)
   await shutdown('fatal-error')

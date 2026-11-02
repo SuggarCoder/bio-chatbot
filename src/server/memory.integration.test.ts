@@ -448,3 +448,44 @@ test('memory tiers: digests, touch, promotion and aging', { skip: !databaseUrl }
     await closeDatabase(database)
   }
 })
+
+test('aborting a background job cancels its model call and leaves the cursor', { skip: !databaseUrl }, async () => {
+  const database = createDatabase(databaseUrl as string)
+  const userIds: string[] = []
+  try {
+    await migrateDatabase(database)
+    const [owner] = await database
+      .insert(users)
+      .values({ externalUserId: `memory-abort-${crypto.randomUUID()}` })
+      .returning({ id: users.id })
+    userIds.push(owner!.id)
+    const [chat] = await database.insert(chats).values({ userId: owner!.id, title: 'abort', nextMessageSeq: 3n }).returning({ id: chats.id })
+    await database.insert(messages).values([
+      { userId: owner!.id, chatId: chat!.id, seq: 1n, role: 'user', content: '我在做真菌组学' },
+      { userId: owner!.id, chatId: chat!.id, seq: 2n, role: 'assistant', status: 'completed', content: '好的' },
+    ])
+    let sawSignal = false
+    const client = {
+      responses: {
+        create: (_body: unknown, options?: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+          sawSignal = Boolean(options?.signal)
+          options?.signal?.addEventListener('abort', () => reject(options.signal!.reason), { once: true })
+        }),
+      },
+    } as unknown as BackgroundModelClient
+    const processor = new MemoryProcessor(config, database, new CharacterTokenCounter(), undefined, client)
+    const controller = new AbortController()
+    const running = processor.process(memoryJob(owner!.id, chat!.id, 2), controller.signal)
+    setTimeout(() => controller.abort(new Error('deadline')), 50)
+    await assert.rejects(running, /deadline/)
+    assert.equal(sawSignal, true)
+    const [cursor] = await database.select({ seq: chats.memoryExtractedSeq }).from(chats).where(eq(chats.id, chat!.id))
+    assert.equal(cursor!.seq, 0n, 'nothing was recorded; the retry reads the same turns')
+  } finally {
+    if (userIds.length > 0) {
+      await database.delete(userMemories).where(inArray(userMemories.userId, userIds))
+      await database.delete(users).where(inArray(users.id, userIds))
+    }
+    await closeDatabase(database)
+  }
+})

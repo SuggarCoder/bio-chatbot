@@ -128,9 +128,12 @@ export class BackgroundQueue {
     return acquired ? token : null
   }
 
+  /** Compare-and-delete in one step, so an expired lease taken over by another worker survives. */
   async release(jobId: string, token: string): Promise<void> {
-    const key = this.leaseKey(jobId)
-    if (await this.redis.get(key) === token) await this.redis.del(key)
+    await this.redis.eval(
+      "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0",
+      { keys: [this.leaseKey(jobId)], arguments: [token] },
+    )
   }
 }
 

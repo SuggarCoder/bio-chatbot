@@ -630,22 +630,6 @@ export class GenerationService {
     let pendingEventWrites = 0
     let streamWritesStopped = false
     let snapshotPending = false
-    const snapshotTimer = setInterval(() => {
-      if (snapshotPending) return
-      snapshotPending = true
-      void this.queue.saveSnapshot(
-        input.user.id,
-        start.generationId,
-        {
-          content: runtime.partialOutput,
-          providerRequestId: runtime.providerRequestId,
-          usage: runtime.usage,
-          executionSteps: runtime.executionSteps,
-          updatedAt: new Date().toISOString(),
-        },
-      ).catch(() => undefined).finally(() => { snapshotPending = false })
-    }, this.config.generationSnapshotIntervalMs)
-    snapshotTimer.unref()
 
     const emit = (
       event: StreamEventPayload,
@@ -835,6 +819,25 @@ export class GenerationService {
           },
         })
       : null
+
+    // Created right before the try whose finally clears it, so nothing in
+    // between can throw and leave it running.
+    const snapshotTimer = setInterval(() => {
+      if (snapshotPending) return
+      snapshotPending = true
+      void this.queue.saveSnapshot(
+        input.user.id,
+        start.generationId,
+        {
+          content: runtime.partialOutput,
+          providerRequestId: runtime.providerRequestId,
+          usage: runtime.usage,
+          executionSteps: runtime.executionSteps,
+          updatedAt: new Date().toISOString(),
+        },
+      ).catch(() => undefined).finally(() => { snapshotPending = false })
+    }, this.config.generationSnapshotIntervalMs)
+    snapshotTimer.unref()
 
     try {
       await this.checkpoint(runtime, true)
@@ -1485,7 +1488,7 @@ export class GenerationService {
           firstTokenAt === null ? null : firstTokenAt - startedAt,
         finishReason: 'completed',
         executionSteps: runtime.executionSteps,
-      })
+      }, runtime)
 
       const previousStepStatuses = new Map(runtime.executionSteps.map((step) => [
         step.id,
@@ -1634,7 +1637,7 @@ export class GenerationService {
                   : 'generation_failed',
         errorMessage: message,
         executionSteps: runtime.executionSteps,
-      })
+      }, runtime)
 
       emit({
         type: 'message.finish',
@@ -1661,7 +1664,7 @@ export class GenerationService {
       ])
     } finally {
       clearInterval(snapshotTimer)
-      this.runtimes.delete(start.generationId)
+      this.runtimes.delete(start.generationId, runtime)
     }
   }
 }

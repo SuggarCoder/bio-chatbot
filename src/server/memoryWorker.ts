@@ -372,14 +372,16 @@ export class MemoryProcessor {
     })
   }
 
-  async process(job: BackgroundWorkItem): Promise<BackgroundUsage | undefined> {
-    if (job.type === 'chat.summary') return this.summarize(job)
-    if (job.type === 'user.memory') return this.extractMemory(job)
+  /** `signal` aborts the job's model calls (the worker's per-job deadline and shutdown). */
+  async process(job: BackgroundWorkItem, signal?: AbortSignal): Promise<BackgroundUsage | undefined> {
+    if (job.type === 'chat.summary') return this.summarize(job, signal)
+    if (job.type === 'user.memory') return this.extractMemory(job, signal)
     return undefined
   }
 
   private async summarize(
     job: BackgroundWorkItem,
+    signal?: AbortSignal,
   ): Promise<BackgroundUsage | undefined> {
     if (!this.config.contextMemoryEnabled || !job.chatId) return undefined
     await this.tokenCounter.initialize()
@@ -494,7 +496,7 @@ export class MemoryProcessor {
         `新增消息：\n${transcript}`,
       ].join('\n\n'),
       max_output_tokens: budgetTokens,
-    })
+    }, signal)
     let usage = drafted.usage
     let summary = normalizeSummary(drafted.text)
     assertSummarySections(summary)
@@ -505,7 +507,7 @@ export class MemoryProcessor {
         instructions: summaryCompactionInstructions(targetTokens),
         input: summary,
         max_output_tokens: budgetTokens,
-      })
+      }, signal)
       usage = addBackgroundUsage(usage, compacted.usage)
       summary = normalizeSummary(compacted.text)
       assertSummarySections(summary)
@@ -558,17 +560,19 @@ export class MemoryProcessor {
     label: string,
     kind: BackgroundUsage['kind'],
     request: { instructions: string; input: string; max_output_tokens: number },
+    signal?: AbortSignal,
   ): Promise<{ text: string; usage: BackgroundUsage }> {
     const response = await this.qwen.responses.create({
       ...BACKGROUND_REQUEST_EXTRAS,
       model: this.config.backgroundModel,
       ...request,
-    })
+    }, { signal })
     return { text: completedText(response, label), usage: usageOf(response, kind) }
   }
 
   private async extractMemory(
     job: BackgroundWorkItem,
+    signal?: AbortSignal,
   ): Promise<BackgroundUsage | undefined> {
     if (!this.config.userMemoryEnabled || !job.chatId) return undefined
     const chatId = job.chatId
@@ -684,7 +688,7 @@ export class MemoryProcessor {
         `新对话：\n${renderTurns(selected, EXTRACTION_CLIP)}`,
       ].filter(Boolean).join('\n\n'),
       max_output_tokens: Math.min(2_048, this.config.backgroundMaxOutputTokens),
-    })
+    }, signal)
     const { operations, episode } = parseExtraction(extracted.text)
     const changes = operations.filter(
       (operation): operation is Exclude<MemoryOperation, { action: 'touch' }> => operation.action !== 'touch',
@@ -735,7 +739,7 @@ export class MemoryProcessor {
       await this.advanceCursor(transaction, job.userId, chatId, upTo)
     })
 
-    const consolidated = await this.consolidateMemories(job.userId)
+    const consolidated = await this.consolidateMemories(job.userId, signal)
     return consolidated
       ? addBackgroundUsage(extracted.usage, consolidated)
       : extracted.usage
@@ -780,6 +784,7 @@ export class MemoryProcessor {
    */
   private async consolidateMemories(
     userId: string,
+    signal?: AbortSignal,
   ): Promise<BackgroundUsage | undefined> {
     const maxItems = this.config.userMemoryMaxItems
     const budgetTokens = this.config.userMemoryTokenBudget
@@ -826,7 +831,7 @@ export class MemoryProcessor {
           })))}`,
         ].join('\n\n'),
         max_output_tokens: this.config.backgroundMaxOutputTokens,
-      })
+      }, signal)
     } catch (error) {
       console.warn('User memory consolidation request failed', {
         userId,

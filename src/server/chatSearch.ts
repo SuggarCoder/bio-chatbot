@@ -103,6 +103,7 @@ export async function indexChatTurn(
   database: Database,
   embedder: Embedder | null,
   input: { userId: string; chatId: string; assistantMessageId: string; userMessageId?: string },
+  signal?: AbortSignal,
 ): Promise<{ tokens: number } | undefined> {
   const [chat] = await database
     .select({ deletedAt: chats.deletedAt })
@@ -160,7 +161,7 @@ export async function indexChatTurn(
     .returning({ id: messageChunks.id, embeddingModel: messageChunks.embeddingModel })
   if (!embedder || chunk!.embeddingModel === embedder.model) return undefined
 
-  const { vectors, tokens } = await embedder.embed([content])
+  const { vectors, tokens } = await embedder.embed([content], signal)
   await database
     .update(messageChunks)
     .set({ embedding: vectors[0]!, embeddingModel: embedder.model })

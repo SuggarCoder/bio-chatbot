@@ -96,6 +96,7 @@ export class GenerationRuntimeRegistry {
     const existing = this.runtimes.get(runtime.generationId)
 
     if (existing && existing !== runtime) {
+      existing.abortReason ??= 'lease_lost'
       existing.controller.abort()
     }
 
@@ -121,7 +122,12 @@ export class GenerationRuntimeRegistry {
     return true
   }
 
-  delete(generationId: string): void {
+  /**
+   * With `runtime`, only that run's entry is removed, so a run that ends
+   * late cannot unregister a newer run of the same generation.
+   */
+  delete(generationId: string, runtime?: GenerationRuntime): void {
+    if (runtime && this.runtimes.get(generationId) !== runtime) return
     this.runtimes.delete(generationId)
   }
 
