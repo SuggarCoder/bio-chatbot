@@ -99,9 +99,10 @@ if (!apiKey) {
 }
 const client = new OpenAI({
   apiKey,
-  baseURL: process.env.QWEN_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  // Same defaults as the worker (src/server/config.ts), so the eval measures production.
+  baseURL: process.env.QWEN_BASE_URL || 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
 })
-const model = process.env.BACKGROUND_MODEL || 'qwen-plus'
+const model = process.env.BACKGROUND_MODEL || 'qwen3.6-flash'
 const repeat = Math.max(1, Number(process.env.EVAL_REPEAT ?? 1))
 const minPassRate = Number(process.env.EVAL_MIN_PASS_RATE ?? 0.8)
 
