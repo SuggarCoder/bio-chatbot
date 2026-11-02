@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
-import {
-  AutoTokenizer,
-  type PreTrainedTokenizer,
-} from '@huggingface/transformers'
+// Type-only: the library (and its ~160 MB of native dependencies) is loaded
+// on first initialize(), so processes that never count tokens never load it.
+import type { PreTrainedTokenizer } from '@huggingface/transformers'
 
 import type { AppConfig } from './config.js'
 
@@ -57,10 +56,11 @@ export class QwenTokenCounter implements TokenCounter {
 
   initialize(): Promise<void> {
     if (this.tokenizer) return Promise.resolve()
-    this.initializing ??= AutoTokenizer.from_pretrained(
-      path.resolve(this.config.qwenTokenizerPath),
-      { local_files_only: true },
-    ).then((tokenizer) => {
+    this.initializing ??= import('@huggingface/transformers').then(({ AutoTokenizer }) =>
+      AutoTokenizer.from_pretrained(
+        path.resolve(this.config.qwenTokenizerPath),
+        { local_files_only: true },
+      )).then((tokenizer) => {
       if (!tokenizer.chat_template) {
         throw new Error('Qwen tokenizer does not include a chat template')
       }

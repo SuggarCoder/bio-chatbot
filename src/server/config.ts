@@ -304,9 +304,10 @@ export function readConfig(): AppConfig {
     'QWEN_MAX_INPUT_TOKENS',
     983_616,
   )
+  // Same default as compose.yaml and .env.example.
   const qwenMaxOutputTokens = positiveInteger(
     'QWEN_MAX_OUTPUT_TOKENS',
-    65_536,
+    40_960,
   )
   if (qwenMaxInputTokens > qwenContextWindowTokens) {
     throw new Error('QWEN_MAX_INPUT_TOKENS must not exceed QWEN_CONTEXT_WINDOW_TOKENS')

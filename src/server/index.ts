@@ -46,9 +46,9 @@ const finalizer = new GenerationFinalizer(
   redis,
   runtimes,
 )
+// Generations run (and count tokens) only in the worker; the API never
+// loads the tokenizer. It is still created lazily if ever needed.
 const tokenCounter = new QwenTokenCounter(config)
-// Every provider request is token-budgeted, including plain chat.
-await tokenCounter.initialize()
 const capabilityRuntime = createCapabilityRuntime(config)
 const generations = new GenerationService(
   config,

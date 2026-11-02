@@ -43,11 +43,20 @@ export function modelBudgetFetch(config: AppConfig, redis: RedisClient): typeof 
     // Reserve a conservative byte-based input bound plus the declared output cap.
     // This is deliberately NOT a throughput prediction or exact billed token count.
     const rawBody = typeof init?.body === 'string' ? init.body : input instanceof Request ? await input.clone().text() : ''
-    const body = rawBody ? JSON.parse(rawBody) as { max_output_tokens?: number } : {}
-    const reservedTokens = Buffer.byteLength(rawBody, 'utf8') + (body.max_output_tokens ?? config.qwenMaxOutputTokens ?? 65536) + 1024
+    // Read the one field instead of parsing a body of up to ~1 MB again. In
+    // JSON text an unescaped `"max_output_tokens":` can only be a key.
+    const declaredOutput = /"max_output_tokens"\s*:\s*(\d+)/.exec(rawBody)?.[1]
+    const reservedTokens = Buffer.byteLength(rawBody, 'utf8') +
+      (declaredOutput ? Number(declaredOutput) : config.qwenMaxOutputTokens ?? 65536) + 1024
     const controller = new AbortController()
     const callerSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
-    const signal = AbortSignal.any([controller.signal, ...(callerSignal ? [callerSignal] : []), AbortSignal.timeout(10 * 60_000)])
+    const signal = callerSignal ? AbortSignal.any([controller.signal, callerSignal]) : controller.signal
+    // A hard ceiling for one request, cleared on release; AbortSignal.timeout
+    // would keep a 10-minute timer alive after every finished request.
+    const deadline = setTimeout(() => {
+      controller.abort(new DOMException('Model request deadline exceeded', 'TimeoutError'))
+    }, 10 * 60_000)
+    deadline.unref()
     const waitUntil = Date.now() + 60_000
     let acquired = false
     let timer: ReturnType<typeof setInterval> | undefined
@@ -57,6 +66,7 @@ export function modelBudgetFetch(config: AppConfig, redis: RedisClient): typeof 
       if (released) return
       released = true
       clearInterval(timer)
+      clearTimeout(deadline)
       signal.removeEventListener('abort', onAbort)
       if (acquired) await redis.eval("return redis.call('ZREM',KEYS[1],ARGV[1])", { keys: [key], arguments: [token] }).catch(() => {})
     }
