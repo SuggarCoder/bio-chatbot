@@ -23,6 +23,7 @@ import { MemoryProcessor } from './memoryWorker.js'
 import { indexChatTurn } from './chatSearch.js'
 import { createEmbedder } from './embeddings.js'
 import { purgeExpiredMemories } from './memoryPolicy.js'
+import type { GenerationMemoryReport } from './generationBytes.js'
 import {
   claimGeneration,
   claimOutboxBatch,
@@ -339,6 +340,14 @@ async function scheduleOne(): Promise<boolean> {
   return true
 }
 
+/** The byte accounting the run last saved, if it looks like one. */
+function memoryFromSnapshot(snapshot: Record<string, unknown> | null): GenerationMemoryReport | undefined {
+  const memory = snapshot?.memory as Partial<GenerationMemoryReport> | undefined
+  return memory && typeof memory.totalBytes === 'number' && typeof memory.capBytes === 'number'
+    ? memory as GenerationMemoryReport
+    : undefined
+}
+
 function usageFromSnapshot(snapshot: Record<string, unknown> | null) {
   const usage = snapshot?.usage as Record<string, unknown> | undefined
   const number = (value: unknown) =>
@@ -384,6 +393,7 @@ async function reconcile(): Promise<void> {
         ? 'Generation stopped'
         : 'Worker lease expired after the Provider request started',
       executionSteps: normalizeExecutionSteps(snapshot?.executionSteps),
+      memory: memoryFromSnapshot(snapshot),
     })
   }
   const background = await listQueuedBackgroundJobs(database)

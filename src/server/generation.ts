@@ -83,6 +83,11 @@ import {
 import { GenerationStreamStore } from './streamStore.js'
 import { fitInputBudget, QwenTokenCounter, type TokenCounter } from './tokenBudget.js'
 import {
+  GenerationByteBudget,
+  GenerationByteLimitError,
+  utf8Bytes,
+} from './generationBytes.js'
+import {
   addBusinessPart,
   AgentSession,
   bindToolSet,
@@ -617,10 +622,17 @@ export class GenerationService {
     const messageId = start.assistantMessageId
     let eventId = 0
     let messageSequence = 0
+    // Text parts are ranges of runtime.partialOutput rather than a second
+    // copy of the answer; materializeParts() builds them at finalize.
     const messageParts: Array<
-      | { type: 'text'; text: string }
+      | { type: 'text'; start: number; end: number }
       | { type: 'artifact_draft_ref'; streamArtifactId: string }
     > = []
+    const materializeParts = () => messageParts.map((part) =>
+      part.type === 'text'
+        ? { type: 'text' as const, text: runtime.partialOutput.slice(part.start, part.end) }
+        : part)
+    const bytes = new GenerationByteBudget(this.config.generationMaxBytes)
     const completedDrafts: CompletedArtifactDraft[] = []
     // Confirmation forms from agent tools, appended after the answer text.
     const businessParts: GpasPart[] = []
@@ -718,11 +730,14 @@ export class GenerationService {
       })
     }
 
+    /** Records that `delta` was just appended to runtime.partialOutput. */
     const appendTextPart = (delta: string) => {
       if (!delta) return
+      const end = runtime.partialOutput.length
+      const start = end - delta.length
       const previous = messageParts.at(-1)
-      if (previous?.type === 'text') previous.text += delta
-      else messageParts.push({ type: 'text', text: delta })
+      if (previous?.type === 'text' && previous.end === start) previous.end = end
+      else messageParts.push({ type: 'text', start, end })
     }
 
     const artifactService = this.artifactService
@@ -833,6 +848,8 @@ export class GenerationService {
           providerRequestId: runtime.providerRequestId,
           usage: runtime.usage,
           executionSteps: runtime.executionSteps,
+          // Kept for runs that a worker restart finalizes from the snapshot.
+          memory: bytes.report(),
           updatedAt: new Date().toISOString(),
         },
       ).catch(() => undefined).finally(() => { snapshotPending = false })
@@ -1109,8 +1126,12 @@ export class GenerationService {
           role: message.role,
           content: message.content,
         }))
+      bytes.charge('input', utf8Bytes(modelInstructions) +
+        context.messages.reduce((total, message) => total + utf8Bytes(message.content), 0))
       let toolCallsUsed = 0
-      let answerText = ''
+      // Only agent runs need the text: tool rounds resend it, and the
+      // fallback checks whether any was produced.
+      let answeredWithText = false
       const pushOutputText = (delta: string) => {
         if (patchMode) {
           patchOutput += delta
@@ -1270,7 +1291,8 @@ export class GenerationService {
             if (firstTokenAt === null) {
               firstTokenAt = Date.now()
             }
-            roundText += event.delta
+            bytes.charge('output', utf8Bytes(event.delta))
+            if (toolRunner) roundText += event.delta
             pushOutputText(event.delta)
           } else if (event.type === 'response.completed') {
             runtime.providerRequestId = event.response.id
@@ -1294,7 +1316,7 @@ export class GenerationService {
           }
         }
 
-        answerText += roundText
+        if (roundText.trim()) answeredWithText = true
 
         if (!toolRunner || functionCalls.length === 0 || toolsExhausted) break
         await this.checkpoint(runtime, true)
@@ -1327,6 +1349,7 @@ export class GenerationService {
           const toolStartedAt = new Date()
           const result = await toolRunner.execute(call)
           await this.checkpoint(runtime, true)
+          bytes.charge('tool', utf8Bytes(result.output))
           await recordToolRun(this.database, {
             userId: input.user.id,
             generationId: start.generationId,
@@ -1352,7 +1375,7 @@ export class GenerationService {
       }
 
       // A run that already queried data must not fail for an empty last round.
-      const fallback = toolRunner ? agentAnswerFallback(toolCallsUsed, answerText) : null
+      const fallback = toolRunner ? agentAnswerFallback(toolCallsUsed, answeredWithText ? 'answered' : '') : null
       if (fallback) {
         ensureResponseStep()
         pushOutputText(fallback)
@@ -1370,6 +1393,7 @@ export class GenerationService {
         if (baseContent === null) {
           throw new Error('ARTIFACT_PATCH_BASE_UNAVAILABLE')
         }
+        bytes.charge('artifact', utf8Bytes(baseContent))
         const buildDraft = (output: string) => createPatchedArtifactDraft({
           output,
           logicalId: selectedArtifact!.logicalId,
@@ -1405,6 +1429,7 @@ export class GenerationService {
             runtime.usage,
             extractUsage(retryResponse),
           )
+          bytes.charge('output', utf8Bytes(retryResponse.output_text))
           draft = buildDraft(retryResponse.output_text)
         }
         const escapedContent = draft.content.replaceAll(
@@ -1477,9 +1502,10 @@ export class GenerationService {
         content: runtime.partialOutput,
         messageId,
         messageParts: [
-          ...messageParts,
+          ...materializeParts(),
           ...businessParts.map((part) => ({ type: 'gpas' as const, part })),
         ],
+        memory: bytes.report(),
         preparedArtifacts,
         providerRequestId: runtime.providerRequestId,
         usage: runtime.usage,
@@ -1579,7 +1605,8 @@ export class GenerationService {
       )
       const cancelled = runtime.abortReason === 'cancel' ||
         (error instanceof GenerationCancellationError && !timedOut && !interrupted)
-      const lengthLimited = error instanceof GenerationLengthError
+      const byteLimited = error instanceof GenerationByteLimitError
+      const lengthLimited = error instanceof GenerationLengthError || byteLimited
       const message =
         error instanceof Error ? error.message : 'Generation failed'
       if (lengthLimited) parser?.finish()
@@ -1609,7 +1636,8 @@ export class GenerationService {
             : 'failed',
         content: runtime.partialOutput,
         messageId,
-        messageParts,
+        messageParts: materializeParts(),
+        memory: bytes.report(),
         providerRequestId: runtime.providerRequestId,
         usage: runtime.usage,
         latencyMs: Date.now() - startedAt,
@@ -1630,9 +1658,11 @@ export class GenerationService {
             ? 'generation_interrupted'
             : cancelled
               ? 'generation_cancelled'
-              : lengthLimited
-                ? 'generation_length'
-                : error instanceof ArtifactServiceError
+              : byteLimited
+                ? 'generation_byte_limit'
+                : lengthLimited
+                  ? 'generation_length'
+                  : error instanceof ArtifactServiceError
                   ? error.code.toLocaleLowerCase()
                   : 'generation_failed',
         errorMessage: message,
@@ -1665,6 +1695,13 @@ export class GenerationService {
     } finally {
       clearInterval(snapshotTimer)
       this.runtimes.delete(start.generationId, runtime)
+      const memory = bytes.report()
+      if (memory.limited || memory.totalBytes >= memory.capBytes / 2) {
+        console.warn('Generation used a large share of GENERATION_MAX_BYTES', {
+          generationId: start.generationId,
+          ...memory,
+        })
+      }
     }
   }
 }

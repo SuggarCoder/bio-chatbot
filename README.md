@@ -87,6 +87,7 @@ npm run build
 
 记忆功能由独立开关控制，Artifact 上下文始终按大小分两档：
 
+- `GENERATION_MAX_BYTES`（默认 8 MiB）：单次生成可占用的字节上限，统计模型输入、模型输出、工具结果和 Artifact 原文。超出时按“输出过长”结束，已生成的部分会保存，错误码为 `generation_byte_limit`。每次生成的用量记在 `Generation.metadata.memory` 里，超过上限一半时 worker 会打一条告警日志。
 - `CONTEXT_MEMORY_ENABLED`：按 token 预算装载最近原文，并注入创建请求时冻结的滚动摘要版本。摘要以 `SUMMARY_TARGET_TOKENS` 为目标长度，超过目标 1.25 倍时再压缩一次；被截断、缺少章节或超过 `CHAT_SUMMARY_TOKEN_BUDGET` 的摘要不会入库。每个会话只保留最近 3 个版本（更早且超过 1 天的版本会被清理）。
 - `USER_MEMORY_ENABLED`：跨会话用户记忆。会话安静 `MEMORY_EXTRACTION_DELAY_SECONDS` 秒后（或积压 `MEMORY_EXTRACTION_MAX_PENDING_TURNS` 轮时）一次读取多轮对话，提取身份、长期项目、偏好、近期关注四类事实；记忆分三层：长期画像（身份、工作、偏好，不过期、原地更新）、近期关注（30 天没人再提就过期，反复出现会升级为长期）、近期对话（每个会话一条概要，注入两周、60 天后删除），策略见 `src/server/memoryPolicy.ts`。条目超过 `USER_MEMORY_MAX_ITEMS`/`USER_MEMORY_TOKEN_BUDGET` 时立即整理，否则最多每 `MEMORY_CONSOLIDATION_INTERVAL_HOURS` 小时整理一次。模型在用户要求时可通过 `memory__save`/`memory__delete` 即时增删记忆。
 - `CHAT_SEARCH_ENABLED`：允许模型通过 `chat__search`（pgvector 语义检索 + 关键词，RRF 融合）/`chat__recent` 检索用户的其他历史会话（排除已删除会话）。数据库需要 pgvector 扩展；向量由 `EMBEDDING_MODEL`（默认 DashScope `text-embedding-v4`，1024 维）生成，更换模型后运行 `npm run search:reindex`。用户在“记忆”设置里只能开关记忆（同时控制历史检索）和清除全部记忆。详见 [docs/memory.md](docs/memory.md)。

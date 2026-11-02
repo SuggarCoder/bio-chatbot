@@ -256,3 +256,60 @@ test('streaming TextDecoder preserves UTF-8 split across every byte boundary', (
     assert.deepEqual(result, expected)
   }
 })
+
+test('output does not depend on how the stream is chunked (fuzz)', () => {
+  let state = 42
+  const random = (n: number) => {
+    state = (state * 1_103_515_245 + 12_345) % 2_147_483_648
+    return state % n
+  }
+  const pieces = [
+    '普通文本', 'plain text ', '\n', '```\n<artifact not a tag>\n```\n', '\\</artifact>', '</artif', '<artifac',
+    '<artifactual>', '数据'.repeat(40), 'x'.repeat(300), '<div class="a">', '</div>', '😀',
+  ]
+  for (let round = 0; round < 60; round += 1) {
+    let body = ''
+    for (let index = 0; index < 5 + random(40); index += 1) body += pieces[random(pieces.length)]
+    const stream = `前言${random(2) ? '\n' : ''}\n${opening}${body}</artifact>\n后记 ${round}`
+    const whole = parse([stream])
+    const chunks: string[] = []
+    const characters = [...stream]
+    for (let offset = 0; offset < characters.length;) {
+      const size = 1 + random(random(4) === 0 ? 400 : 6)
+      chunks.push(characters.slice(offset, offset + size).join(''))
+      offset += size
+    }
+    const chunked = parse(chunks)
+    // Deltas of an Artifact that later fails depend on what was already
+    // streamed; everything that is kept must not depend on chunking.
+    assert.equal(chunked.text, whole.text, `round ${round}`)
+    assert.deepEqual(chunked.errors, whole.errors, `round ${round}`)
+    assert.deepEqual(
+      chunked.artifacts.map((artifact) => artifact.content),
+      whole.artifacts.map((artifact) => artifact.content),
+      `round ${round}`,
+    )
+    for (const artifact of [...whole.artifacts, ...chunked.artifacts]) {
+      if (artifact.content !== undefined) assert.equal(artifact.deltas, artifact.content)
+    }
+  }
+})
+
+test('a large Artifact pushed at once is emitted in a few bounded parts', () => {
+  const body = '段落内容 paragraph text\n'.repeat(20_000)
+  const deltas: string[] = []
+  let committed = ''
+  const parser = new ArtifactStreamParser({
+    onTextDelta: () => {},
+    onArtifactStart: () => {},
+    onArtifactDelta: ({ delta }) => { deltas.push(delta) },
+    onArtifactCommit: ({ content }) => { committed = content },
+    onArtifactError: ({ code }) => { throw new Error(code) },
+  }, { createStreamArtifactId: () => 'one' })
+  parser.push(`${opening}${body}</artifact>`)
+  parser.finish()
+  assert.equal(committed, body)
+  assert.equal(deltas.join(''), body)
+  // One delta per push, not one per character.
+  assert.ok(deltas.length <= 2, `${deltas.length} deltas`)
+})

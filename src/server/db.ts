@@ -73,6 +73,7 @@ export {
 export type { Database } from './db/client.js'
 import { forgetChatMemories, lockUserMemories } from './userMemory.js'
 import { deleteChatChunks } from './chatSearch.js'
+import type { GenerationMemoryReport } from './generationBytes.js'
 
 type MessageRow = {
   id: string
@@ -1859,6 +1860,8 @@ export type FinalizeGenerationInput = {
   errorCode?: string
   errorMessage?: string
   executionSteps?: MessageExecutionStep[]
+  /** Byte accounting of the run, kept in generation metadata. */
+  memory?: GenerationMemoryReport
   enqueueSummaryJob?: boolean
   enqueueUserMemoryJob?: boolean
   /** Index the finished turn for cross-chat search. */
@@ -2122,7 +2125,10 @@ export async function finalizeGeneration(
           finalStatus === 'cancelled'
             ? 'Generation stopped'
             : input.errorMessage || null,
-        metadata: metadataWithExecutionSteps(row.metadata, finalExecutionSteps),
+        metadata: {
+          ...metadataWithExecutionSteps(row.metadata, finalExecutionSteps),
+          ...(input.memory ? { memory: input.memory } : {}),
+        },
         credential: null,
         updatedAt: sql`now()`,
         finishedAt: sql`now()`,

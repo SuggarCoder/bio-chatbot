@@ -70,6 +70,8 @@ export type AppConfig = {
   artifactProtocolEnabled: boolean
   agentMaxToolCalls: number
   agentToolLimit: number
+  /** Ceiling on the bytes one generation pulls in: input, output, tool results, Artifact base. */
+  generationMaxBytes: number
   objectStorage: ObjectStorageConfig
 }
 
@@ -355,6 +357,11 @@ export function readConfig(): AppConfig {
     'USER_MEMORY_ENABLED',
     true,
   )
+  const generationMaxBytes = positiveInteger('GENERATION_MAX_BYTES', 8 * 1024 * 1024)
+  if (generationMaxBytes < 2 * 1024 * 1024) {
+    // Below this a full-budget context plus a 1 MiB Artifact cannot fit.
+    throw new Error('GENERATION_MAX_BYTES must be at least 2097152 (2 MiB)')
+  }
   const chatSearchEnabled = booleanValue(
     process.env,
     'CHAT_SEARCH_ENABLED',
@@ -473,6 +480,7 @@ export function readConfig(): AppConfig {
     // lease (one model call in flight per run, see capacity notes).
     agentMaxToolCalls: positiveInteger('AGENT_MAX_TOOL_CALLS', 4),
     agentToolLimit: positiveInteger('AGENT_TOOL_LIMIT', 8),
+    generationMaxBytes,
     objectStorage: readObjectStorageConfig(process.env, nodeEnv),
   }
 }

@@ -27,6 +27,17 @@ const OPEN_PREFIX = '<artifact'
 const CLOSE_TAG = '</artifact>'
 const ESCAPED_CLOSE_TAG = '\\</artifact>'
 const BODY_TAIL_SIZE = ESCAPED_CLOSE_TAG.length
+/**
+ * Body text is held back in the tail (to detect the closing tag) and emitted
+ * in slices of at least this many characters, plus once at the end of every
+ * push(). Emitting per character kept one array entry per character
+ * (10-35 bytes of heap per body character).
+ */
+const BODY_EMIT_CHARS = 256
+/** Only a line's first characters matter for fence detection. */
+const LINE_PREFIX_CHARS = 8
+/** Body parts are joined once this many accumulate. */
+const BODY_PARTS_COMPACT_AT = 256
 
 type ParsedOpeningTag =
   | { metadata: ArtifactProtocolMetadata }
@@ -183,8 +194,21 @@ export class ArtifactStreamParser {
     for (const character of chunk) {
       this.consume(character)
     }
+    this.emitBodyTail()
     this.flushText()
     this.flushBodyDelta()
+  }
+
+  /** Emits all body text that can no longer be part of a closing tag. */
+  private emitBodyTail(): void {
+    if (
+      (this.stateValue === 'ARTIFACT_BODY' || this.stateValue === 'CLOSE_TAG_CANDIDATE') &&
+      this.bodyTail.length > BODY_TAIL_SIZE &&
+      !this.bodyTail.slice(-(OPEN_PREFIX.length + 1)).includes(OPEN_PREFIX)
+    ) {
+      this.emitBody(this.bodyTail.slice(0, -BODY_TAIL_SIZE))
+      this.bodyTail = this.bodyTail.slice(-BODY_TAIL_SIZE)
+    }
   }
 
   finish(): void {
@@ -321,9 +345,11 @@ export class ArtifactStreamParser {
       return
     }
 
-    const nestedIndex = this.bodyTail.indexOf(OPEN_PREFIX)
+    // Only the newest characters can complete a nested opening tag.
+    const recent = this.bodyTail.slice(-(OPEN_PREFIX.length + 1))
+    const nestedIndex = recent.indexOf(OPEN_PREFIX)
     if (nestedIndex >= 0) {
-      const following = this.bodyTail[nestedIndex + OPEN_PREFIX.length]
+      const following = recent[nestedIndex + OPEN_PREFIX.length]
       if (following === undefined) {
         return
       }
@@ -333,7 +359,7 @@ export class ArtifactStreamParser {
       }
     }
 
-    if (this.bodyTail.length > BODY_TAIL_SIZE) {
+    if (this.bodyTail.length > BODY_TAIL_SIZE + BODY_EMIT_CHARS) {
       this.emitBody(this.bodyTail.slice(0, -BODY_TAIL_SIZE))
       this.bodyTail = this.bodyTail.slice(-BODY_TAIL_SIZE)
     }
@@ -363,7 +389,7 @@ export class ArtifactStreamParser {
           }
         }
         this.lineBuffer = ''
-      } else {
+      } else if (this.lineBuffer.length < LINE_PREFIX_CHARS) {
         this.lineBuffer += character
       }
     }
@@ -379,11 +405,16 @@ export class ArtifactStreamParser {
   private emitBody(value: string): void {
     if (!value || !this.streamArtifactId) return
     this.bodyParts.push(value)
+    if (this.bodyParts.length >= BODY_PARTS_COMPACT_AT) this.bodyParts = [this.bodyParts.join('')]
     this.bodyDeltaBuffer += value
     this.bodyBytes += this.countUtf8Bytes(value)
 
     if (this.bodyBytes > this.maxBodyBytes) {
       this.beginFailed('ARTIFACT_TOO_LARGE', 'Artifact body exceeds the byte limit.')
+      // Nothing of an oversized body will be committed; free it now rather
+      // than when the closing tag or the stream end arrives.
+      this.bodyParts = []
+      this.bodyDeltaBuffer = ''
       return
     }
 
