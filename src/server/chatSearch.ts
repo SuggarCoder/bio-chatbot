@@ -105,11 +105,11 @@ export async function indexChatTurn(
   input: { userId: string; chatId: string; assistantMessageId: string; userMessageId?: string },
 ): Promise<{ tokens: number } | undefined> {
   const [chat] = await database
-    .select({ incognito: chats.incognito, deletedAt: chats.deletedAt })
+    .select({ deletedAt: chats.deletedAt })
     .from(chats)
     .where(and(eq(chats.id, input.chatId), eq(chats.userId, input.userId)))
     .limit(1)
-  if (!chat || chat.incognito || chat.deletedAt) return undefined
+  if (!chat || chat.deletedAt) return undefined
 
   const [assistant] = await database
     .select({ seq: messages.seq, content: messages.content })
@@ -172,12 +172,11 @@ export async function indexChatTurn(
 // Search
 // ---------------------------------------------------------------------------
 
-/** Chats the user can still see, excluding incognito ones and the current one. */
+/** Chats the user can still see, other than the current one. */
 function searchableChat(userId: string, excludeChatId?: string) {
   return and(
     eq(chats.userId, userId),
     isNull(chats.deletedAt),
-    eq(chats.incognito, false),
     excludeChatId ? ne(chats.id, excludeChatId) : undefined,
   )
 }

@@ -109,7 +109,6 @@ const chatSelection = {
   title: chats.title,
   chatType: chats.chatType,
   status: chats.status,
-  incognito: chats.incognito,
   createdAt: chats.createdAt,
   updatedAt: chats.updatedAt,
 }
@@ -202,7 +201,6 @@ function mapChat(row: typeof chats.$inferSelect): ChatSummaryDto {
     title: row.title,
     chatType: row.chatType,
     status: row.status,
-    incognito: row.incognito,
     createdAt: asIso(row.createdAt),
     updatedAt: asIso(row.updatedAt),
   }
@@ -226,11 +224,10 @@ export async function createChat(
   database: Database,
   userId: string,
   title: string,
-  options: { incognito?: boolean } = {},
 ): Promise<ChatSummaryDto> {
   const [row] = await database
     .insert(chats)
-    .values({ userId, title, incognito: options.incognito ?? false })
+    .values({ userId, title })
     .returning(chatSelection)
 
   return mapChat(row as typeof chats.$inferSelect)
@@ -246,11 +243,10 @@ export async function createChatWithId(
   userId: string,
   id: string,
   title: string,
-  options: { incognito?: boolean } = {},
 ): Promise<ChatSummaryDto | null> {
   const [created] = await database
     .insert(chats)
-    .values({ id, userId, title, incognito: options.incognito ?? false })
+    .values({ id, userId, title })
     .onConflictDoNothing({ target: chats.id })
     .returning(chatSelection)
 

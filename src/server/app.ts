@@ -729,10 +729,9 @@ export async function buildApp(
       return
     }
 
-    const options = { incognito: body.incognito === true }
     if (body.id === undefined) {
       return reply.code(201).send(
-        await createChat(database, user.id, title, options),
+        await createChat(database, user.id, title),
       )
     }
 
@@ -741,7 +740,7 @@ export async function buildApp(
       return
     }
 
-    const chat = await createChatWithId(database, user.id, id, title, options)
+    const chat = await createChatWithId(database, user.id, id, title)
     if (!chat) {
       return reply.code(409).send(
         errorBody(request, 'conflict', 'Conversation id is already in use'),

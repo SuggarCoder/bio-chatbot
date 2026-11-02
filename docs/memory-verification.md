@@ -172,34 +172,7 @@ $PSQL -c "select category, source, content, \"lastSeenAt\"::date, \"expiresAt\":
 
 **预期：** 执行步骤里出现“查看最近对话”，列出的标题与侧边栏一致，并且不包括当前这个对话。
 
-### G. 无痕对话
-
-1. 首页点“无痕对话”后开始对话，确认标题旁有“无痕”标记。
-2. 发送：
-
-   > 我下个月要跳槽去 B 公司，别告诉别人。
-
-3. 在无痕对话里问“你记得关于我的什么？”。
-4. 等一个提取周期，然后查数据库：
-
-   ```bash
-   $PSQL -c "select id, title from \"Chat\" where \"userId\" = '$U' and incognito"
-   ```
-
-   ```bash
-   $PSQL -c "select count(*) from \"MessageChunk\" c join \"Chat\" ch on ch.id = c.\"chatId\" where ch.incognito"
-   ```
-
-   ```bash
-   $PSQL -c "select content from \"UserMemory\" where \"userId\" = '$U' and content like '%B 公司%'"
-   ```
-
-**预期：**
-- 第 3 步：无痕对话里不知道 A 中记住的信息，执行步骤里也没有任何记忆或检索工具。
-- 第 4 步：无痕会话的 `MessageChunk` 数为 0，`UserMemory` 里查不到 B 公司。
-- 在普通对话里搜“跳槽”，也搜不到这次无痕对话。
-
-### H. 记忆开关和清除
+### G. 记忆开关和清除
 
 1. 在 账户菜单 →“记忆”里关闭“使用记忆”，新建对话，问“你记得关于我的什么？”，再问 E 里的问题。**预期：** 不知道你的信息，也不调用任何记忆或检索工具。
 2. 刷新页面后重新打开弹窗，开关仍是关闭状态。重新打开开关。
@@ -211,7 +184,7 @@ $PSQL -c "select category, source, content, \"lastSeenAt\"::date, \"expiresAt\":
 
    **预期：** 清除后再查为 0；新建对话问“你记得关于我的什么？”时答不上来。之后做后面的场景前，先重新做一遍 A。
 
-### I. 删除会话
+### H. 删除会话
 
 删除 A 里的那个对话，然后查数据库：
 
@@ -223,7 +196,7 @@ $PSQL -c "select source, content from \"UserMemory\" where \"userId\" = '$U'"
 - 从该会话整理出的条目（包括它的 `episode` 概要）被删除。
 - 该会话在 `MessageChunk` 里没有记录了。
 
-### K. 分层老化
+### I. 分层老化
 
 分层规则见 `docs/memory.md` 第 2 节。老化要等几周，这里直接改时间字段来模拟。
 
@@ -350,8 +323,6 @@ await closeDatabase(db)
 在桌面浏览器和手机宽度下各看一次：
 
 - 账户菜单 →“记忆”：弹窗里只有“使用记忆”开关和“清除全部记忆”两项，不展示任何记忆内容；开关切换后刷新页面仍然保持；清除前需要确认，完成后显示“已清除全部记忆”。
-- 首页“无痕对话”按钮能切换状态，并显示提示文字。
-- 无痕会话的标题旁有“无痕”标记。
 
 ## 6. 发给开发者的信息
 
@@ -359,7 +330,7 @@ await closeDatabase(db)
 
 1. 第 1.3 步的输出。
 2. 第 1.4 步中 `failed` 的任务和 `last_error`（如有）。
-3. A–K 中不符合预期的场景编号，以及当时的对话截图或执行步骤。
+3. A–J 中不符合预期的场景编号，以及当时的对话截图或执行步骤。
 4. 第 3 步的通过率和 `FAIL` 行。
 5. 第 4 步的相似度样例。
 

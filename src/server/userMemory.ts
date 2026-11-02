@@ -187,7 +187,7 @@ export async function updateMemorySettings(
   return loadMemorySettings(database, userId)
 }
 
-/** What one generation may do with memory, decided by config, user and chat. */
+/** What one generation may do with memory, decided by config and the user's setting. */
 export type MemoryAccess = {
   readMemory: boolean
   editMemory: boolean
@@ -207,7 +207,6 @@ export async function resolveMemoryAccess(
   if (!input.userMemoryEnabled && !input.chatSearchEnabled) return none
   const [row] = await database
     .select({
-      incognito: chats.incognito,
       memoryEnabled: users.memoryEnabled,
       chatSearchEnabled: users.chatSearchEnabled,
     })
@@ -215,7 +214,7 @@ export async function resolveMemoryAccess(
     .innerJoin(users, eq(users.id, chats.userId))
     .where(and(eq(chats.id, input.chatId), eq(chats.userId, input.userId)))
     .limit(1)
-  if (!row || row.incognito) return none
+  if (!row) return none
   const memory = input.userMemoryEnabled && row.memoryEnabled
   return {
     readMemory: memory,

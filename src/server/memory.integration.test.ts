@@ -134,19 +134,16 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
 
     const current = await newChat('当前对话')
     const metagenome = await newChat('土壤样本分析')
-    const incognito = await newChat('无痕的宏基因组讨论', { incognito: true })
     const deleted = await newChat('已删除的宏基因组', { deletedAt: new Date() })
     await index(current, await addTurns(current, [['宏基因组还要再看吗', '可以']]))
     await index(metagenome, await addTurns(metagenome, [
       ['帮我看下这批土壤宏基因组样本的耐药基因', '检出了 tetM 和 sul1'],
       ['下一步做什么', '建议做定量 PCR 验证'],
     ]))
-    await index(incognito, await addTurns(incognito, [['宏基因组的耐药秘密', '好的']]))
     await index(deleted, await addTurns(deleted, [['宏基因组耐药旧问题', '旧回答']]))
     const chunkCount = async (chatId: string) =>
       (await database.select({ id: messageChunks.id }).from(messageChunks).where(eq(messageChunks.chatId, chatId))).length
     assert.equal(await chunkCount(metagenome), 2)
-    assert.equal(await chunkCount(incognito), 0, 'incognito chats are never indexed')
     assert.equal(await chunkCount(deleted), 0, 'deleted chats are never indexed')
     // Re-indexing the same turn keeps its vector and makes no second call.
     const [first] = await database.select({ id: messageChunks.assistantMessageId }).from(messageChunks).where(eq(messageChunks.chatId, metagenome)).limit(1)
@@ -154,7 +151,7 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
 
     const search = (query: string, embedder: Embedder | null = fakeEmbedder) =>
       searchUserChats(database, embedder, { userId, query, excludeChatId: current, minSimilarity: 0.35 })
-    // Keywords: only visible, non-incognito chats other than the current one.
+    // Keywords: only visible chats other than the current one.
     const hits = await search('宏基因组 耐药')
     assert.deepEqual(hits.map((hit) => hit.chatId), [metagenome])
     assert.match(hits[0]!.matches[0]!.excerpt, /耐药/)
@@ -172,10 +169,10 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
     assert.deepEqual(recent.map((chat) => chat.chatId), [metagenome])
     assert.match(recent[0]!.overview, /土壤宏基因组/)
 
-    // Access: incognito disables everything; settings narrow the rest.
+    // Access: someone else's chat gets nothing; settings narrow the rest.
     const flags = { userId, userMemoryEnabled: true, chatSearchEnabled: true }
     assert.deepEqual(
-      await resolveMemoryAccess(database, { ...flags, chatId: incognito }),
+      await resolveMemoryAccess(database, { ...flags, chatId: crypto.randomUUID() }),
       { readMemory: false, editMemory: false, searchChats: false },
     )
     assert.deepEqual(
@@ -254,10 +251,10 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
     const [unchanged] = await database.select({ seq: chats.memoryExtractedSeq }).from(chats).where(eq(chats.id, burst))
     assert.equal(unchanged!.seq, 4n)
 
-    // Incognito chats and paused memory never reach the model.
+    // Deleted chats and paused memory never reach the model.
     const silent = fakeModel(() => ({ operations: [] }))
     const silentProcessor = new MemoryProcessor(config, database, new CharacterTokenCounter(), undefined, silent.client)
-    await silentProcessor.process(memoryJob(userId, incognito, 2))
+    await silentProcessor.process(memoryJob(userId, deleted, 2))
     await updateMemorySettings(database, userId, { memoryEnabled: false })
     await addTurns(burst, [['暂停期间说的话', '好的']])
     await silentProcessor.process(memoryJob(userId, burst, 8))
@@ -292,7 +289,7 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
   }
 })
 
-test('memory HTTP API: one switch, clear all, and incognito chats', { skip: !databaseUrl }, async () => {
+test('memory HTTP API: one switch and clear all', { skip: !databaseUrl }, async () => {
   const { buildApp } = await import('./app.js')
   const database = createDatabase(databaseUrl as string)
   await migrateDatabase(database)
@@ -310,9 +307,8 @@ test('memory HTTP API: one switch, clear all, and incognito chats', { skip: !dat
   let chatId: string | undefined
   try {
     await app.ready()
-    const chat = await app.inject({ method: 'POST', url: `${base}/conversations`, payload: { title: '无痕', incognito: true } })
+    const chat = await app.inject({ method: 'POST', url: `${base}/conversations`, payload: { title: '记忆接口测试' } })
     assert.equal(chat.statusCode, 201)
-    assert.equal(chat.json().incognito, true)
     chatId = chat.json().id as string
     const [row] = await database.select({ userId: chats.userId }).from(chats).where(eq(chats.id, chatId))
     userId = row!.userId

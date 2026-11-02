@@ -103,8 +103,6 @@ export type ChatSummaryDto = {
   title: string
   chatType: string
   status: string
-  /** Never reads or writes memory and is excluded from chat search. */
-  incognito: boolean
   createdAt: string
   updatedAt: string
 }
@@ -234,10 +232,10 @@ export async function fetchChats() {
 }
 
 /** `id` is chosen by the client; repeating the request returns the same chat. */
-export function createChat(title: string, id: string, options: { incognito?: boolean } = {}) {
+export function createChat(title: string, id: string) {
   return requestJson<ChatSummaryDto>('/conversations', {
     method: 'POST',
-    body: JSON.stringify({ id, title, ...(options.incognito ? { incognito: true } : {}) }),
+    body: JSON.stringify({ id, title }),
   })
 }
 

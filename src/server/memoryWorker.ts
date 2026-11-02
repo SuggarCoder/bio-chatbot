@@ -570,7 +570,6 @@ export class MemoryProcessor {
     const chatId = job.chatId
     const [chat] = await this.database
       .select({
-        incognito: chats.incognito,
         deletedAt: chats.deletedAt,
         cursor: chats.memoryExtractedSeq,
         memoryEnabled: users.memoryEnabled,
@@ -579,7 +578,7 @@ export class MemoryProcessor {
       .innerJoin(users, eq(users.id, chats.userId))
       .where(and(eq(chats.id, chatId), eq(chats.userId, job.userId)))
       .limit(1)
-    if (!chat || chat.incognito || chat.deletedAt) return undefined
+    if (!chat || chat.deletedAt) return undefined
 
     const jobSeq = await this.jobAssistantSeq(job)
     if (jobSeq === null || jobSeq <= chat.cursor) return undefined

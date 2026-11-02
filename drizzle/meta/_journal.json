@@ -22,6 +22,13 @@
       "when": 1793622838005,
       "tag": "0002_memory_tiers",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793624708610,
+      "tag": "0003_drop_incognito",
+      "breakpoints": true
     }
   ]
 }

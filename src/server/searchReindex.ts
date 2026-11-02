@@ -34,7 +34,6 @@ try {
         eq(messages.role, 'assistant'),
         eq(messages.status, 'completed'),
         isNull(chats.deletedAt),
-        eq(chats.incognito, false),
         or(
           isNull(messageChunks.id),
           isNull(messageChunks.embeddingModel),

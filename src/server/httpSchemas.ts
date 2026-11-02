@@ -40,7 +40,6 @@ const chatSummary = z.object({
   title: z.string(),
   chatType: z.string(),
   status: z.string(),
-  incognito: z.boolean(),
   createdAt: isoDate,
   updatedAt: isoDate,
 })
@@ -266,7 +265,6 @@ export const httpSchemas = {
     body: jsonSchema(z.object({
       id: uuid.optional(),
       title: z.string().trim().min(1).max(200),
-      incognito: z.boolean().optional(),
     })),
     response: { 201: jsonSchema(chatSummary), ...errorResponses },
   },

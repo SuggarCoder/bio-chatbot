@@ -126,8 +126,6 @@ export const chats = pgTable(
       { onDelete: 'set null' },
     ),
     forkedFromSeq: bigintValue('forkedFromSeq'),
-    /** Incognito chats never read or write memory and are never searched. */
-    incognito: boolean('incognito').notNull().default(false),
     /** Highest message seq the memory extractor has already read. */
     memoryExtractedSeq: bigintValue('memoryExtractedSeq').notNull().default(sql`0`),
     createdAt: timestampTz('createdAt').notNull().defaultNow(),
@@ -608,7 +606,7 @@ export const EMBEDDING_DIMENSIONS = 1024
 
 /**
  * One searchable unit per completed turn (the user message and its reply),
- * for cross-chat search. Incognito chats are never indexed.
+ * for cross-chat search.
  */
 export const messageChunks = pgTable(
   'MessageChunk',

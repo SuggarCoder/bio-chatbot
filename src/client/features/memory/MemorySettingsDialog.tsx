@@ -69,7 +69,7 @@ function MemorySettingsDialog(props: { onClose: () => void }) {
   return (
     <ModalDialog
       title="记忆"
-      description="开启后，助手会记住你的身份、偏好和近期在做的事，并参考你最近的对话，让回答更贴合你。近期内容会随时间自动淘汰。无痕对话不会使用或写入记忆。"
+      description="开启后，助手会记住你的身份、偏好和近期在做的事，并参考你最近的对话，让回答更贴合你。近期内容会随时间自动淘汰。"
       onClose={props.onClose}
     >
       <div class="flex flex-col gap-4">

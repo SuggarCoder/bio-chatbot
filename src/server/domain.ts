@@ -109,8 +109,6 @@ export type ChatSummaryDto = {
   title: string
   chatType: string
   status: string
-  /** Never reads or writes memory and is excluded from chat search. */
-  incognito: boolean
   createdAt: string
   updatedAt: string
 }
