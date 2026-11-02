@@ -112,6 +112,8 @@ instructions 的顺序按变化频率从低到高排列：工具规则 → 用�
 
 ## 5. 评测
 
+上线后的完整验证步骤见 [memory-verification.md](memory-verification.md)。
+
 `npm run eval:memory` 用生产提示词，在固定场景上调用后台模型并检查提取结果。场景包括：
 
 - 身份、偏好；
