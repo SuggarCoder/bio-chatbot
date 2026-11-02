@@ -179,8 +179,15 @@ function sendStringStream(
     'x-stream-id': streamId,
   })
 
+  // A healthy stream writes at least a heartbeat every 15 s; a socket that
+  // has not accepted anything for a minute belongs to a client that stopped
+  // reading.
+  reply.raw.setTimeout(60_000, () => reply.raw.destroy())
+  // fromWeb (unlike from) cancels the source as soon as the response is
+  // destroyed, so a disconnected client releases its subscription at once
+  // instead of on the next heartbeat.
   return reply.send(
-    Readable.from(stream as unknown as AsyncIterable<string>),
+    Readable.fromWeb(stream as Parameters<typeof Readable.fromWeb>[0], { encoding: 'utf8' }),
   )
 }
 

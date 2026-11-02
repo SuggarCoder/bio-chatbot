@@ -239,3 +239,117 @@ test('terminal database checks are coalesced for multiple tabs of one generation
   await Promise.all(readers.map(reader => reader.cancel()))
   await hub.close()
 })
+
+const backlogUser = '33333333-3333-4333-8333-333333333333'
+const backlogGeneration = '11111111-1111-4111-8111-111111111111'
+
+function finishEvent(eventId: number): StreamEvent {
+  return {
+    type: 'message.finish',
+    generationId: backlogGeneration,
+    streamId: 'logical-stream',
+    messageId: '22222222-2222-4222-8222-222222222222',
+    eventId,
+    finishReason: 'stop',
+    assistantMessage: null,
+  }
+}
+
+async function readAll(stream: ReadableStream<string>): Promise<string> {
+  const reader = stream.getReader()
+  let text = ''
+  for (;;) {
+    const chunk = await reader.read()
+    if (chunk.done) return text
+    text += chunk.value
+  }
+}
+
+test('a fast consumer receives a long backlog in one response', async () => {
+  const redis = new FakeRedis()
+  const client = redis as unknown as RedisClient
+  const store = new GenerationStreamStore(config, client)
+  const hub = new GenerationStreamHub(config, client)
+  await hub.start()
+  for (let index = 1; index <= 1_000; index += 1) {
+    await store.append(backlogUser, backlogGeneration, deltaEvent(index, `token ${index} `))
+  }
+  await store.append(backlogUser, backlogGeneration, finishEvent(1_001))
+
+  const text = await readAll(hub.subscribe(backlogUser, backlogGeneration))
+  assert.equal(text.match(/event: message\.delta/g)?.length, 1_000)
+  assert.match(text, /event: message\.finish/)
+  await hub.close()
+})
+
+test('a slow consumer pauses catch-up within the byte budget and resumes when it reads', async () => {
+  const redis = new FakeRedis()
+  const client = redis as unknown as RedisClient
+  const store = new GenerationStreamStore(config, client)
+  const hub = new GenerationStreamHub(config, client)
+  await hub.start()
+  const payload = 'x'.repeat(4_096)
+  for (let index = 1; index <= 300; index += 1) {
+    await store.append(backlogUser, backlogGeneration, deltaEvent(index, payload))
+  }
+  await store.append(backlogUser, backlogGeneration, finishEvent(301))
+  let reads = 0
+  const xRange = redis.xRange.bind(redis)
+  redis.xRange = async (...args) => {
+    reads += 1
+    return xRange(...args)
+  }
+
+  const stream = hub.subscribe(backlogUser, backlogGeneration)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  // About 64 KiB queued (16 events of 4 KiB), one Redis read; not 300 events.
+  assert.equal(reads, 1)
+  const listener = [...(hub as unknown as { listeners: Map<string, Set<{ paused: boolean; closed: boolean }>> })
+    .listeners.values()][0]!.values().next().value!
+  assert.equal(listener.paused, true)
+  assert.equal(listener.closed, false)
+
+  const text = await readAll(stream)
+  assert.equal(text.match(/event: message\.delta/g)?.length, 300)
+  assert.match(text, /event: message\.finish/)
+  await hub.close()
+})
+
+test('cancelling a subscription releases its listener and timers at once', async () => {
+  const redis = new FakeRedis()
+  const client = redis as unknown as RedisClient
+  const hub = new GenerationStreamHub(config, client)
+  await hub.start()
+  const streams = Array.from({ length: 20 }, () => hub.subscribe(backlogUser, backlogGeneration))
+  const listeners = (hub as unknown as { listeners: Map<string, Set<unknown>> }).listeners
+  assert.equal([...listeners.values()][0]?.size, 20)
+  await Promise.all(streams.map((stream) => stream.cancel()))
+  assert.equal(listeners.size, 0)
+  await hub.close()
+})
+
+test('a consumer that stops reading is dropped after the stall limit', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'] })
+  const redis = new FakeRedis()
+  const client = redis as unknown as RedisClient
+  const store = new GenerationStreamStore(config, client)
+  const hub = new GenerationStreamHub(config, client)
+  await hub.start()
+  for (let index = 1; index <= 100; index += 1) {
+    await store.append(backlogUser, backlogGeneration, deltaEvent(index, 'y'.repeat(4_096)))
+  }
+  const stream = hub.subscribe(backlogUser, backlogGeneration)
+  for (let turn = 0; turn < 10; turn += 1) await Promise.resolve()
+  const listeners = (hub as unknown as { listeners: Map<string, Set<unknown>> }).listeners
+  assert.equal(listeners.size, 1)
+
+  t.mock.timers.tick(15_000)
+  assert.equal(listeners.size, 1, 'a 15 s stall is tolerated')
+  t.mock.timers.tick(15_000)
+  t.mock.timers.tick(15_000)
+  assert.equal(listeners.size, 0, 'dropped once stalled for 30 s')
+  // The consumer still gets what was queued, then a clean end to resume from.
+  const text = await readAll(stream)
+  assert.ok((text.match(/event: message\.delta/g)?.length ?? 0) < 100)
+  await hub.close()
+})

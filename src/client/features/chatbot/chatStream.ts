@@ -105,15 +105,15 @@ function sleep(duration: number, signal: AbortSignal) {
       return
     }
 
-    const timeoutId = window.setTimeout(resolve, duration)
-    signal.addEventListener(
-      'abort',
-      () => {
-        window.clearTimeout(timeoutId)
-        reject(new DOMException('The operation was aborted', 'AbortError'))
-      },
-      { once: true },
-    )
+    const onAbort = () => {
+      window.clearTimeout(timeoutId)
+      reject(new DOMException('The operation was aborted', 'AbortError'))
+    }
+    const timeoutId = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, duration)
+    signal.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -302,6 +302,7 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
 
     request.onConnectionState?.('connected')
     state.buffer = ''
+    const cursorBefore = state.lastEventId
 
     try {
       if (await consumeSse(response, state, request)) {
@@ -313,11 +314,15 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
         return
       }
     } catch (error) {
+      // A connection that delivered events made progress: the retry budget
+      // is for consecutive failures, not for a long stream's reconnects.
+      if (state.lastEventId !== cursorBefore) retries = 0
       if (request.signal.aborted || retries >= 5) {
         throw error
       }
     }
 
+    if (state.lastEventId !== cursorBefore) retries = 0
     retries += 1
 
     if (retries > 5) {

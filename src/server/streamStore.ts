@@ -13,7 +13,21 @@ type StreamListener = {
   generationId: string
   timer?: NodeJS.Timeout
   heartbeatTimer?: NodeJS.Timeout
+  /** Catch-up stopped because the consumer's queue is full; pull() resumes it. */
+  paused: boolean
+  stalledSince?: number
+  /** A catch-up was requested while one was running; run again when it ends. */
+  rerun: boolean
+  /** Unsent remainder of the last batch read from Redis. */
+  pending?: Array<{ id: string; event: StoredEvent }>
 }
+
+/** Events read from Redis per catch-up round; small, so a backlog streams in steps. */
+const CATCH_UP_BATCH = 64
+/** Bytes of SSE text queued per subscriber before catch-up waits for the consumer. */
+const SUBSCRIBER_HIGH_WATER_BYTES = 64 * 1024
+/** A consumer that has not drained its queue for this long is dropped; it can resume. */
+const SLOW_CONSUMER_MAX_STALL_MS = 30_000
 
 type StreamNotification = {
   key?: unknown
@@ -88,9 +102,10 @@ export class GenerationStreamStore {
   async readAfter(
     key: string,
     cursor: string,
+    count = 500,
   ): Promise<Array<{ id: string; event: StoredEvent }>> {
     const start = cursor === '0-0' ? '-' : `(${cursor}`
-    const entries = await this.redis.xRange(key, start, '+', { COUNT: 500 })
+    const entries = await this.redis.xRange(key, start, '+', { COUNT: count })
     return entries.flatMap((entry) => {
       const serialized = entry.message.event
       if (typeof serialized !== 'string') return []
@@ -153,6 +168,8 @@ export class GenerationStreamHub {
     ) return
 
     for (const listener of this.listeners.get(notification.key) ?? []) {
+      // A paused listener resumes from pull() once its consumer drains.
+      if (listener.paused) continue
       void this.catchUp(notification.key, listener).catch(() => undefined)
     }
   }
@@ -167,10 +184,6 @@ export class GenerationStreamHub {
 
   private deliver(key: string, listener: StreamListener, id: string, event: StoredEvent): void {
     if (listener.closed || compareStreamIds(id, listener.cursor) <= 0) return
-    if ((listener.controller.desiredSize ?? 0) <= -128) {
-      this.finishListener(key, listener)
-      return
-    }
     listener.cursor = id
     listener.controller.enqueue(encodeSse(id, event))
     if (terminalTypes.has(event.type)) this.finishListener(key, listener)
@@ -203,23 +216,49 @@ export class GenerationStreamHub {
     }
   }
 
+  /**
+   * Delivers events after the listener's cursor in small batches and stops
+   * as soon as the consumer's queue is full: a long backlog then streams at
+   * the consumer's pace instead of being enqueued all at once.
+   */
   private async catchUp(key: string, listener: StreamListener): Promise<void> {
-    if (listener.closed || listener.polling) return
+    if (listener.closed) return
+    if (listener.polling) {
+      listener.rerun = true
+      return
+    }
     listener.polling = true
+    listener.rerun = false
     try {
-      while (!listener.closed) {
-        const entries = await this.store.readAfter(key, listener.cursor)
-        for (const entry of entries) {
-          if (listener.closed) break
+      while (!listener.closed && !listener.paused) {
+        const fromPending = Boolean(listener.pending?.length)
+        const entries = fromPending
+          ? listener.pending!.splice(0)
+          : await this.store.readAfter(key, listener.cursor, CATCH_UP_BATCH)
+        let index = 0
+        while (index < entries.length && !listener.closed) {
+          const entry = entries[index++]!
           this.deliver(key, listener, entry.id, entry.event)
+          if ((listener.controller.desiredSize ?? 0) <= 0) {
+            listener.paused = true
+            listener.stalledSince ??= Date.now()
+            break
+          }
         }
-        if (entries.length < 500) break
+        if (listener.paused) {
+          listener.pending = entries.slice(index)
+          break
+        }
+        if (!fromPending && entries.length < CATCH_UP_BATCH) break
       }
     } catch {
       // Redis is only a replay cache. Always check the authoritative terminal.
     } finally {
       try { await this.checkTerminal(key, listener) }
       finally { listener.polling = false }
+    }
+    if (listener.rerun && !listener.closed && !listener.paused) {
+      await this.catchUp(key, listener)
     }
   }
 
@@ -233,30 +272,46 @@ export class GenerationStreamHub {
 
     return new ReadableStream<string>({
       start: (controller) => {
-        listener = { controller, cursor, closed: false, polling: false, userId, generationId }
+        listener = {
+          controller,
+          cursor,
+          closed: false,
+          polling: false,
+          paused: false,
+          rerun: false,
+          userId,
+          generationId,
+        }
         const listeners = this.listeners.get(key) ?? new Set<StreamListener>()
         listeners.add(listener)
         this.listeners.set(key, listeners)
         void this.catchUp(key, listener).catch(() => undefined)
         listener.timer = setInterval(() => {
-          if (listener && !listener.closed) {
+          if (listener && !listener.closed && !listener.paused) {
             void this.catchUp(key, listener).catch(() => undefined)
           }
         }, 2_000)
         listener.timer.unref()
         listener.heartbeatTimer = setInterval(() => {
           if (!listener || listener.closed) return
-          if ((listener.controller.desiredSize ?? 0) <= -128) {
-            listener.closed = true
-            if (listener.timer) clearInterval(listener.timer)
-            if (listener.heartbeatTimer) clearInterval(listener.heartbeatTimer)
-            listener.controller.close()
-            this.cleanup(key)
+          // Dropped by stall time, not queue length: a client that is merely
+          // behind keeps streaming, one that stopped reading is let go and
+          // resumes later from its Last-Event-ID.
+          if (listener.stalledSince !== undefined && Date.now() - listener.stalledSince >= SLOW_CONSUMER_MAX_STALL_MS) {
+            this.finishListener(key, listener)
             return
           }
-          listener.controller.enqueue(': keep-alive\n\n')
+          if ((listener.controller.desiredSize ?? 0) > 0) {
+            listener.controller.enqueue(': keep-alive\n\n')
+          }
         }, 15_000)
         listener.heartbeatTimer.unref()
+      },
+      pull: () => {
+        if (!listener || listener.closed || !listener.paused) return
+        listener.paused = false
+        listener.stalledSince = undefined
+        void this.catchUp(key, listener).catch(() => undefined)
       },
       cancel: () => {
         if (listener?.timer) clearInterval(listener.timer)
@@ -264,7 +319,7 @@ export class GenerationStreamHub {
         if (listener) listener.closed = true
         this.cleanup(key)
       },
-    })
+    }, { highWaterMark: SUBSCRIBER_HIGH_WATER_BYTES, size: (chunk) => chunk.length })
   }
 
   async close(): Promise<void> {
