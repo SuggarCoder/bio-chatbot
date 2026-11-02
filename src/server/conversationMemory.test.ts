@@ -39,6 +39,6 @@ test('budgeted context supersession filter selects a scalar from its own query',
   assert.deepEqual(context?.messages, [{ role: 'user', content: 'hello' }])
   assert.match(
     queries[1],
-    /not exists \(select 1 from "Generation" "context_original"/,
+    /not exists \(select 1 from "Generation" "superseded_original"/,
   )
 })

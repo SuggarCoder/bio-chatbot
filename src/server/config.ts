@@ -35,6 +35,14 @@ export type AppConfig = {
   userMemoryEnabled: boolean
   userMemoryTokenBudget: number
   userMemoryMaxItems: number
+  /** Lets the model search and list the user's other chats. */
+  chatSearchEnabled: boolean
+  /** Extraction waits this long after a turn, so a burst of turns is read once. */
+  memoryExtractionDelaySeconds: number
+  /** Extract anyway once this many turns are waiting, even mid-burst. */
+  memoryExtractionMaxPendingTurns: number
+  /** Minimum hours between routine consolidations of one user's memory set. */
+  memoryConsolidationIntervalHours: number
   artifactPatchEnabled: boolean
   backgroundModel: string
   backgroundMaxOutputTokens: number
@@ -330,6 +338,14 @@ export function readConfig(): AppConfig {
     'USER_MEMORY_ENABLED',
     true,
   )
+  const chatSearchEnabled = booleanValue(
+    process.env,
+    'CHAT_SEARCH_ENABLED',
+    true,
+  )
+  const memoryExtractionDelaySeconds = positiveInteger('MEMORY_EXTRACTION_DELAY_SECONDS', 300, true)
+  const memoryExtractionMaxPendingTurns = positiveInteger('MEMORY_EXTRACTION_MAX_PENDING_TURNS', 6)
+  const memoryConsolidationIntervalHours = positiveInteger('MEMORY_CONSOLIDATION_INTERVAL_HOURS', 24)
   const artifactPatchEnabled = booleanValue(
     process.env,
     'ARTIFACT_PATCH_ENABLED',
@@ -393,6 +409,10 @@ export function readConfig(): AppConfig {
     userMemoryEnabled,
     userMemoryTokenBudget,
     userMemoryMaxItems,
+    chatSearchEnabled,
+    memoryExtractionDelaySeconds,
+    memoryExtractionMaxPendingTurns,
+    memoryConsolidationIntervalHours,
     artifactPatchEnabled,
     backgroundModel:
       process.env.BACKGROUND_MODEL?.trim() || 'qwen3.6-flash',

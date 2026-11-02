@@ -74,6 +74,8 @@ export type ChatConversation = {
   unsynced?: boolean
   id: string
   title: string
+  /** Never reads or writes memory and is excluded from chat search. */
+  incognito: boolean
   messages: ChatMessage[]
   detailStatus: 'summary' | 'loading' | 'loaded' | 'error'
   detailError?: string
@@ -109,7 +111,7 @@ type ChatStoreContextValue = {
   orderedConversations: () => ChatConversation[]
   getConversation: (id: string) => ChatConversation | undefined
   /** Adds the conversation at once and creates it on the server in the background. */
-  createConversation: (titleSeed: string) => ChatConversation
+  createConversation: (titleSeed: string, options?: { incognito?: boolean }) => ChatConversation
   /** Resolves once the server has the conversation, retrying a failed creation. */
   ensureConversationCreated: (id: string) => Promise<void>
   loadConversation: (
@@ -257,6 +259,7 @@ function mapSummary(
   return {
     id: chat.id,
     title: chat.title,
+    incognito: chat.incognito ?? existing?.incognito ?? false,
     messages: existing?.messages ?? [],
     detailStatus: existing?.detailStatus ?? 'summary',
     detailError: existing?.detailError,
@@ -390,7 +393,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     if (!conversation?.unsynced) return Promise.resolve()
     const pending = pendingCreations.get(id)
     if (pending) return pending
-    const request = createChat(conversation.title, id).then((chat) => {
+    const request = createChat(conversation.title, id, { incognito: conversation.incognito }).then((chat) => {
       if (!state.conversations[id]) return
       setState('conversations', id, {
         title: chat.title,
@@ -405,11 +408,12 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     return request
   }
 
-  const createConversation = (titleSeed: string) => {
+  const createConversation = (titleSeed: string, options: { incognito?: boolean } = {}) => {
     const now = Date.now()
     const conversation: ChatConversation = {
       id: crypto.randomUUID(),
       title: buildConversationTitle(titleSeed),
+      incognito: options.incognito ?? false,
       messages: [],
       detailStatus: 'loaded',
       draft: '',

@@ -63,6 +63,17 @@ import {
 } from './artifacts/repository.js'
 import { httpSchemas } from './httpSchemas.js'
 import {
+  createUserMemory,
+  deleteUserMemories,
+  editUserMemory,
+  listUserMemories,
+  loadMemorySettings,
+  normalizeMemoryCategory,
+  normalizeMemoryContent,
+  updateMemorySettings,
+  type UserMemoryRecord,
+} from './userMemory.js'
+import {
   generationStreamKey,
   type GenerationStreamHub,
 } from './streamStore.js'
@@ -669,6 +680,105 @@ export async function buildApp(
     readArtifactVersion(request, reply, true),
   )
 
+  // -------------------------------------------------------------------------
+  // Memory: what the assistant remembers about the user, and its settings.
+  // -------------------------------------------------------------------------
+
+  const memoryDto = (row: UserMemoryRecord) => ({
+    id: row.id,
+    category: row.category,
+    content: row.content,
+    source: row.source,
+    sourceChatId: row.sourceChatId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  })
+
+  app.get(`${API_BASE}/memory`, {
+    schema: { response: httpSchemas.memoryResponse },
+  }, async (request) => {
+    const user = await authenticate(request)
+    const [settings, memories] = await Promise.all([
+      loadMemorySettings(database, user.id),
+      listUserMemories(database, user.id),
+    ])
+    return { settings, memories: memories.map(memoryDto) }
+  })
+
+  app.patch(`${API_BASE}/memory/settings`, {
+    schema: httpSchemas.memorySettings,
+  }, async (request) => {
+    const user = await authenticate(request)
+    const body = readObjectBody(request)
+    return updateMemorySettings(database, user.id, {
+      memoryEnabled: typeof body.memoryEnabled === 'boolean' ? body.memoryEnabled : undefined,
+      chatSearchEnabled: typeof body.chatSearchEnabled === 'boolean' ? body.chatSearchEnabled : undefined,
+    })
+  })
+
+  app.post(`${API_BASE}/memory`, {
+    schema: httpSchemas.createMemory,
+  }, async (request, reply) => {
+    const user = await authenticate(request)
+    const body = readObjectBody(request)
+    const content = normalizeMemoryContent(body.content)
+    if (!content) {
+      return reply.code(400).send(
+        errorBody(request, 'invalid_request', 'content must be 1-500 characters'),
+      )
+    }
+    const memory = await createUserMemory(database, user.id, {
+      content,
+      category: normalizeMemoryCategory(body.category),
+    })
+    return reply.code(201).send(memoryDto(memory))
+  })
+
+  app.patch<{
+    Params: { memoryId: string }
+  }>(`${API_BASE}/memory/:memoryId`, {
+    schema: { params: httpSchemas.memoryIdParams, ...httpSchemas.updateMemory },
+  }, async (request, reply) => {
+    const user = await authenticate(request)
+    const memoryId = requireUuid(request, reply, request.params.memoryId, 'memoryId')
+    if (!memoryId) return
+    const body = readObjectBody(request)
+    const content = body.content === undefined ? undefined : normalizeMemoryContent(body.content)
+    if (content === null) {
+      return reply.code(400).send(
+        errorBody(request, 'invalid_request', 'content must be 1-500 characters'),
+      )
+    }
+    const memory = await editUserMemory(database, user.id, memoryId, {
+      content,
+      category: body.category === undefined ? undefined : normalizeMemoryCategory(body.category),
+    })
+    if (!memory) {
+      return reply.code(404).send(errorBody(request, 'memory_not_found', 'Memory not found'))
+    }
+    return memoryDto(memory)
+  })
+
+  app.delete<{
+    Params: { memoryId: string }
+  }>(`${API_BASE}/memory/:memoryId`, {
+    schema: { params: httpSchemas.memoryIdParams },
+  }, async (request, reply) => {
+    const user = await authenticate(request)
+    const memoryId = requireUuid(request, reply, request.params.memoryId, 'memoryId')
+    if (!memoryId) return
+    if (await deleteUserMemories(database, user.id, { ids: [memoryId] }) === 0) {
+      return reply.code(404).send(errorBody(request, 'memory_not_found', 'Memory not found'))
+    }
+    return reply.code(204).send()
+  })
+
+  app.delete(`${API_BASE}/memory`, async (request, reply) => {
+    const user = await authenticate(request)
+    await deleteUserMemories(database, user.id)
+    return reply.code(204).send()
+  })
+
   app.get(`${API_BASE}/conversations`, {
     schema: { response: httpSchemas.chatsResponse },
   }, async (request) => {
@@ -695,9 +805,10 @@ export async function buildApp(
       return
     }
 
+    const options = { incognito: body.incognito === true }
     if (body.id === undefined) {
       return reply.code(201).send(
-        await createChat(database, user.id, title),
+        await createChat(database, user.id, title, options),
       )
     }
 
@@ -706,7 +817,7 @@ export async function buildApp(
       return
     }
 
-    const chat = await createChatWithId(database, user.id, id, title)
+    const chat = await createChatWithId(database, user.id, id, title, options)
     if (!chat) {
       return reply.code(409).send(
         errorBody(request, 'conflict', 'Conversation id is already in use'),

@@ -10,22 +10,33 @@ import {
   inArray,
   lt,
   lte,
+  or,
   sql,
 } from 'drizzle-orm'
 
 import type { BackgroundWorkItem, DatabaseTransaction } from './backgroundJobs.js'
 import type { AppConfig } from './config.js'
-import {
-  countSummaryContextTokens,
-  countUserMemoryTokens,
-} from './conversationMemory.js'
+import { countSummaryContextTokens } from './conversationMemory.js'
 import type { Database } from './db.js'
 import {
+  chats,
   chatSummaries,
   messages,
   userMemories,
+  users,
 } from './db/schema.js'
 import type { TokenCounter } from './tokenBudget.js'
+import {
+  countUserMemoryTokens,
+  listUserMemories,
+  lockUserMemories,
+  normalizeMemoryCategory,
+  normalizeMemoryContent,
+  normalizeMemoryKey,
+  notSupersededMessage,
+  upsertUserMemory,
+  type UserMemoryCategory,
+} from './userMemory.js'
 
 type BackgroundUsage = {
   kind: 'summary' | 'memory'
@@ -42,9 +53,12 @@ const SUMMARY_SECTIONS = [
 ] as const
 // Older versions stay readable for generations that froze them at creation.
 const SUMMARY_KEEP_VERSIONS = 3
-const MEMORY_KEY_PATTERN = /^[a-z][a-z0-9_]{0,95}$/
-const MEMORY_CONTENT_MAX_CHARS = 200
-const MEMORY_OPERATIONS_PER_TURN = 8
+const MEMORY_OPERATIONS_PER_BATCH = 12
+// The extractor reads a few turns at once; assistant text only gives context.
+const EXTRACTION_WINDOW_TOKENS = 12_000
+const EXTRACTION_CLIP = { user: 4_000, assistant: 1_500 }
+// Routine (not over-limit) consolidation is pointless for a handful of entries.
+const ROUTINE_CONSOLIDATION_MIN_ITEMS = 8
 // Consolidate below the limits so the next turns do not trigger it again.
 const MEMORY_CONSOLIDATION_RATIO = 0.75
 // DashScope extension: background tasks do not need a reasoning trace, and
@@ -138,23 +152,13 @@ function summaryCompactionInstructions(targetTokens: number): string {
 
 export type MemoryOperation =
   | { action: 'delete'; key: string }
-  | { action: 'upsert'; key: string; content: string }
+  | { action: 'upsert'; key: string; category: UserMemoryCategory; content: string }
 
-function normalizeMemoryKey(value: unknown): string | null {
-  const key = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  return MEMORY_KEY_PATTERN.test(key) ? key : null
-}
-
-function normalizeMemoryContent(value: unknown): string | null {
-  const content = typeof value === 'string' ? value.trim() : ''
-  return content && content.length <= MEMORY_CONTENT_MAX_CHARS ? content : null
-}
-
-/** Invalid operations are dropped; the rest of the turn still applies. */
+/** Invalid operations are dropped; the rest of the batch still applies. */
 export function parseMemoryOperations(text: string): MemoryOperation[] {
   const parsed = parseJsonObject(text)
   const values = Array.isArray(parsed.operations)
-    ? parsed.operations.slice(0, MEMORY_OPERATIONS_PER_TURN)
+    ? parsed.operations.slice(0, MEMORY_OPERATIONS_PER_BATCH)
     : []
   return values.flatMap((value): MemoryOperation[] => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return []
@@ -164,21 +168,27 @@ export function parseMemoryOperations(text: string): MemoryOperation[] {
     if (operation.action === 'delete') return [{ action: 'delete', key }]
     const content = normalizeMemoryContent(operation.content)
     return operation.action === 'upsert' && content
-      ? [{ action: 'upsert', key, content }]
+      ? [{ action: 'upsert', key, category: normalizeMemoryCategory(operation.category), content }]
       : []
   })
 }
 
-export type ConsolidatedMemory = { key: string; content: string; sources: string[] }
+export type ConsolidatedMemory = {
+  key: string
+  category: UserMemoryCategory
+  content: string
+  sources: string[]
+}
 
 /**
- * A consolidation replaces the whole set, so any malformed entry rejects the
- * result instead of silently dropping that memory.
+ * A consolidation replaces the whole editable set, so any malformed entry
+ * rejects the result instead of silently dropping that memory.
  */
 export function parseConsolidatedMemories(
   text: string,
   knownKeys: string[],
   maxItems: number,
+  reservedKeys: string[] = [],
 ): ConsolidatedMemory[] {
   const parsed = parseJsonObject(text)
   if (!Array.isArray(parsed.memories)) {
@@ -191,6 +201,7 @@ export function parseConsolidatedMemories(
     throw new Error(`Consolidation response has more than ${maxItems} memories`)
   }
   const known = new Set(knownKeys)
+  const reserved = new Set(reservedKeys)
   const seen = new Set<string>()
   return parsed.memories.map((value) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -201,6 +212,7 @@ export function parseConsolidatedMemories(
     const content = normalizeMemoryContent(memory.content)
     if (!key || !content) throw new Error('Consolidation response has an invalid memory')
     if (seen.has(key)) throw new Error(`Consolidation response repeats key ${key}`)
+    if (reserved.has(key)) throw new Error(`Consolidation response overwrites user entry ${key}`)
     seen.add(key)
     const sources = Array.isArray(memory.sources)
       ? memory.sources.flatMap((source) => {
@@ -209,29 +221,23 @@ export function parseConsolidatedMemories(
         })
       : []
     if (known.has(key) && !sources.includes(key)) sources.push(key)
-    return { key, content, sources }
+    return { key, category: normalizeMemoryCategory(memory.category), content, sources }
   })
 }
 
-type StoredMemory = {
-  key: string
-  content: string
-  sourceChatId: string | null
-  updatedAt: Date
-}
-
-function memoryFingerprint(rows: StoredMemory[]): string {
-  return JSON.stringify(rows.map((row) => [row.key, row.content, row.updatedAt.getTime()]))
-}
-
-/** Serializes every write to one user's memory set across workers. */
-async function lockUserMemories(
-  transaction: DatabaseTransaction,
-  userId: string,
-): Promise<void> {
-  await transaction.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`user-memory:${userId}`}, 0))`,
+function memoryFingerprint(rows: Array<{ key: string; content: string; updatedAt: Date }>): string {
+  return JSON.stringify(
+    [...rows]
+      .sort((left, right) => left.key.localeCompare(right.key))
+      .map((row) => [row.key, row.content, row.updatedAt.getTime()]),
   )
+}
+
+/** A retryable failure: the job runs again later with a fresh snapshot. */
+export class MemorySetChangedError extends Error {
+  constructor() {
+    super('User memory set changed during extraction; retrying with a fresh snapshot')
+  }
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {
@@ -246,16 +252,86 @@ function parseJsonObject(text: string): Record<string, unknown> {
   return parsed as Record<string, unknown>
 }
 
+const CATEGORY_GUIDE = [
+  '- identity：身份与背景，如职业、单位、研究方向、专业水平、常用语言',
+  '- work：工作与长期项目，如在做的课题或项目、实验体系、物种或样本类型、长期目标',
+  '- preference：偏好与习惯，如回答风格与格式、常用软件和分析方法',
+  '- current：近期关注，如最近一段时间反复处理的问题；会过时，内容里写明起始年月',
+  '- other：确实值得长期记住但不属于以上类别的信息',
+].join('\n')
+
+export function extractionInstructions(): string {
+  return [
+    '你负责维护用户的跨会话长期记忆。阅读“新对话”，判断其中有没有值得长期记住的、关于用户本人的信息，输出对“现有记忆”的增删改操作。',
+    '可以保存的类别（必须是用户自己说出或明确确认的）：',
+    CATEGORY_GUIDE,
+    '不要保存：',
+    '- 一次性请求、临时数据、某次分析的具体结果（除非用户说明以后还要用）；',
+    '- 助手的回答、建议或推断，以及用户只是提问而没有陈述的内容；',
+    '- 敏感信息：密码、密钥、证件号、银行卡、精确住址，以及健康状况、宗教、政治倾向等，除非用户明确要求记住；',
+    '- 现有记忆里已有且没有变化的内容。',
+    '规则：',
+    '- 与现有记忆属于同一主题时复用它的 key，输出合并后的完整内容，不要新建近义 key；冲突时以新对话为准。',
+    '- 用户要求忘记某事时删除对应条目，并且不要再保存这类信息。',
+    '- source 为 user 的条目是用户亲自填写的；除非用户在新对话里明确更正，否则不要修改或删除。',
+    '- content 用第三人称写成简洁完整的中文陈述（如“用户在做土壤宏基因组的耐药基因分析”），不超过 300 字。',
+    '- “上文”只用于理解指代，不要从中提取信息。',
+    '只输出 JSON：{"operations":[{"action":"upsert","key":"snake_case","category":"identity|work|preference|current|other","content":"..."},{"action":"delete","key":"..."}]}。没有需要的操作时输出 {"operations":[]}。',
+  ].join('\n')
+}
+
+export function consolidationInstructions(input: {
+  targetItems: number
+  targetTokens: number
+  today: string
+}): string {
+  return [
+    '你负责整理用户的跨会话长期记忆，使它精简、无重复、无矛盾，读起来像一份连贯的用户画像。',
+    '类别：',
+    CATEGORY_GUIDE,
+    '要求：',
+    '- 合并重复或同一主题的条目，把零散事实改写成完整的陈述；删除已过时、被更新信息推翻或不再稳定的条目，冲突时以 updatedAt 较新的为准。',
+    `- 今天是 ${input.today}。current 类条目超过三个月没有更新的，删除或改写为 work 类的长期事实。`,
+    '- 只能改写、合并和删减，不得加入现有记忆之外的信息；身份、长期项目中的关键事实与精确数字必须保留。',
+    '- “用户填写的条目”只用于去重参考：不要输出它们，也不要输出与它们重复的内容，不能占用它们的 key。',
+    `- 最多 ${input.targetItems} 条，全部内容合计约 ${input.targetTokens} 字以内，每条不超过 300 字。`,
+    '- 尽量沿用原 key；sources 列出该条合并自的全部原 key。',
+    '只输出 JSON：{"memories":[{"key":"snake_case","category":"identity|work|preference|current|other","content":"...","sources":["原key"]}]}。',
+  ].join('\n')
+}
+
+type WindowMessage = { seq: bigint; role: string; content: string | null }
+
+function clip(text: string, limit: number): string {
+  const flat = text.trim()
+  return flat.length <= limit ? flat : `${flat.slice(0, limit)}…（已截断）`
+}
+
+function renderTurns(rows: WindowMessage[], limits: { user: number; assistant: number }): string {
+  return rows.map((row) => {
+    const role = row.role === 'user' ? '用户' : '助手'
+    return `[${role}] ${clip(row.content ?? '', row.role === 'user' ? limits.user : limits.assistant)}`
+  }).join('\n\n')
+}
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+/** The part of the model client the background jobs use. */
+export type BackgroundModelClient = Pick<OpenAI, 'responses'>
+
 export class MemoryProcessor {
-  private readonly qwen: OpenAI
+  private readonly qwen: BackgroundModelClient
 
   constructor(
     private readonly config: AppConfig,
     private readonly database: Database,
     private readonly tokenCounter: TokenCounter,
     redis?: RedisClient,
+    client?: BackgroundModelClient,
   ) {
-    this.qwen = new OpenAI({
+    this.qwen = client ?? new OpenAI({
       ...(redis ? { fetch: modelBudgetFetch(config, redis) } : {}),
       apiKey: config.qwenApiKey,
       baseURL: config.qwenBaseUrl,
@@ -309,6 +385,8 @@ export class MemoryProcessor {
           : undefined,
         lte(messages.seq, BigInt(assistantSeq)),
         sql`(${messages.role} = 'user' or (${messages.role} = 'assistant' and ${messages.status} = 'completed'))`,
+        // A reply the user regenerated is not part of the conversation.
+        notSupersededMessage(this.database),
       ))
       .orderBy(desc(messages.seq))
       .limit(2_000)
@@ -453,98 +531,142 @@ export class MemoryProcessor {
     return { text: completedText(response, label), usage: usageOf(response, kind) }
   }
 
-  private async loadMemories(
-    executor: Database | DatabaseTransaction,
-    userId: string,
-  ): Promise<StoredMemory[]> {
-    return executor
-      .select({
-        key: userMemories.key,
-        content: userMemories.content,
-        sourceChatId: userMemories.sourceChatId,
-        updatedAt: userMemories.updatedAt,
-      })
-      .from(userMemories)
-      .where(eq(userMemories.userId, userId))
-      .orderBy(desc(userMemories.updatedAt), userMemories.key)
-      .limit(this.config.userMemoryMaxItems * 2)
-  }
-
   private async extractMemory(
     job: BackgroundWorkItem,
   ): Promise<BackgroundUsage | undefined> {
     if (!this.config.userMemoryEnabled || !job.chatId) return undefined
-    const userMessageId = typeof job.payload.userMessageId === 'string'
-      ? job.payload.userMessageId
-      : ''
-    const assistantMessageId = typeof job.payload.assistantMessageId === 'string'
-      ? job.payload.assistantMessageId
-      : ''
-    if (!userMessageId || !assistantMessageId) return undefined
-
-    const turn = await this.database
+    const chatId = job.chatId
+    const [chat] = await this.database
       .select({
-        id: messages.id,
-        role: messages.role,
-        content: messages.content,
+        incognito: chats.incognito,
+        deletedAt: chats.deletedAt,
+        cursor: chats.memoryExtractedSeq,
+        memoryEnabled: users.memoryEnabled,
       })
+      .from(chats)
+      .innerJoin(users, eq(users.id, chats.userId))
+      .where(and(eq(chats.id, chatId), eq(chats.userId, job.userId)))
+      .limit(1)
+    if (!chat || chat.incognito || chat.deletedAt) return undefined
+
+    const jobSeq = await this.jobAssistantSeq(job)
+    if (jobSeq === null || jobSeq <= chat.cursor) return undefined
+
+    const [latest] = await this.database
+      .select({ seq: sql<string | null>`max(${messages.seq})` })
       .from(messages)
       .where(and(
+        eq(messages.chatId, chatId),
         eq(messages.userId, job.userId),
-        sql`${messages.id} in (${userMessageId}, ${assistantMessageId})`,
+        eq(messages.role, 'assistant'),
+        eq(messages.status, 'completed'),
+      ))
+    const latestSeq = latest?.seq ? BigInt(latest.seq) : jobSeq
+    const upTo = latestSeq > jobSeq ? latestSeq : jobSeq
+
+    if (!chat.memoryEnabled) {
+      // Memory paused: these turns never become memory, even after resuming.
+      await this.advanceCursor(this.database, job.userId, chatId, upTo)
+      return undefined
+    }
+
+    const window = await this.database
+      .select({ seq: messages.seq, role: messages.role, content: messages.content })
+      .from(messages)
+      .where(and(
+        eq(messages.chatId, chatId),
+        eq(messages.userId, job.userId),
+        gt(messages.seq, chat.cursor),
+        lte(messages.seq, upTo),
+        or(
+          eq(messages.role, 'user'),
+          and(eq(messages.role, 'assistant'), eq(messages.status, 'completed')),
+        ),
+        notSupersededMessage(this.database),
       ))
       .orderBy(asc(messages.seq))
-    if (turn.length !== 2) return undefined
+      .limit(200)
+    const pendingTurns = window.filter((row) => row.role === 'user').length
+    // A newer turn's job will read this one too, unless too many are waiting.
+    if (latestSeq > jobSeq && pendingTurns < this.config.memoryExtractionMaxPendingTurns) {
+      return undefined
+    }
+    if (pendingTurns === 0) {
+      await this.advanceCursor(this.database, job.userId, chatId, upTo)
+      return undefined
+    }
 
     await this.tokenCounter.initialize()
-    const existing = await this.loadMemories(this.database, job.userId)
+    // Keep the most recent turns that fit; older ones in a long burst are
+    // already reflected by the rolling summary and later turns.
+    const selected: WindowMessage[] = []
+    for (const row of [...window].reverse()) {
+      const next = [row, ...selected]
+      const tokens = this.tokenCounter.countText(renderTurns(next, EXTRACTION_CLIP))
+      if (selected.length > 0 && tokens > EXTRACTION_WINDOW_TOKENS) break
+      selected.unshift(row)
+    }
+    const preceding = await this.database
+      .select({ seq: messages.seq, role: messages.role, content: messages.content })
+      .from(messages)
+      .where(and(
+        eq(messages.chatId, chatId),
+        eq(messages.userId, job.userId),
+        lt(messages.seq, selected[0]!.seq),
+        or(
+          eq(messages.role, 'user'),
+          and(eq(messages.role, 'assistant'), eq(messages.status, 'completed')),
+        ),
+        notSupersededMessage(this.database),
+      ))
+      .orderBy(desc(messages.seq))
+      .limit(2)
+
+    const snapshot = await listUserMemories(this.database, job.userId, this.config.userMemoryMaxItems * 2)
     const extracted = await this.complete('Memory', 'memory', {
-      instructions: [
-        '判断本轮是否包含值得跨会话保存的稳定事实：身份、长期偏好、长期项目。',
-        '临时请求、一次性数据、模型推断、敏感凭据不得保存。用户明确要求忘记时输出 delete。',
-        '与现有记忆属于同一主题时，复用其 key 并输出合并后的完整内容，不要新建近义 key；与现有记忆冲突时以本轮信息覆盖。',
-        '只输出 JSON：{"operations":[{"action":"upsert|delete","key":"snake_case","content":"不超过200字"}]}。无操作则 operations 为空数组。',
-      ].join('\n'),
+      instructions: extractionInstructions(),
       input: [
-        `现有记忆：${JSON.stringify(existing.map(({ key, content }) => ({ key, content })))}`,
-        `本轮：${JSON.stringify(turn)}`,
-      ].join('\n\n'),
-      max_output_tokens: Math.min(1_024, this.config.backgroundMaxOutputTokens),
+        `今天：${today()}`,
+        `现有记忆：${JSON.stringify(snapshot.map(({ key, category, content, source }) => ({ key, category, content, source })))}`,
+        preceding.length > 0
+          ? `上文（仅用于理解指代）：\n${renderTurns(preceding.reverse(), { user: 600, assistant: 600 })}`
+          : '',
+        `新对话：\n${renderTurns(selected, EXTRACTION_CLIP)}`,
+      ].filter(Boolean).join('\n\n'),
+      max_output_tokens: Math.min(2_048, this.config.backgroundMaxOutputTokens),
     })
     const operations = parseMemoryOperations(extracted.text)
 
-    if (operations.length > 0) {
-      await this.database.transaction(async (transaction) => {
-        await lockUserMemories(transaction, job.userId)
+    await this.database.transaction(async (transaction) => {
+      await lockUserMemories(transaction, job.userId)
+      if (operations.length > 0) {
+        const current = await listUserMemories(transaction, job.userId, this.config.userMemoryMaxItems * 2)
+        // Another chat or the user changed the set since the prompt was
+        // built; retry so the model sees it instead of adding near-duplicates.
+        if (memoryFingerprint(current) !== memoryFingerprint(snapshot)) {
+          throw new MemorySetChangedError()
+        }
+        const byKey = new Map(current.map((row) => [row.key, row]))
         for (const operation of operations) {
           if (operation.action === 'delete') {
             await transaction
               .delete(userMemories)
-              .where(and(
-                eq(userMemories.userId, job.userId),
-                eq(userMemories.key, operation.key),
-              ))
+              .where(and(eq(userMemories.userId, job.userId), eq(userMemories.key, operation.key)))
             continue
           }
-          await transaction
-            .insert(userMemories)
-            .values({
-              userId: job.userId,
-              key: operation.key,
-              content: operation.content,
-              sourceChatId: job.chatId!,
-            })
-            .onConflictDoUpdate({
-              target: [userMemories.userId, userMemories.key],
-              set: {
-                content: operation.content,
-                sourceChatId: job.chatId!,
-                updatedAt: new Date(),
-              },
-            })
+          await upsertUserMemory(transaction, {
+            userId: job.userId,
+            key: operation.key,
+            category: operation.category,
+            content: operation.content,
+            // A correction of a user-written entry stays the user's.
+            source: byKey.get(operation.key)?.source === 'user' ? 'user' : 'auto',
+            sourceChatId: chatId,
+          })
         }
-      })
-    }
+      }
+      await this.advanceCursor(transaction, job.userId, chatId, upTo)
+    })
 
     const consolidated = await this.consolidateMemories(job.userId)
     return consolidated
@@ -552,41 +674,90 @@ export class MemoryProcessor {
       : extracted.usage
   }
 
+  private async jobAssistantSeq(job: BackgroundWorkItem): Promise<bigint | null> {
+    if (typeof job.payload.assistantSeq === 'number' && Number.isSafeInteger(job.payload.assistantSeq)) {
+      return BigInt(job.payload.assistantSeq)
+    }
+    // Jobs queued before assistantSeq was added name the message instead.
+    const messageId = typeof job.payload.assistantMessageId === 'string'
+      ? job.payload.assistantMessageId
+      : ''
+    if (!messageId) return null
+    const [row] = await this.database
+      .select({ seq: messages.seq })
+      .from(messages)
+      .where(and(eq(messages.userId, job.userId), eq(messages.id, messageId)))
+      .limit(1)
+    return row?.seq ?? null
+  }
+
+  private async advanceCursor(
+    executor: Database | DatabaseTransaction,
+    userId: string,
+    chatId: string,
+    seq: bigint,
+  ): Promise<void> {
+    await executor
+      .update(chats)
+      .set({ memoryExtractedSeq: sql`greatest(${chats.memoryExtractedSeq}, ${seq})` })
+      .where(and(eq(chats.id, chatId), eq(chats.userId, userId)))
+  }
+
   /**
-   * Keeps a user's memory set within USER_MEMORY_MAX_ITEMS and
-   * USER_MEMORY_TOKEN_BUDGET by asking the model to merge, dedupe and drop
-   * stale entries. Best effort: a failed attempt leaves the set unchanged and
-   * the next extraction retries, while injection still enforces the budget.
+   * Keeps a user's memory set concise. Runs when the set exceeds
+   * USER_MEMORY_MAX_ITEMS or USER_MEMORY_TOKEN_BUDGET, and otherwise at most
+   * once per MEMORY_CONSOLIDATION_INTERVAL_HOURS after the set changed, so
+   * duplicates and contradictions below the limits are cleaned up too.
+   * Entries the user wrote are never rewritten. Best effort: a failed attempt
+   * leaves the set unchanged, while injection still enforces the budget.
    */
   private async consolidateMemories(
     userId: string,
   ): Promise<BackgroundUsage | undefined> {
     const maxItems = this.config.userMemoryMaxItems
     const budgetTokens = this.config.userMemoryTokenBudget
-    const snapshot = await this.loadMemories(this.database, userId)
-    if (
-      snapshot.length <= maxItems &&
-      countUserMemoryTokens(this.tokenCounter, snapshot) <= budgetTokens
-    ) return undefined
+    const snapshot = await listUserMemories(this.database, userId, maxItems * 2)
+    const overLimit = snapshot.length > maxItems ||
+      countUserMemoryTokens(this.tokenCounter, snapshot) > budgetTokens
+    if (!overLimit) {
+      if (snapshot.length < ROUTINE_CONSOLIDATION_MIN_ITEMS) return undefined
+      const [user] = await this.database
+        .select({ consolidatedAt: users.memoryConsolidatedAt })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1)
+      const consolidatedAt = user?.consolidatedAt?.getTime() ?? 0
+      const due = Date.now() - consolidatedAt >= this.config.memoryConsolidationIntervalHours * 3_600_000
+      const changed = snapshot.some((row) => row.updatedAt.getTime() > consolidatedAt)
+      if (!due || !changed) return undefined
+    }
 
-    const targetItems = Math.floor(maxItems * MEMORY_CONSOLIDATION_RATIO)
-    const targetTokens = Math.floor(budgetTokens * MEMORY_CONSOLIDATION_RATIO)
+    const pinned = snapshot.filter((row) => row.source === 'user')
+    const editable = snapshot.filter((row) => row.source !== 'user')
+    if (editable.length === 0) return undefined
+    const pinnedTokens = countUserMemoryTokens(this.tokenCounter, pinned)
+    const targetItems = Math.max(1, Math.floor(maxItems * MEMORY_CONSOLIDATION_RATIO) - pinned.length)
+    const targetTokens = Math.max(
+      128,
+      Math.floor(budgetTokens * MEMORY_CONSOLIDATION_RATIO) - pinnedTokens,
+    )
+    const markConsolidated = () => this.database
+      .update(users)
+      .set({ memoryConsolidatedAt: sql`now()` })
+      .where(eq(users.id, userId))
     let result: { text: string; usage: BackgroundUsage }
     try {
       result = await this.complete('Memory consolidation', 'memory', {
-        instructions: [
-          '你负责整理用户的跨会话记忆，使其精简、无重复、无矛盾。',
-          '合并重复或同一主题的条目；删除已过时、被更新信息推翻或不再稳定的条目，冲突时以 updatedAt 较新的为准。',
-          '只能改写、合并和删减，不得加入现有记忆之外的信息；身份、长期偏好、长期项目中的关键事实与精确数字必须保留。',
-          `最多 ${targetItems} 条，全部内容合计约 ${targetTokens} 字以内，每条不超过 ${MEMORY_CONTENT_MAX_CHARS} 字。`,
-          '尽量沿用原 key；sources 列出该条合并自的全部原 key。',
-          '只输出 JSON：{"memories":[{"key":"snake_case","content":"...","sources":["原key"]}]}。',
-        ].join('\n'),
-        input: JSON.stringify(snapshot.map((row) => ({
-          key: row.key,
-          content: row.content,
-          updatedAt: row.updatedAt.toISOString(),
-        }))),
+        instructions: consolidationInstructions({ targetItems, targetTokens, today: today() }),
+        input: [
+          `用户填写的条目（不可修改，仅供去重参考）：${JSON.stringify(pinned.map(({ key, category, content }) => ({ key, category, content })))}`,
+          `待整理的条目：${JSON.stringify(editable.map((row) => ({
+            key: row.key,
+            category: row.category,
+            content: row.content,
+            updatedAt: row.updatedAt.toISOString(),
+          })))}`,
+        ].join('\n\n'),
         max_output_tokens: this.config.backgroundMaxOutputTokens,
       })
     } catch (error) {
@@ -600,48 +771,51 @@ export class MemoryProcessor {
     try {
       const memories = parseConsolidatedMemories(
         result.text,
-        snapshot.map((row) => row.key),
-        maxItems,
+        editable.map((row) => row.key),
+        targetItems,
+        pinned.map((row) => row.key),
       )
-      if (countUserMemoryTokens(this.tokenCounter, memories) > budgetTokens) {
+      const merged = [
+        ...pinned,
+        ...memories.map((memory) => ({ ...memory, source: 'auto' as const, updatedAt: new Date() })),
+      ]
+      if (countUserMemoryTokens(this.tokenCounter, merged) > budgetTokens) {
         throw new Error('Consolidated memories exceed USER_MEMORY_TOKEN_BUDGET')
       }
       await this.database.transaction(async (transaction) => {
         await lockUserMemories(transaction, userId)
-        const current = await this.loadMemories(transaction, userId)
-        // Another job changed the set meanwhile; the next extraction retries.
+        const current = await listUserMemories(transaction, userId, maxItems * 2)
+        // Another job changed the set meanwhile; a later run retries.
         if (memoryFingerprint(current) !== memoryFingerprint(snapshot)) return
         await transaction
           .delete(userMemories)
           .where(and(
             eq(userMemories.userId, userId),
-            inArray(userMemories.key, snapshot.map((row) => row.key)),
+            inArray(userMemories.key, editable.map((row) => row.key)),
           ))
         for (const memory of memories) {
           // Snapshot rows are newest first, so this is the most recent source.
-          // Deleting that chat cascades to the merged memory.
-          const source = snapshot.find((row) => memory.sources.includes(row.key))
-          const updatedAt = source?.updatedAt ?? new Date()
-          await transaction
-            .insert(userMemories)
-            .values({
-              userId,
-              key: memory.key,
-              content: memory.content,
-              sourceChatId: source?.sourceChatId ?? null,
-              updatedAt,
-            })
-            .onConflictDoUpdate({
-              target: [userMemories.userId, userMemories.key],
-              set: {
-                content: memory.content,
-                sourceChatId: source?.sourceChatId ?? null,
-                updatedAt,
-              },
-            })
+          // Deleting that chat removes the merged memory.
+          const source = editable.find((row) => memory.sources.includes(row.key))
+          await transaction.insert(userMemories).values({
+            userId,
+            key: memory.key,
+            category: memory.category,
+            content: memory.content,
+            source: source?.source ?? 'auto',
+            sourceChatId: source?.sourceChatId ?? null,
+            createdAt: source?.createdAt ?? new Date(),
+            updatedAt: source?.updatedAt ?? new Date(),
+          })
         }
+        await transaction
+          .update(users)
+          .set({ memoryConsolidatedAt: sql`now()` })
+          .where(eq(users.id, userId))
       })
     } catch (error) {
+      // Do not retry a rejected routine run on every extraction.
+      if (!overLimit) await markConsolidated().catch(() => undefined)
       console.warn('User memory consolidation rejected', {
         userId,
         error: error instanceof Error ? error.message : String(error),

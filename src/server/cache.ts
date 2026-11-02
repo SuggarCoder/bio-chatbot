@@ -256,7 +256,7 @@ function budgetedContextKey(
 ): string {
   return redisKey(
     config,
-    `chat:ctx:v2:${input.policyFingerprint}:${input.chatId}:${input.contextMaxSeq}:${input.summaryVersion ?? 0}`,
+    `chat:ctx:v3:${input.policyFingerprint}:${input.chatId}:${input.contextMaxSeq}:${input.summaryVersion ?? 0}`,
   )
 }
 

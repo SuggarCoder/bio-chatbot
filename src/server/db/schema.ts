@@ -74,6 +74,11 @@ export const users = pgTable(
     maxQueuedGenerations: integer('maxQueuedGenerations')
       .notNull()
       .default(5),
+    /** Cross-chat memory: use and update UserMemory for this user. */
+    memoryEnabled: boolean('memoryEnabled').notNull().default(true),
+    /** Let the model search and list the user's other chats. */
+    chatSearchEnabled: boolean('chatSearchEnabled').notNull().default(true),
+    memoryConsolidatedAt: timestampTz('memoryConsolidatedAt'),
     createdAt: timestampTz('createdAt').notNull().defaultNow(),
     updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
     deletedAt: timestampTz('deletedAt'),
@@ -120,6 +125,10 @@ export const chats = pgTable(
       { onDelete: 'set null' },
     ),
     forkedFromSeq: bigintValue('forkedFromSeq'),
+    /** Incognito chats never read or write memory and are never searched. */
+    incognito: boolean('incognito').notNull().default(false),
+    /** Highest message seq the memory extractor has already read. */
+    memoryExtractedSeq: bigintValue('memoryExtractedSeq').notNull().default(sql`0`),
     createdAt: timestampTz('createdAt').notNull().defaultNow(),
     updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
     deletedAt: timestampTz('deletedAt'),
@@ -239,6 +248,7 @@ export const messages = pgTable(
     uniqueIndex('uq_message_client_id')
       .on(table.chatId, table.clientMessageId)
       .where(sql`${table.clientMessageId} is not null`),
+    index('idx_message_user_created').on(table.userId, table.createdAt.desc()),
   ],
 )
 
@@ -517,15 +527,38 @@ export const chatSummaries = pgTable(
   ],
 )
 
+export const USER_MEMORY_CATEGORIES = [
+  'identity',
+  'work',
+  'preference',
+  'current',
+  'other',
+] as const
+export type UserMemoryCategory = typeof USER_MEMORY_CATEGORIES[number]
+export const USER_MEMORY_SOURCES = ['auto', 'user', 'tool'] as const
+export type UserMemorySource = typeof USER_MEMORY_SOURCES[number]
+export const USER_MEMORY_CONTENT_MAX_CHARS = 500
+
 export const userMemories = pgTable(
   'UserMemory',
   {
+    id: uuid('id').defaultRandom().notNull().unique(),
     userId: uuid('userId')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     key: varchar('key', { length: 96 }).notNull(),
-    content: varchar('content', { length: 200 }).notNull(),
+    category: varchar('category', { length: 24 })
+      .$type<UserMemoryCategory>()
+      .notNull()
+      .default('other'),
+    content: varchar('content', { length: USER_MEMORY_CONTENT_MAX_CHARS }).notNull(),
+    /** auto: background extraction; user: edited in settings; tool: the model on request. */
+    source: varchar('source', { length: 16 })
+      .$type<UserMemorySource>()
+      .notNull()
+      .default('auto'),
     sourceChatId: uuid('sourceChatId'),
+    createdAt: timestampTz('createdAt').notNull().defaultNow(),
     updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
   },
   (table) => [
@@ -533,7 +566,15 @@ export const userMemories = pgTable(
     check('chk_user_memory_key', sql`length(trim(${table.key})) > 0`),
     check(
       'chk_user_memory_content',
-      sql`length(trim(${table.content})) between 1 and 200`,
+      sql`length(trim(${table.content})) between 1 and 500`,
+    ),
+    check(
+      'chk_user_memory_category',
+      sql`${table.category} in ('identity', 'work', 'preference', 'current', 'other')`,
+    ),
+    check(
+      'chk_user_memory_source',
+      sql`${table.source} in ('auto', 'user', 'tool')`,
     ),
     foreignKey({
       name: 'fk_user_memory_source_chat',

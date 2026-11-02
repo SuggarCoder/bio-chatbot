@@ -323,3 +323,49 @@ export class AgentToolbox {
       : null
   }
 }
+
+/**
+ * What the generation loop needs from a set of model tools. GPAS tools are
+ * bound to the run's identity session; local tools (memory, chat search)
+ * run against the database with the generation's own user.
+ */
+export interface ToolRunner {
+  readonly tools: OpenAI.Responses.FunctionTool[]
+  has(name: string): boolean
+  /** The step label shown while the tool runs. */
+  label(name: string): string
+  instructions(): string
+  execute(call: AgentFunctionCall): Promise<AgentToolResult>
+}
+
+export function bindToolSet(set: AgentToolSet, session: AgentSession): ToolRunner {
+  return {
+    tools: set.tools,
+    has: (name) => set.title(name) !== undefined,
+    label: (name) => {
+      const title = set.title(name) ?? '业务数据'
+      return set.effect(name) === 'prepare_confirmation' ? `准备${title}` : `查询${title}`
+    },
+    instructions: () => set.instructions(),
+    execute: (call) => set.execute(call, session),
+  }
+}
+
+/** Offers several runners as one; a call goes to the runner that owns its name. */
+export function combineToolRunners(...runners: Array<ToolRunner | null | undefined>): ToolRunner | null {
+  const active = runners.filter((runner): runner is ToolRunner => Boolean(runner && runner.tools.length > 0))
+  if (active.length === 0) return null
+  if (active.length === 1) return active[0]!
+  const owner = (name: string) => active.find((runner) => runner.has(name))
+  return {
+    tools: active.flatMap((runner) => runner.tools),
+    has: (name) => Boolean(owner(name)),
+    label: (name) => owner(name)?.label(name) ?? '调用工具',
+    // Static text first, so the provider's prefix cache keeps hitting.
+    instructions: () => active.map((runner) => runner.instructions()).filter(Boolean).join('\n\n'),
+    execute: async (call) => {
+      const runner = owner(call.name)
+      return runner ? runner.execute(call) : failure('该工具在本次对话中不可用。')
+    },
+  }
+}

@@ -103,6 +103,8 @@ export type ChatSummaryDto = {
   title: string
   chatType: string
   status: string
+  /** Never reads or writes memory and is excluded from chat search. */
+  incognito: boolean
   createdAt: string
   updatedAt: string
 }
@@ -232,11 +234,67 @@ export async function fetchChats() {
 }
 
 /** `id` is chosen by the client; repeating the request returns the same chat. */
-export function createChat(title: string, id: string) {
+export function createChat(title: string, id: string, options: { incognito?: boolean } = {}) {
   return requestJson<ChatSummaryDto>('/conversations', {
     method: 'POST',
-    body: JSON.stringify({ id, title }),
+    body: JSON.stringify({ id, title, ...(options.incognito ? { incognito: true } : {}) }),
   })
+}
+
+export type MemoryCategory = 'identity' | 'work' | 'preference' | 'current' | 'other'
+
+export type MemoryEntryDto = {
+  id: string
+  category: MemoryCategory
+  content: string
+  /** auto: learned from chats; user: written in settings; tool: saved on request in a chat. */
+  source: 'auto' | 'user' | 'tool'
+  sourceChatId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type MemorySettingsDto = {
+  memoryEnabled: boolean
+  chatSearchEnabled: boolean
+}
+
+export function fetchMemory() {
+  return requestJson<{ settings: MemorySettingsDto; memories: MemoryEntryDto[] }>('/memory')
+}
+
+export function updateMemorySettings(settings: Partial<MemorySettingsDto>) {
+  return requestJson<MemorySettingsDto>('/memory/settings', {
+    method: 'PATCH',
+    body: JSON.stringify(settings),
+  })
+}
+
+export function createMemory(content: string, category: MemoryCategory) {
+  return requestJson<MemoryEntryDto>('/memory', {
+    method: 'POST',
+    body: JSON.stringify({ content, category }),
+  })
+}
+
+export function updateMemory(id: string, input: { content?: string; category?: MemoryCategory }) {
+  return requestJson<MemoryEntryDto>(`/memory/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  })
+}
+
+async function requestNoContent(path: string, init: RequestInit): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, { ...init, credentials: 'include' })
+  if (!response.ok) throw await parseApiError(response)
+}
+
+export function deleteMemory(id: string) {
+  return requestNoContent(`/memory/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function deleteAllMemories() {
+  return requestNoContent('/memory', { method: 'DELETE' })
 }
 
 export async function fetchChat(chatId: string) {

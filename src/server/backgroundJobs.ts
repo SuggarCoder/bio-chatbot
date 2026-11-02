@@ -35,8 +35,11 @@ export async function enqueueBackgroundJob(
     dedupeKey: string
     chatId?: string
     payload?: Record<string, unknown>
+    /** Not runnable before this many seconds; reconcile picks it up when due. */
+    delaySeconds?: number
   },
 ): Promise<string | null> {
+  const delay = Math.max(0, Math.floor(input.delaySeconds ?? 0))
   const [job] = await database
     .insert(backgroundJobs)
     .values({
@@ -45,6 +48,7 @@ export async function enqueueBackgroundJob(
       dedupeKey: input.dedupeKey,
       chatId: input.chatId,
       payload: input.payload ?? {},
+      ...(delay > 0 ? { availableAt: sql`now() + make_interval(secs => ${delay})` } : {}),
     })
     .onConflictDoNothing({ target: backgroundJobs.dedupeKey })
     .returning({ id: backgroundJobs.id })

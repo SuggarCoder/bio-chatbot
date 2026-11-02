@@ -40,8 +40,24 @@ const chatSummary = z.object({
   title: z.string(),
   chatType: z.string(),
   status: z.string(),
+  incognito: z.boolean(),
   createdAt: isoDate,
   updatedAt: isoDate,
+})
+
+const memoryCategory = z.enum(['identity', 'work', 'preference', 'current', 'other'])
+const memoryEntry = z.object({
+  id: uuid,
+  category: memoryCategory,
+  content: z.string(),
+  source: z.enum(['auto', 'user', 'tool']),
+  sourceChatId: uuid.nullable(),
+  createdAt: isoDate,
+  updatedAt: isoDate,
+})
+const memorySettings = z.object({
+  memoryEnabled: z.boolean(),
+  chatSearchEnabled: z.boolean(),
 })
 
 const messagePart = z.discriminatedUnion('type', [
@@ -260,8 +276,32 @@ export const httpSchemas = {
     body: jsonSchema(z.object({
       id: uuid.optional(),
       title: z.string().trim().min(1).max(200),
+      incognito: z.boolean().optional(),
     })),
     response: { 201: jsonSchema(chatSummary), ...errorResponses },
+  },
+  memoryIdParams: jsonSchema(z.object({ memoryId: uuid })),
+  memoryResponse: {
+    200: jsonSchema(z.object({ settings: memorySettings, memories: z.array(memoryEntry) })),
+    ...errorResponses,
+  },
+  memorySettings: {
+    body: jsonSchema(memorySettings.partial()),
+    response: { 200: jsonSchema(memorySettings), ...errorResponses },
+  },
+  createMemory: {
+    body: jsonSchema(z.object({
+      content: z.string().trim().min(1).max(500),
+      category: memoryCategory.optional(),
+    })),
+    response: { 201: jsonSchema(memoryEntry), ...errorResponses },
+  },
+  updateMemory: {
+    body: jsonSchema(z.object({
+      content: z.string().trim().min(1).max(500).optional(),
+      category: memoryCategory.optional(),
+    })),
+    response: { 200: jsonSchema(memoryEntry), ...errorResponses },
   },
   renameChat: {
     body: jsonSchema(z.object({

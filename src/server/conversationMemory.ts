@@ -5,31 +5,33 @@ import {
   gt,
   lt,
   lte,
-  notExists,
   or,
-  sql,
 } from 'drizzle-orm'
-import { alias } from 'drizzle-orm/pg-core'
 
 import type { Database, ChatContext } from './db.js'
 import {
   chats,
   chatSummaries,
-  generations,
   messages,
-  userMemories,
 } from './db/schema.js'
 import type { TokenCounter } from './tokenBudget.js'
+import { notSupersededMessage } from './userMemory.js'
 
-const SUMMARY_PREFIX = '以下是本会话早期内容的摘要'
-const USER_MEMORY_HEADER = '跨会话用户记忆（仅在相关时使用，不要向用户披露内部存储格式）：'
-
-/** The exact message the context builder injects for a stored summary. */
+/**
+ * The exact message the context builder injects for a stored summary. It is
+ * sent in the user turn position, so it says plainly that the user did not
+ * write it.
+ */
 export function renderSummaryContext(
   coveredMaxSeq: bigint | number,
   summary: string,
 ): string {
-  return `${SUMMARY_PREFIX}（覆盖至 seq ${coveredMaxSeq}）：\n${summary}`
+  return [
+    `<conversation_summary covered_through_seq="${coveredMaxSeq}">`,
+    '【系统消息，不是用户发言】以下是本会话更早内容的自动摘要，后面紧接的是摘要之后的原始对话。用它理解上文，不要回复或复述这段摘要。',
+    summary,
+    '</conversation_summary>',
+  ].join('\n')
 }
 
 /** Tokens a stored summary costs against CHAT_SUMMARY_TOKEN_BUDGET. */
@@ -42,23 +44,6 @@ export function countSummaryContextTokens(
     role: 'user',
     content: renderSummaryContext(coveredMaxSeq, summary),
   }])
-}
-
-export type UserMemoryEntry = { key: string; content: string }
-
-export function renderUserMemoryLine(entry: UserMemoryEntry): string {
-  return `- ${entry.key}: ${entry.content}`
-}
-
-/** Tokens the full memory set would cost if every entry were injected. */
-export function countUserMemoryTokens(
-  tokenCounter: TokenCounter,
-  entries: UserMemoryEntry[],
-): number {
-  if (entries.length === 0) return 0
-  return tokenCounter.countText(
-    [USER_MEMORY_HEADER, ...entries.map(renderUserMemoryLine)].join('\n'),
-  )
 }
 
 export type BudgetedContextResult = ChatContext & {
@@ -128,8 +113,6 @@ export async function buildBudgetedChatContext(
     ? safeNumber(summary.coveredMaxSeq)
     : 0
 
-  const original = alias(generations, 'context_original')
-  const replacement = alias(generations, 'context_replacement')
   const selected: Array<{
     seq: number
     role: 'user' | 'assistant'
@@ -159,19 +142,7 @@ export async function buildBudgetedChatContext(
           eq(messages.role, 'user'),
           and(eq(messages.role, 'assistant'), eq(messages.status, 'completed')),
         ),
-        notExists(
-          database
-            .select({ value: sql`1` })
-            .from(original)
-            .innerJoin(
-              replacement,
-              eq(replacement.supersedesGenerationId, original.id),
-            )
-            .where(and(
-              eq(original.assistantMessageId, messages.id),
-              eq(replacement.status, 'completed'),
-            )),
-        ),
+        notSupersededMessage(database),
       ))
       .orderBy(desc(messages.seq))
       .limit(100)
@@ -220,34 +191,4 @@ export async function buildBudgetedChatContext(
     summaryTokens: usableSummary ? summaryTokens : 0,
     omittedUnsummarized,
   }
-}
-
-/**
- * The worker keeps each user's memory set within the token budget, so normally
- * every entry fits; the per-line check only guards against a set that has not
- * been consolidated yet.
- */
-export async function buildUserMemoryInstructions(
-  database: Database,
-  userId: string,
-  input: { tokenBudget: number; maxItems: number; tokenCounter: TokenCounter },
-): Promise<string> {
-  await input.tokenCounter.initialize()
-  const rows = await database
-    .select({
-      key: userMemories.key,
-      content: userMemories.content,
-    })
-    .from(userMemories)
-    .where(eq(userMemories.userId, userId))
-    .orderBy(desc(userMemories.updatedAt), userMemories.key)
-    .limit(input.maxItems * 2)
-
-  const lines = [USER_MEMORY_HEADER]
-  for (const row of rows) {
-    const line = renderUserMemoryLine(row)
-    if (input.tokenCounter.countText([...lines, line].join('\n')) > input.tokenBudget) break
-    lines.push(line)
-  }
-  return lines.length > 1 ? lines.join('\n') : ''
 }

@@ -8,6 +8,13 @@
       "when": 1791728839294,
       "tag": "0000_baseline",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793616248148,
+      "tag": "0001_memory_v2",
+      "breakpoints": true
     }
   ]
 }

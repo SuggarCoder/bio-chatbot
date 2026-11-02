@@ -71,6 +71,7 @@ export {
   verifyCoreSchema,
 } from './db/client.js'
 export type { Database } from './db/client.js'
+import { forgetChatMemories, lockUserMemories } from './userMemory.js'
 
 type MessageRow = {
   id: string
@@ -107,6 +108,7 @@ const chatSelection = {
   title: chats.title,
   chatType: chats.chatType,
   status: chats.status,
+  incognito: chats.incognito,
   createdAt: chats.createdAt,
   updatedAt: chats.updatedAt,
 }
@@ -199,6 +201,7 @@ function mapChat(row: typeof chats.$inferSelect): ChatSummaryDto {
     title: row.title,
     chatType: row.chatType,
     status: row.status,
+    incognito: row.incognito,
     createdAt: asIso(row.createdAt),
     updatedAt: asIso(row.updatedAt),
   }
@@ -222,10 +225,11 @@ export async function createChat(
   database: Database,
   userId: string,
   title: string,
+  options: { incognito?: boolean } = {},
 ): Promise<ChatSummaryDto> {
   const [row] = await database
     .insert(chats)
-    .values({ userId, title })
+    .values({ userId, title, incognito: options.incognito ?? false })
     .returning(chatSelection)
 
   return mapChat(row as typeof chats.$inferSelect)
@@ -241,10 +245,11 @@ export async function createChatWithId(
   userId: string,
   id: string,
   title: string,
+  options: { incognito?: boolean } = {},
 ): Promise<ChatSummaryDto | null> {
   const [created] = await database
     .insert(chats)
-    .values({ id, userId, title })
+    .values({ id, userId, title, incognito: options.incognito ?? false })
     .onConflictDoNothing({ target: chats.id })
     .returning(chatSelection)
 
@@ -291,19 +296,24 @@ export async function deleteChat(
   userId: string,
   chatId: string,
 ): Promise<boolean> {
-  const rows = await database
-    .update(chats)
-    .set({ deletedAt: sql`now()` })
-    .where(
-      and(
-        eq(chats.id, chatId),
-        eq(chats.userId, userId),
-        isNull(chats.deletedAt),
-      ),
-    )
-    .returning({ id: chats.id })
-
-  return rows.length > 0
+  return database.transaction(async (transaction) => {
+    const rows = await transaction
+      .update(chats)
+      .set({ deletedAt: sql`now()` })
+      .where(
+        and(
+          eq(chats.id, chatId),
+          eq(chats.userId, userId),
+          isNull(chats.deletedAt),
+        ),
+      )
+      .returning({ id: chats.id })
+    if (rows.length === 0) return false
+    // What the model learned from a deleted chat goes with it.
+    await lockUserMemories(transaction, userId)
+    await forgetChatMemories(transaction, userId, chatId)
+    return true
+  })
 }
 
 /**
@@ -1853,6 +1863,8 @@ export type FinalizeGenerationInput = {
   executionSteps?: MessageExecutionStep[]
   enqueueSummaryJob?: boolean
   enqueueUserMemoryJob?: boolean
+  /** Extraction waits for the chat to go quiet, so a burst is read once. */
+  userMemoryJobDelaySeconds?: number
 }
 
 export type FinalizedGeneration = {
@@ -2064,10 +2076,12 @@ export async function finalizeGeneration(
             type: 'user.memory',
             dedupeKey: `user.memory:${input.generationId}`,
             chatId: row.chatId,
+            delaySeconds: input.userMemoryJobDelaySeconds,
             payload: {
               generationId: input.generationId,
               userMessageId: row.userMessageId,
               assistantMessageId: messageId,
+              assistantSeq: Number(messageRow.seq),
             },
           })
         }

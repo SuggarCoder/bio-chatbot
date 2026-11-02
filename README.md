@@ -88,7 +88,8 @@ npm run build
 记忆功能由独立开关控制，Artifact 上下文始终按大小分两档：
 
 - `CONTEXT_MEMORY_ENABLED`：按 token 预算装载最近原文，并注入创建请求时冻结的滚动摘要版本。摘要以 `SUMMARY_TARGET_TOKENS` 为目标长度，超过目标 1.25 倍时再压缩一次；被截断、缺少章节或超过 `CHAT_SUMMARY_TOKEN_BUDGET` 的摘要不会入库。每个会话只保留最近 3 个版本（更早且超过 1 天的版本会被清理）。
-- `USER_MEMORY_ENABLED`：异步提取稳定的跨会话事实。条目数超过 `USER_MEMORY_MAX_ITEMS` 或总量超过 `USER_MEMORY_TOKEN_BUDGET` 时，后台模型会合并重复、删除过时条目，把集合压回上限的 75%，因此存下的记忆都能完整注入。
+- `USER_MEMORY_ENABLED`：跨会话用户记忆。会话安静 `MEMORY_EXTRACTION_DELAY_SECONDS` 秒后（或积压 `MEMORY_EXTRACTION_MAX_PENDING_TURNS` 轮时）一次读取多轮对话，提取身份、长期项目、偏好、近期关注四类事实；条目超过 `USER_MEMORY_MAX_ITEMS`/`USER_MEMORY_TOKEN_BUDGET` 时立即整理，否则最多每 `MEMORY_CONSOLIDATION_INTERVAL_HOURS` 小时整理一次。用户手动填写的条目不会被改写。模型在用户要求时可通过 `memory__save`/`memory__delete` 即时增删记忆。
+- `CHAT_SEARCH_ENABLED`：允许模型通过 `chat__search`/`chat__recent` 检索用户的其他历史会话（排除无痕和已删除会话）。用户可在“记忆”设置中分别关闭记忆和历史检索；无痕会话不读写记忆。详见 [docs/memory.md](docs/memory.md)。
 - Artifact 上下文：选中的 Artifact 不超过 `ARTIFACT_FULL_CONTENT_TOKEN_BUDGET`（默认 40960 token）时整篇附上；更大的在请求时从当前版本提取结构大纲，由后台模型（`BACKGROUND_MODEL`）按大纲和用户请求挑选最多 8 个章节附上原文，总量不超过 `ARTIFACT_FRAGMENT_TOKEN_BUDGET`。不使用向量模型或预建索引。
 - `ARTIFACT_PATCH_ENABLED`：大于等于 32 KiB 的 Artifact 只接受唯一匹配的 SEARCH/REPLACE 补丁，应用后执行语法校验；失败会带校验错误自动重试一次。关闭时这类 Artifact 只读。
 

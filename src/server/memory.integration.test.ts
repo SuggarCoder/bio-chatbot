@@ -1,0 +1,299 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { eq, inArray } from 'drizzle-orm'
+
+import { createMemoryToolRunner } from './agent/memoryTools.js'
+import type { BackgroundWorkItem } from './backgroundJobs.js'
+import type { AppConfig } from './config.js'
+import {
+  closeDatabase,
+  createDatabase,
+  deleteChat,
+  migrateDatabase,
+} from './db.js'
+import { chats, messages, userMemories, users } from './db/schema.js'
+import { MemoryProcessor, type BackgroundModelClient } from './memoryWorker.js'
+import { CharacterTokenCounter } from './tokenBudget.js'
+import {
+  listRecentUserChats,
+  listUserMemories,
+  resolveMemoryAccess,
+  searchUserChats,
+  updateMemorySettings,
+  upsertUserMemory,
+} from './userMemory.js'
+
+const databaseUrl = process.env.TEST_DATABASE_URL
+
+const config = {
+  userMemoryEnabled: true,
+  contextMemoryEnabled: true,
+  chatSearchEnabled: true,
+  userMemoryMaxItems: 40,
+  userMemoryTokenBudget: 2_048,
+  backgroundModel: 'test-model',
+  backgroundMaxOutputTokens: 2_048,
+  memoryExtractionMaxPendingTurns: 6,
+  memoryConsolidationIntervalHours: 24,
+  chatHistoryTokenBudget: 32_768,
+} as AppConfig
+
+type Request = { instructions: string; input: string }
+
+function fakeModel(respond: (request: Request) => unknown | Promise<unknown>) {
+  const requests: Request[] = []
+  const client = {
+    responses: {
+      create: async (request: Request) => {
+        requests.push(request)
+        const body = await respond(request)
+        return {
+          status: 'completed',
+          output_text: JSON.stringify(body),
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }
+      },
+    },
+  } as unknown as BackgroundModelClient
+  return { client, requests }
+}
+
+function memoryJob(userId: string, chatId: string, assistantSeq: number): BackgroundWorkItem {
+  return {
+    jobId: crypto.randomUUID(),
+    userId,
+    attempt: 1,
+    type: 'user.memory',
+    chatId,
+    payload: { assistantSeq },
+  }
+}
+
+test('cross-chat memory: access rules, search, deletion, tools and debounced extraction', { skip: !databaseUrl }, async () => {
+  const database = createDatabase(databaseUrl as string)
+  const userIds: string[] = []
+  try {
+    await migrateDatabase(database)
+    const [owner] = await database
+      .insert(users)
+      .values({ externalUserId: `memory-${crypto.randomUUID()}` })
+      .returning({ id: users.id })
+    userIds.push(owner!.id)
+    const userId = owner!.id
+
+    const newChat = async (title: string, extra: Partial<typeof chats.$inferInsert> = {}) => {
+      const [chat] = await database.insert(chats).values({ userId, title, ...extra }).returning({ id: chats.id })
+      return chat!.id
+    }
+    const addTurns = async (chatId: string, turns: Array<[string, string]>) => {
+      const [chat] = await database.select({ next: chats.nextMessageSeq }).from(chats).where(eq(chats.id, chatId))
+      let seq = chat!.next
+      for (const [user, assistant] of turns) {
+        await database.insert(messages).values([
+          { userId, chatId, seq: seq++, role: 'user', content: user },
+          { userId, chatId, seq: seq++, role: 'assistant', status: 'completed', content: assistant },
+        ])
+      }
+      await database.update(chats).set({ nextMessageSeq: seq }).where(eq(chats.id, chatId))
+    }
+
+    const current = await newChat('当前对话')
+    const metagenome = await newChat('土壤样本分析')
+    const incognito = await newChat('无痕的宏基因组讨论', { incognito: true })
+    const deleted = await newChat('已删除的宏基因组', { deletedAt: new Date() })
+    await addTurns(current, [['宏基因组还要再看吗', '可以']])
+    await addTurns(metagenome, [
+      ['帮我看下这批土壤宏基因组样本的耐药基因', '检出了 tetM 和 sul1'],
+      ['下一步做什么', '建议做定量 PCR 验证'],
+    ])
+    await addTurns(incognito, [['宏基因组的秘密', '好的']])
+    await addTurns(deleted, [['宏基因组旧问题', '旧回答']])
+
+    // Search: only visible, non-incognito chats other than the current one.
+    const hits = await searchUserChats(database, { userId, query: '宏基因组 耐药', excludeChatId: current })
+    assert.deepEqual(hits.map((hit) => hit.chatId), [metagenome])
+    assert.match(hits[0]!.matches[0]!.excerpt, /耐药/)
+    assert.deepEqual(await searchUserChats(database, { userId, query: '，。' }), [])
+    const recent = await listRecentUserChats(database, { userId, excludeChatId: current })
+    assert.deepEqual(recent.map((chat) => chat.chatId), [metagenome])
+    assert.match(recent[0]!.overview, /土壤宏基因组/)
+
+    // Access: incognito disables everything; settings narrow the rest.
+    const flags = { userId, userMemoryEnabled: true, chatSearchEnabled: true }
+    assert.deepEqual(
+      await resolveMemoryAccess(database, { ...flags, chatId: incognito }),
+      { readMemory: false, editMemory: false, searchChats: false },
+    )
+    assert.deepEqual(
+      await resolveMemoryAccess(database, { ...flags, chatId: current }),
+      { readMemory: true, editMemory: true, searchChats: true },
+    )
+    await updateMemorySettings(database, userId, { memoryEnabled: false })
+    assert.deepEqual(
+      await resolveMemoryAccess(database, { ...flags, chatId: current }),
+      { readMemory: false, editMemory: false, searchChats: true },
+    )
+    await updateMemorySettings(database, userId, { memoryEnabled: true })
+
+    // Tools: save and delete through the model-facing runner.
+    const runner = createMemoryToolRunner(
+      { database, userId, chatId: current },
+      { readMemory: true, editMemory: true, searchChats: true },
+    )!
+    const saved = await runner.execute({
+      call_id: 's1',
+      name: 'memory__save',
+      arguments: JSON.stringify({ content: '用户偏好用 R 做差异分析', category: 'preference', key: 'analysis_tool' }),
+    })
+    assert.equal(saved.ok, true, saved.error ?? "")
+    const searched = await runner.execute({ call_id: 's2', name: 'chat__search', arguments: '{"query":"耐药"}' })
+    assert.match(searched.output, /tetM|耐药/)
+    const removed = await runner.execute({ call_id: 's3', name: 'memory__delete', arguments: '{"keys":["analysis_tool"]}' })
+    assert.match(removed.output, /"deleted":1/)
+
+    // Deleting a chat forgets what was learned from it, not what the user wrote.
+    await upsertUserMemory(database, { userId, key: 'from_chat', category: 'work', content: '在做土壤耐药基因', source: 'auto', sourceChatId: metagenome })
+    await upsertUserMemory(database, { userId, key: 'typed', category: 'identity', content: '在某研究所工作', source: 'user', sourceChatId: null })
+    assert.equal(await deleteChat(database, userId, metagenome), true)
+    assert.deepEqual((await listUserMemories(database, userId)).map((row) => row.key), ['typed'])
+
+    // Extraction: a burst of turns is read once, by the job of its last turn.
+    const burst = await newChat('新课题')
+    await addTurns(burst, [
+      ['我是做植物病原真菌的', '好的'],
+      ['以后回答请尽量简短', '明白'],
+    ])
+    const model = fakeModel(() => ({
+      operations: [
+        { action: 'upsert', key: 'research_field', category: 'identity', content: '用户研究植物病原真菌' },
+        { action: 'upsert', key: 'answer_style', category: 'preference', content: '用户希望回答尽量简短' },
+      ],
+    }))
+    const processor = new MemoryProcessor(config, database, new CharacterTokenCounter(), undefined, model.client)
+    assert.equal(await processor.process(memoryJob(userId, burst, 2)), undefined)
+    assert.equal(model.requests.length, 0, 'an earlier turn waits for the last job of the burst')
+    const usage = await processor.process(memoryJob(userId, burst, 4))
+    assert.equal(usage?.kind, 'memory')
+    assert.equal(model.requests.length, 1)
+    assert.match(model.requests[0]!.input, /植物病原真菌[\s\S]*尽量简短/)
+    assert.match(model.requests[0]!.input, /"source":"user"/)
+    const [cursor] = await database.select({ seq: chats.memoryExtractedSeq }).from(chats).where(eq(chats.id, burst))
+    assert.equal(cursor!.seq, 4n)
+    const learned = await listUserMemories(database, userId)
+    assert.deepEqual(
+      learned.map((row) => [row.key, row.category, row.source]).sort(),
+      [['answer_style', 'preference', 'auto'], ['research_field', 'identity', 'auto'], ['typed', 'identity', 'user']],
+    )
+    await processor.process(memoryJob(userId, burst, 4))
+    assert.equal(model.requests.length, 1, 'already-extracted turns are not read again')
+
+    // A memory change during the model call is retried, not merged blindly.
+    await addTurns(burst, [['我换去做线虫了', '好的']])
+    await database.update(chats).set({ memoryExtractedSeq: 4n }).where(eq(chats.id, burst))
+    const racing = fakeModel(async () => {
+      await upsertUserMemory(database, { userId, key: 'concurrent', category: 'other', content: '并发写入', source: 'tool', sourceChatId: current })
+      return { operations: [{ action: 'upsert', key: 'research_field', category: 'identity', content: '用户研究线虫' }] }
+    })
+    const racingProcessor = new MemoryProcessor(config, database, new CharacterTokenCounter(), undefined, racing.client)
+    await assert.rejects(racingProcessor.process(memoryJob(userId, burst, 6)), /changed during extraction/)
+    const [unchanged] = await database.select({ seq: chats.memoryExtractedSeq }).from(chats).where(eq(chats.id, burst))
+    assert.equal(unchanged!.seq, 4n)
+
+    // Incognito chats and paused memory never reach the model.
+    const silent = fakeModel(() => ({ operations: [] }))
+    const silentProcessor = new MemoryProcessor(config, database, new CharacterTokenCounter(), undefined, silent.client)
+    await silentProcessor.process(memoryJob(userId, incognito, 2))
+    await updateMemorySettings(database, userId, { memoryEnabled: false })
+    await addTurns(burst, [['暂停期间说的话', '好的']])
+    await silentProcessor.process(memoryJob(userId, burst, 8))
+    assert.equal(silent.requests.length, 0)
+    const [skipped] = await database.select({ seq: chats.memoryExtractedSeq }).from(chats).where(eq(chats.id, burst))
+    assert.equal(skipped!.seq, 8n, 'turns while memory is paused are skipped for good')
+    await updateMemorySettings(database, userId, { memoryEnabled: true })
+
+    // Over the item limit, consolidation rewrites only model-written entries.
+    const tight = { ...config, userMemoryMaxItems: 4 } as AppConfig
+    for (let index = 0; index < 4; index += 1) {
+      await upsertUserMemory(database, { userId, key: `dup_${index}`, category: 'work', content: `项目细节 ${index}`, source: 'auto', sourceChatId: burst })
+    }
+    await addTurns(burst, [['我在写真菌论文', '好的']])
+    const consolidating = fakeModel((request) => request.instructions.includes('整理用户的跨会话长期记忆')
+      ? { memories: [{ key: 'projects', category: 'work', content: '用户的项目细节 0-3，并在研究线虫', sources: ['dup_0', 'dup_1', 'dup_2', 'dup_3', 'concurrent', 'research_field', 'answer_style'] }] }
+      : { operations: [] })
+    const consolidator = new MemoryProcessor(tight, database, new CharacterTokenCounter(), undefined, consolidating.client)
+    await consolidator.process(memoryJob(userId, burst, 10))
+    assert.equal(consolidating.requests.length, 2)
+    assert.match(consolidating.requests[1]!.input, /不可修改[\s\S]*typed/)
+    assert.deepEqual(
+      (await listUserMemories(database, userId)).map((row) => [row.key, row.source]).sort(),
+      [['projects', 'auto'], ['typed', 'user']],
+    )
+  } finally {
+    if (userIds.length > 0) {
+      await database.delete(userMemories).where(inArray(userMemories.userId, userIds))
+      await database.delete(users).where(inArray(users.id, userIds))
+    }
+    await closeDatabase(database)
+  }
+})
+
+test('memory HTTP API: settings, CRUD and incognito chats', { skip: !databaseUrl }, async () => {
+  const { buildApp } = await import('./app.js')
+  const database = createDatabase(databaseUrl as string)
+  await migrateDatabase(database)
+  const app = await buildApp({
+    config: { nodeEnv: 'test', serveClient: false, gpas2AuthMode: 'mock' } as AppConfig,
+    database,
+    redis: {} as never,
+    generations: {} as never,
+    streamHub: {} as never,
+    objectStore: null,
+    artifactService: null,
+  })
+  const base = '/ai-chatbot/api'
+  let userId: string | undefined
+  let chatId: string | undefined
+  try {
+    await app.ready()
+    const chat = await app.inject({ method: 'POST', url: `${base}/conversations`, payload: { title: '无痕', incognito: true } })
+    assert.equal(chat.statusCode, 201)
+    assert.equal(chat.json().incognito, true)
+    chatId = chat.json().id as string
+    const [row] = await database.select({ userId: chats.userId }).from(chats).where(eq(chats.id, chatId))
+    userId = row!.userId
+    await database.delete(userMemories).where(eq(userMemories.userId, userId))
+
+    const empty = await app.inject({ method: 'GET', url: `${base}/memory` })
+    assert.equal(empty.statusCode, 200)
+    assert.deepEqual(empty.json().memories, [])
+
+    const created = await app.inject({ method: 'POST', url: `${base}/memory`, payload: { content: '我在做真菌组学', category: 'work' } })
+    assert.equal(created.statusCode, 201)
+    assert.equal(created.json().source, 'user')
+    const id = created.json().id as string
+
+    const invalid = await app.inject({ method: 'POST', url: `${base}/memory`, payload: { content: '' } })
+    assert.equal(invalid.statusCode, 400)
+
+    const edited = await app.inject({ method: 'PATCH', url: `${base}/memory/${id}`, payload: { content: '我在做植物真菌组学', category: 'identity' } })
+    assert.equal(edited.statusCode, 200)
+    assert.equal(edited.json().category, 'identity')
+
+    const settings = await app.inject({ method: 'PATCH', url: `${base}/memory/settings`, payload: { chatSearchEnabled: false } })
+    assert.deepEqual(settings.json(), { memoryEnabled: true, chatSearchEnabled: false })
+    await app.inject({ method: 'PATCH', url: `${base}/memory/settings`, payload: { chatSearchEnabled: true } })
+
+    assert.equal((await app.inject({ method: 'DELETE', url: `${base}/memory/${id}` })).statusCode, 204)
+    assert.equal((await app.inject({ method: 'DELETE', url: `${base}/memory/${id}` })).statusCode, 404)
+    await app.inject({ method: 'POST', url: `${base}/memory`, payload: { content: 'x' } })
+    assert.equal((await app.inject({ method: 'DELETE', url: `${base}/memory` })).statusCode, 204)
+    assert.deepEqual((await app.inject({ method: 'GET', url: `${base}/memory` })).json().memories, [])
+  } finally {
+    if (userId) {
+      await database.delete(userMemories).where(eq(userMemories.userId, userId))
+      if (chatId) await database.delete(chats).where(eq(chats.id, chatId))
+    }
+    await app.close()
+    await closeDatabase(database)
+  }
+})

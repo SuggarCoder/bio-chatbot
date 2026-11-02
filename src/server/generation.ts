@@ -12,10 +12,13 @@ import {
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
+import { buildBudgetedChatContext } from './conversationMemory.js'
+import { enqueueBackgroundJob } from './backgroundJobs.js'
 import {
-  buildBudgetedChatContext,
   buildUserMemoryInstructions,
-} from './conversationMemory.js'
+  resolveMemoryAccess,
+} from './userMemory.js'
+import { createMemoryToolRunner } from './agent/memoryTools.js'
 import {
   assembleArtifactContext,
   type AssembledArtifactContext,
@@ -81,6 +84,8 @@ import { fitInputBudget, QwenTokenCounter, type TokenCounter } from './tokenBudg
 import {
   addBusinessPart,
   AgentSession,
+  bindToolSet,
+  combineToolRunners,
   type AgentFunctionCall,
   type AgentToolbox,
 } from './agent/tools.js'
@@ -924,6 +929,22 @@ export class GenerationService {
           })
           if (budgetedContext) {
             context = budgetedContext
+            if (budgetedContext.omittedUnsummarized) {
+              // The summary lags behind the history window, so the turns in
+              // between are not in this context. Ask for a catch-up summary.
+              console.warn('Chat context omitted unsummarized turns', {
+                chatId: input.chatId,
+                summaryCoveredMaxSeq: budgetedContext.summaryCoveredMaxSeq,
+                rawMinSeq: budgetedContext.rawMinSeq,
+              })
+              await enqueueBackgroundJob(this.database, {
+                userId: input.user.id,
+                type: 'chat.summary',
+                dedupeKey: `chat.summary:catchup:${input.chatId}:${budgetedContext.summaryVersion ?? 0}`,
+                chatId: input.chatId,
+                payload: { assistantSeq: start.contextMaxSeq },
+              }).catch(() => undefined)
+            }
             await setCachedBudgetedChatContext(
               this.redis,
               this.config,
@@ -964,8 +985,14 @@ export class GenerationService {
       }
       const promptText = input.content || start.userMessage.content
       await this.tokenCounter.initialize()
+      const memoryAccess = await resolveMemoryAccess(this.database, {
+        userId: input.user.id,
+        chatId: input.chatId,
+        userMemoryEnabled: this.config.userMemoryEnabled,
+        chatSearchEnabled: this.config.chatSearchEnabled,
+      })
       // Memory is fixed-size; Artifacts get the instruction budget it leaves.
-      const userMemoryInstructions = this.config.userMemoryEnabled
+      const userMemoryInstructions = memoryAccess.readMemory
         ? await buildUserMemoryInstructions(this.database, input.user.id, {
             tokenBudget: this.config.userMemoryTokenBudget,
             maxItems: this.config.userMemoryMaxItems,
@@ -1047,9 +1074,21 @@ export class GenerationService {
             runtime.controller.signal,
           )
         : null
+      const toolRunner = combineToolRunners(
+        agentTools && agentSession ? bindToolSet(agentTools, agentSession) : null,
+        patchMode
+          ? null
+          : createMemoryToolRunner(
+              { database: this.database, userId: input.user.id, chatId: input.chatId },
+              memoryAccess,
+            ),
+      )
+      // Most stable text first (tool rules, then memory, then this turn's
+      // Artifacts), so the provider's prefix cache survives across turns.
       const modelInstructions = [
-        combinedInstructions,
-        agentTools?.instructions(),
+        toolRunner?.instructions(),
+        userMemoryInstructions,
+        artifactEnabled ? artifactInstructions : '',
       ].filter(Boolean).join('\n\n')
       const modelInput: OpenAI.Responses.ResponseInputItem[] =
         context.messages.map((message) => ({
@@ -1083,7 +1122,7 @@ export class GenerationService {
         const toolsExhausted = toolCallsUsed >= this.config.agentMaxToolCalls
         // The last round gets no tools at all (providers may ignore
         // tool_choice 'none') and must answer from the results it has.
-        if (agentTools && toolsExhausted) modelInput.push(AGENT_FINAL_ROUND_INPUT)
+        if (toolRunner && toolsExhausted) modelInput.push(AGENT_FINAL_ROUND_INPUT)
         const responseStream = await this.qwen.responses.create(
           {
             model: input.model ?? this.config.qwenModel,
@@ -1091,7 +1130,7 @@ export class GenerationService {
             input: modelInput,
             max_output_tokens: this.config.qwenMaxOutputTokens,
             stream: true,
-            ...agentRoundTools(agentTools?.tools, toolsExhausted),
+            ...agentRoundTools(toolRunner?.tools, toolsExhausted),
           },
           { signal: runtime.controller.signal },
         )
@@ -1143,7 +1182,7 @@ export class GenerationService {
                 label: '分析并组织回答',
                 status: 'active',
               })
-            } else if (agentTools && itemType === 'function_call') {
+            } else if (toolRunner && itemType === 'function_call') {
               // Agent tools are executed and traced after this round's stream.
             } else if (
               itemType === 'function_call' ||
@@ -1178,7 +1217,7 @@ export class GenerationService {
               })
             }
           } else if (
-            agentTools &&
+            toolRunner &&
             providerEvent.type === 'response.output_item.done' &&
             providerEvent.item?.type === 'function_call'
           ) {
@@ -1223,7 +1262,7 @@ export class GenerationService {
             runtime.providerRequestId = event.response.id
             // Agent runs make several model calls; usage accumulates.
             runtime.usage = addUsage(runtime.usage, extractUsage(event.response))
-            if (agentTools) {
+            if (toolRunner) {
               for (const item of event.response.output ?? []) {
                 if (item.type === 'function_call') collectFunctionCall(item)
               }
@@ -1243,7 +1282,7 @@ export class GenerationService {
 
         answerText += roundText
 
-        if (!agentTools || !agentSession || functionCalls.length === 0 || toolsExhausted) break
+        if (!toolRunner || functionCalls.length === 0 || toolsExhausted) break
         await this.checkpoint(runtime, true)
         if (roundText) modelInput.push({ role: 'assistant', content: roundText })
         for (const call of functionCalls) {
@@ -1264,18 +1303,15 @@ export class GenerationService {
           toolCallsUsed += 1
           toolStepSequence += 1
           const stepId = `tool:${toolStepSequence}`
-          const title = agentTools.title(call.name) ?? '业务数据'
           updateStep({
             id: stepId,
             kind: 'tool',
-            label: agentTools.effect(call.name) === 'prepare_confirmation'
-              ? `准备${title}`
-              : `查询${title}`,
+            label: toolRunner.label(call.name),
             status: 'active',
           })
           emit({ type: 'tool.start', toolRunId: stepId, toolName: call.name })
           const toolStartedAt = new Date()
-          const result = await agentTools.execute(call, agentSession)
+          const result = await toolRunner.execute(call)
           await this.checkpoint(runtime, true)
           await recordToolRun(this.database, {
             userId: input.user.id,
@@ -1302,7 +1338,7 @@ export class GenerationService {
       }
 
       // A run that already queried data must not fail for an empty last round.
-      const fallback = agentTools ? agentAnswerFallback(toolCallsUsed, answerText) : null
+      const fallback = toolRunner ? agentAnswerFallback(toolCallsUsed, answerText) : null
       if (fallback) {
         ensureResponseStep()
         pushOutputText(fallback)

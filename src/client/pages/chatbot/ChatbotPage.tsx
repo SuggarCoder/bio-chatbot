@@ -72,6 +72,7 @@ import { FILE_RESULT_REQUEST_TEXT } from '../../../server/gpasContracts'
 import type { GpasDetailRequest, GpasUploadBatch } from '../../features/chatbot/chatApi'
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
+import { MemorySettingsHost, openMemorySettings } from '../../features/memory/MemorySettingsDialog'
 import { PopupMenu, type PopupMenuEntry, type PopupMenuItem } from '../../shared/ui/PopupMenu'
 import { Tooltip } from '../../shared/ui/Tooltip'
 import { ArtifactCard } from '../../features/artifacts/ArtifactCard'
@@ -278,6 +279,11 @@ function buildConversationActionItems(
 
 function buildAccountMenuItems(): PopupMenuEntry[] {
   return [
+    {
+      label: '记忆',
+      icon: <span aria-hidden="true" class="i-lucide-brain h-4 w-4 shrink-0" />,
+      onSelect: openMemorySettings,
+    },
     {
       label: '设置',
       icon: <SettingsIcon />,
@@ -1817,13 +1823,28 @@ function StaticMessageParts(props: {
   )
 }
 
-function ChatPanelFrame(props: ParentProps<{ title: string; hideHeader?: boolean; headerAction?: JSX.Element }>) {
+function IncognitoBadge() {
+  return (
+    <span
+      class="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-800 px-2.5 py-1 text-xs font-semibold text-white"
+      title="无痕对话：不使用也不写入记忆，不会出现在历史对话检索中"
+    >
+      <span aria-hidden="true" class="i-lucide-eye-off h-3.5 w-3.5" />
+      无痕
+    </span>
+  )
+}
+
+function ChatPanelFrame(props: ParentProps<{ title: string; hideHeader?: boolean; headerAction?: JSX.Element; incognito?: boolean }>) {
   return (
     <div class="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50">
       <Show when={!props.hideHeader}>
       <header class="flex items-center justify-start gap-3 px-4 py-4 text-slate-600 sm:px-8 sm:py-5">
-        <div class="min-w-0">
+        <div class="flex min-w-0 items-center gap-2">
           <p class="truncate text-lg font-semibold text-slate-800">{props.title}</p>
+          <Show when={props.incognito}>
+            <IncognitoBadge />
+          </Show>
         </div>
         <Show when={props.headerAction}>
           <div class="shrink-0">{props.headerAction}</div>
@@ -1840,6 +1861,8 @@ function EmptyConversationState() {
   const navigate = useNavigate()
   const chatStore = useChatStore()
 
+  const [incognito, setIncognito] = createSignal(false)
+
   const startConversation = (uploads?: UploadSelection) => {
     const typed = chatStore.getRootDraft().trim()
 
@@ -1851,6 +1874,7 @@ function EmptyConversationState() {
     // session page opens at once; the reply waits for the creation.
     const conversation = chatStore.createConversation(
       typed || uploadFallbackContent(uploads!.files.length),
+      { incognito: incognito() },
     )
     chatStore.setRootDraft('')
     sendUserMessage(chatStore, conversation.id, typed, uploads)
@@ -1875,6 +1899,25 @@ function EmptyConversationState() {
             onSubmit={startConversation}
             placeholder="输入你的第一条消息，例如：请总结这份样本分析的关键风险"
           />
+
+          <div class="flex flex-col items-center gap-2">
+            <button
+              type="button"
+              aria-pressed={incognito()}
+              class={`inline-flex h-9 items-center gap-2 rounded-full border px-4 text-sm font-semibold transition duration-200 ${
+                incognito()
+                  ? 'border-slate-800 bg-slate-800 text-white'
+                  : 'border-slate-200 bg-white text-slate-500 hover:text-slate-700'
+              }`}
+              onClick={() => setIncognito(!incognito())}
+            >
+              <span aria-hidden="true" class="i-lucide-eye-off h-4 w-4" />
+              无痕对话
+            </button>
+            <Show when={incognito()}>
+              <p class="text-xs text-slate-500">本次对话不会使用或写入记忆，也不会出现在历史对话检索中。</p>
+            </Show>
+          </div>
         </div>
       </div>
     </ChatPanelFrame>
@@ -2720,6 +2763,7 @@ function SessionConversationView(props: { conversationId: string }) {
         <>
           <ChatPanelFrame
             title={activeConversation().title}
+            incognito={activeConversation().incognito}
             headerAction={
               <PopupMenu
                 buttonLabel="打开当前会话操作菜单"
@@ -2946,6 +2990,7 @@ function ChatbotChrome(props: ParentProps) {
 
   return (
     <LayoutContext.Provider value={{ isSidebarOpen, closeSidebar }}>
+      <MemorySettingsHost />
       <section class="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-900">
         <div class="relative flex h-full w-full overflow-hidden bg-slate-50">
           <aside class={sidebarClass()}>

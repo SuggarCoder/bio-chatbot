@@ -6,7 +6,8 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import {
   buildUserMemoryInstructions,
   countUserMemoryTokens,
-} from './conversationMemory.js'
+  type UserMemoryEntry,
+} from './userMemory.js'
 import type { Database } from './db.js'
 import * as schema from './db/schema.js'
 import {
@@ -37,25 +38,27 @@ test('summary sections are required and tolerate fences and spacing', () => {
   )
 })
 
-test('memory operations drop invalid entries and cap the turn', () => {
+test('memory operations drop invalid entries, default the category and cap the batch', () => {
   const operations = parseMemoryOperations(JSON.stringify({
     operations: [
-      { action: 'upsert', key: ' Lab_Name ', content: ' 结构生物学实验室 ' },
+      { action: 'upsert', key: ' Lab_Name ', category: 'identity', content: ' 结构生物学实验室 ' },
       { action: 'delete', key: 'old_project' },
+      { action: 'upsert', key: 'tool_pref', category: 'nonsense', content: '常用 PyMOL' },
       { action: 'upsert', key: '1bad', content: 'x' },
-      { action: 'upsert', key: 'too_long', content: 'x'.repeat(201) },
+      { action: 'upsert', key: 'too_long', content: 'x'.repeat(501) },
       { action: 'rename', key: 'unknown_action', content: 'x' },
-      ...Array.from({ length: 10 }, (_, index) => ({
+      ...Array.from({ length: 20 }, (_, index) => ({
         action: 'upsert', key: `extra_${index}`, content: 'x',
       })),
     ],
   }))
-  assert.deepEqual(operations.slice(0, 2), [
-    { action: 'upsert', key: 'lab_name', content: '结构生物学实验室' },
+  assert.deepEqual(operations.slice(0, 3), [
+    { action: 'upsert', key: 'lab_name', category: 'identity', content: '结构生物学实验室' },
     { action: 'delete', key: 'old_project' },
+    { action: 'upsert', key: 'tool_pref', category: 'other', content: '常用 PyMOL' },
   ])
-  // Eight raw operations are considered; three of them are invalid.
-  assert.equal(operations.length, 5)
+  // Twelve raw operations are considered; three of them are invalid.
+  assert.equal(operations.length, 9)
 })
 
 test('consolidation keeps known sources and rejects unsafe results', () => {
@@ -63,13 +66,13 @@ test('consolidation keeps known sources and rejects unsafe results', () => {
   assert.deepEqual(
     parseConsolidatedMemories(JSON.stringify({
       memories: [
-        { key: 'lab_name', content: '结构生物学实验室', sources: ['lab', 'ghost'] },
-        { key: 'tools', content: '常用 PyMOL', sources: ['favorite_tool'] },
+        { key: 'lab_name', category: 'identity', content: '结构生物学实验室', sources: ['lab', 'ghost'] },
+        { key: 'tools', category: 'preference', content: '常用 PyMOL', sources: ['favorite_tool'] },
       ],
     }), known, 10),
     [
-      { key: 'lab_name', content: '结构生物学实验室', sources: ['lab', 'lab_name'] },
-      { key: 'tools', content: '常用 PyMOL', sources: ['favorite_tool'] },
+      { key: 'lab_name', category: 'identity', content: '结构生物学实验室', sources: ['lab', 'lab_name'] },
+      { key: 'tools', category: 'preference', content: '常用 PyMOL', sources: ['favorite_tool'] },
     ],
   )
   assert.throws(
@@ -94,13 +97,24 @@ test('consolidation keeps known sources and rejects unsafe results', () => {
     }), known, 1),
     /more than 1/,
   )
+  assert.throws(
+    () => parseConsolidatedMemories(JSON.stringify({
+      memories: [{ key: 'note_user', content: 'x' }],
+    }), known, 10, ['note_user']),
+    /overwrites user entry/,
+  )
 })
 
-test('memory injection keeps the newest entries within the token budget', async () => {
+test('memory injection keeps user entries first within the budget and renders in a stable order', async () => {
+  const now = new Date('2026-11-01T00:00:00Z')
+  const older = new Date('2026-01-01T00:00:00Z')
+  // Columns in select order: id, key, category, content, source, sourceChatId, createdAt, updatedAt.
+  const row = (key: string, category: string, content: string, source: string, updatedAt: Date) =>
+    [crypto.randomUUID(), key, category, content, source, null, older, updatedAt]
   const rows = [
-    ['newest', 'a'.repeat(20)],
-    ['middle', 'b'.repeat(20)],
-    ['oldest', 'c'],
+    row('newest_auto', 'other', 'a'.repeat(30), 'auto', now),
+    row('pinned', 'work', 'b'.repeat(10), 'user', older),
+    row('identity_fact', 'identity', 'c'.repeat(10), 'auto', older),
   ]
   const client = {
     async query(config: { text: string }) {
@@ -110,9 +124,11 @@ test('memory injection keeps the newest entries within the token budget', async 
   }
   const database = drizzle(client as never, { schema }) as unknown as Database
   const tokenCounter = new CharacterTokenCounter()
+  const entry = (key: string, category: UserMemoryEntry['category'], content: string, source: UserMemoryEntry['source']) =>
+    ({ key, category, content, source, updatedAt: now })
   const twoEntries = countUserMemoryTokens(tokenCounter, [
-    { key: 'newest', content: 'a'.repeat(20) },
-    { key: 'middle', content: 'b'.repeat(20) },
+    entry('pinned', 'work', 'b'.repeat(10), 'user'),
+    entry('identity_fact', 'identity', 'c'.repeat(10), 'auto'),
   ])
 
   const instructions = await buildUserMemoryInstructions(
@@ -122,6 +138,7 @@ test('memory injection keeps the newest entries within the token budget', async 
   )
 
   assert.equal(tokenCounter.countText(instructions), twoEntries)
-  assert.match(instructions, /- newest: a+\n- middle: b+$/)
-  assert.doesNotMatch(instructions, /oldest/)
+  // Category order, not recency: identity before work.
+  assert.match(instructions, /### 身份与背景\n- \(identity_fact\) c+\n### 工作与长期项目\n- \(pinned\) b+$/)
+  assert.doesNotMatch(instructions, /newest_auto/)
 })

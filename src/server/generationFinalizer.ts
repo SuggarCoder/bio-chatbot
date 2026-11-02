@@ -27,6 +27,7 @@ export class GenerationFinalizer {
       ...input,
       enqueueSummaryJob: this.config.contextMemoryEnabled,
       enqueueUserMemoryJob: this.config.userMemoryEnabled,
+      userMemoryJobDelaySeconds: this.config.memoryExtractionDelaySeconds,
     })
     const generation = result.generation
 
