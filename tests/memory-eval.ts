@@ -29,6 +29,7 @@ const upserts = (operations: MemoryOperation[]) =>
   operations.filter((operation): operation is Extract<MemoryOperation, { action: 'upsert' }> => operation.action === 'upsert')
 const text = (operations: MemoryOperation[]) => JSON.stringify(operations)
 
+
 const scenarios: Scenario[] = [
   {
     name: '身份陈述 → identity',
@@ -80,6 +81,19 @@ const scenarios: Scenario[] = [
     preceding: [['我们组有两个方向：线虫抗性和真菌毒素检测', '这两个方向都很有意思。']],
     turns: [['我主要负责后一个', '好的。']],
     check: (ops) => /真菌毒素/.test(text(ops)) ? null : `没有理解“后一个”：${text(ops)}`,
+  },
+  {
+    name: '这几周在做的事 → current（会自动淘汰）',
+    turns: [['这两周在赶一批肠道菌群样本的数据，月底要交报告', '好的，需要我帮你规划时间吗？']],
+    check: (ops) => upserts(ops).some((op) => op.category === 'current' && /肠道|报告/.test(op.content))
+      ? null : `应保存为 current：${text(ops)}`,
+  },
+  {
+    name: '再次提到近期关注 → touch',
+    existing: [{ key: 'gut_batch', category: 'current', content: '用户在赶一批肠道菌群样本的数据，月底交报告', source: 'auto' }],
+    turns: [['肠道那批样本的物种组成图帮我再改改配色', '好的。']],
+    check: (ops) => ops.some((op) => (op.action === 'touch' || op.action === 'upsert') && op.key === 'gut_batch') && !upserts(ops).some((op) => op.key !== 'gut_batch' && /肠道/.test(op.content))
+      ? null : `应 touch 或更新 gut_batch，而不是新建：${text(ops)}`,
   },
   {
     name: '具体分析结果 → 不保存',

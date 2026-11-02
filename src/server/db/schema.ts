@@ -528,12 +528,19 @@ export const chatSummaries = pgTable(
   ],
 )
 
+/**
+ * Memory tiers (see src/server/memoryPolicy.ts):
+ * - profile: identity, work, preference, other — kept until contradicted.
+ * - recent: current — what the user is focused on; ages out unless reinforced.
+ * - episode: one digest per chat — recent conversation history; ages out.
+ */
 export const USER_MEMORY_CATEGORIES = [
   'identity',
   'work',
   'preference',
   'current',
   'other',
+  'episode',
 ] as const
 export type UserMemoryCategory = typeof USER_MEMORY_CATEGORIES[number]
 export const USER_MEMORY_SOURCES = ['auto', 'user', 'tool'] as const
@@ -559,6 +566,12 @@ export const userMemories = pgTable(
       .notNull()
       .default('auto'),
     sourceChatId: uuid('sourceChatId'),
+    /** Last time a conversation confirmed this memory; drives aging. */
+    lastSeenAt: timestampTz('lastSeenAt').notNull().defaultNow(),
+    /** How many different chats confirmed it; drives promotion to profile. */
+    reinforcedCount: integer('reinforcedCount').notNull().default(1),
+    /** Null for profile memories; recent and episode memories age out. */
+    expiresAt: timestampTz('expiresAt'),
     createdAt: timestampTz('createdAt').notNull().defaultNow(),
     updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
   },
@@ -571,7 +584,7 @@ export const userMemories = pgTable(
     ),
     check(
       'chk_user_memory_category',
-      sql`${table.category} in ('identity', 'work', 'preference', 'current', 'other')`,
+      sql`${table.category} in ('identity', 'work', 'preference', 'current', 'other', 'episode')`,
     ),
     check(
       'chk_user_memory_source',
@@ -582,7 +595,11 @@ export const userMemories = pgTable(
       columns: [table.userId, table.sourceChatId],
       foreignColumns: [chats.userId, chats.id],
     }).onDelete('cascade'),
+    check('chk_user_memory_reinforced', sql`${table.reinforcedCount} >= 1`),
     index('idx_user_memory_recent').on(table.userId, table.updatedAt.desc()),
+    index('idx_user_memory_expiry')
+      .on(table.expiresAt)
+      .where(sql`${table.expiresAt} is not null`),
   ],
 )
 

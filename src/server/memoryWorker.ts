@@ -34,9 +34,11 @@ import {
   normalizeMemoryContent,
   normalizeMemoryKey,
   notSupersededMessage,
+  touchUserMemories,
   upsertUserMemory,
   type UserMemoryCategory,
 } from './userMemory.js'
+import { episodeKey, memoryExpiresAt, promoteRecurringMemories } from './memoryPolicy.js'
 
 type BackgroundUsage = {
   kind: 'summary' | 'memory'
@@ -152,25 +154,45 @@ function summaryCompactionInstructions(targetTokens: number): string {
 
 export type MemoryOperation =
   | { action: 'delete'; key: string }
+  | { action: 'touch'; key: string }
   | { action: 'upsert'; key: string; category: UserMemoryCategory; content: string }
 
 /** Invalid operations are dropped; the rest of the batch still applies. */
 export function parseMemoryOperations(text: string): MemoryOperation[] {
+  return parseExtraction(text).operations
+}
+
+export type ExtractionResult = {
+  operations: MemoryOperation[]
+  /** The chat's updated digest, or null when it has nothing worth recalling. */
+  episode: string | null
+}
+
+const EPISODE_MAX_CHARS = 300
+
+export function parseExtraction(text: string): ExtractionResult {
   const parsed = parseJsonObject(text)
   const values = Array.isArray(parsed.operations)
     ? parsed.operations.slice(0, MEMORY_OPERATIONS_PER_BATCH)
     : []
-  return values.flatMap((value): MemoryOperation[] => {
+  const operations = values.flatMap((value): MemoryOperation[] => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return []
     const operation = value as Record<string, unknown>
     const key = normalizeMemoryKey(operation.key)
-    if (!key) return []
+    // Digests have their own field and key scheme.
+    if (!key || key.startsWith('episode_')) return []
     if (operation.action === 'delete') return [{ action: 'delete', key }]
+    if (operation.action === 'touch') return [{ action: 'touch', key }]
     const content = normalizeMemoryContent(operation.content)
-    return operation.action === 'upsert' && content
-      ? [{ action: 'upsert', key, category: normalizeMemoryCategory(operation.category), content }]
+    const category = normalizeMemoryCategory(operation.category)
+    return operation.action === 'upsert' && content && category !== 'episode'
+      ? [{ action: 'upsert', key, category, content }]
       : []
   })
+  const episode = typeof parsed.episode === 'string'
+    ? parsed.episode.trim().replace(/\s*\n\s*/g, ' ').slice(0, EPISODE_MAX_CHARS)
+    : ''
+  return { operations, episode: episode || null }
 }
 
 export type ConsolidatedMemory = {
@@ -253,18 +275,23 @@ function parseJsonObject(text: string): Record<string, unknown> {
 }
 
 const CATEGORY_GUIDE = [
+  '长期记忆（一直保留，信息变化时更新）：',
   '- identity：身份与背景，如职业、单位、研究方向、专业水平、常用语言',
-  '- work：工作与长期项目，如在做的课题或项目、实验体系、物种或样本类型、长期目标',
+  '- work：工作与长期项目，如持续在做的课题或项目、实验体系、物种或样本类型、长期目标',
   '- preference：偏好与习惯，如回答风格与格式、常用软件和分析方法',
-  '- current：近期关注，如最近一段时间反复处理的问题；会过时，内容里写明起始年月',
   '- other：确实值得长期记住但不属于以上类别的信息',
+  '近期记忆（一个月没人再提会自动淘汰，在多个对话里反复出现会自动转为 work）：',
+  '- current：近期关注，如这几周在处理的问题、正在跑的一批样本、准备中的论文或汇报',
 ].join('\n')
 
 export function extractionInstructions(): string {
   return [
-    '你负责维护用户的跨会话长期记忆。阅读“新对话”，判断其中有没有值得长期记住的、关于用户本人的信息，输出对“现有记忆”的增删改操作。',
-    '可以保存的类别（必须是用户自己说出或明确确认的）：',
+    '你负责维护用户的跨会话记忆。阅读“新对话”，完成两件事：',
+    '一、判断其中有没有值得记住的、关于用户本人的信息，输出对“现有记忆”的增删改操作。',
+    '二、更新本会话的概要（episode）。',
+    '记忆类别（必须是用户自己说出或明确确认的）：',
     CATEGORY_GUIDE,
+    '分类原则：拿不准是长期还是近期时选 current，让它自然淘汰或升级；身份和偏好只有用户明确表达时才记。',
     '不要保存：',
     '- 一次性请求、临时数据、某次分析的具体结果（除非用户说明以后还要用）；',
     '- 助手的回答、建议或推断，以及用户只是提问而没有陈述的内容；',
@@ -272,11 +299,16 @@ export function extractionInstructions(): string {
     '- 现有记忆里已有且没有变化的内容。',
     '规则：',
     '- 与现有记忆属于同一主题时复用它的 key，输出合并后的完整内容，不要新建近义 key；冲突时以新对话为准。',
+    '- 新对话再次涉及某条 current 记忆、但内容没有变化时，输出 touch，让它保持有效。',
     '- 用户要求忘记某事时删除对应条目，并且不要再保存这类信息。',
     '- source 为 user 的条目是用户亲自填写的；除非用户在新对话里明确更正，否则不要修改或删除。',
     '- content 用第三人称写成简洁完整的中文陈述（如“用户在做土壤宏基因组的耐药基因分析”），不超过 300 字。',
     '- “上文”只用于理解指代，不要从中提取信息。',
-    '只输出 JSON：{"operations":[{"action":"upsert","key":"snake_case","category":"identity|work|preference|current|other","content":"..."},{"action":"delete","key":"..."}]}。没有需要的操作时输出 {"operations":[]}。',
+    'episode（本会话概要）：',
+    '- 在“本会话已有概要”的基础上，用一两句中文概括这个会话至今讨论了什么、得出了什么结论或还有什么待办，写清主题和关键名词，不超过 150 字。',
+    '- 它会在之后两周的新对话里作为“近期对话”提供给助手，帮助接上话题；不要写寒暄，不要写敏感信息。',
+    '- 会话只是寒暄、测试或没有实质内容时，episode 输出 null。',
+    '只输出 JSON：{"operations":[{"action":"upsert","key":"snake_case","category":"identity|work|preference|current|other","content":"..."},{"action":"touch","key":"..."},{"action":"delete","key":"..."}],"episode":"..."}。没有需要的操作时 operations 为空数组。',
   ].join('\n')
 }
 
@@ -290,12 +322,12 @@ export function consolidationInstructions(input: {
     '类别：',
     CATEGORY_GUIDE,
     '要求：',
-    '- 合并重复或同一主题的条目，把零散事实改写成完整的陈述；删除已过时、被更新信息推翻或不再稳定的条目，冲突时以 updatedAt 较新的为准。',
-    `- 今天是 ${input.today}。current 类条目超过三个月没有更新的，删除或改写为 work 类的长期事实。`,
+    '- 合并重复或同一主题的条目，把零散事实改写成完整的陈述；删除被更新信息推翻或不再成立的条目，冲突时以 lastSeenAt 较新的为准。',
+    `- 今天是 ${input.today}。保持条目原来的类别；current 会按 lastSeenAt 自动淘汰，不需要你删除，也不要把它改成长期类别，除非它明显是用户长期在做的事。`,
     '- 只能改写、合并和删减，不得加入现有记忆之外的信息；身份、长期项目中的关键事实与精确数字必须保留。',
     '- “用户填写的条目”只用于去重参考：不要输出它们，也不要输出与它们重复的内容，不能占用它们的 key。',
     `- 最多 ${input.targetItems} 条，全部内容合计约 ${input.targetTokens} 字以内，每条不超过 300 字。`,
-    '- 尽量沿用原 key；sources 列出该条合并自的全部原 key。',
+    '- 尽量沿用原 key；sources 列出该条合并自的全部原 key。长期类和 current 不要合并成一条。',
     '只输出 JSON：{"memories":[{"key":"snake_case","category":"identity|work|preference|current|other","content":"...","sources":["原key"]}]}。',
   ].join('\n')
 }
@@ -623,11 +655,24 @@ export class MemoryProcessor {
       .limit(2)
 
     const snapshot = await listUserMemories(this.database, job.userId, this.config.userMemoryMaxItems * 2)
+    const digestKey = episodeKey(chatId)
+    const [previousEpisode] = await this.database
+      .select({ content: userMemories.content })
+      .from(userMemories)
+      .where(and(eq(userMemories.userId, job.userId), eq(userMemories.key, digestKey)))
+      .limit(1)
     const extracted = await this.complete('Memory', 'memory', {
       instructions: extractionInstructions(),
       input: [
         `今天：${today()}`,
-        `现有记忆：${JSON.stringify(snapshot.map(({ key, category, content, source }) => ({ key, category, content, source })))}`,
+        `现有记忆：${JSON.stringify(snapshot.map(({ key, category, content, source, lastSeenAt }) => ({
+          key,
+          category,
+          content,
+          source,
+          lastSeenAt: lastSeenAt.toISOString().slice(0, 10),
+        })))}`,
+        `本会话已有概要：${previousEpisode?.content ?? '无'}`,
         preceding.length > 0
           ? `上文（仅用于理解指代）：\n${renderTurns(preceding.reverse(), { user: 600, assistant: 600 })}`
           : '',
@@ -635,11 +680,15 @@ export class MemoryProcessor {
       ].filter(Boolean).join('\n\n'),
       max_output_tokens: Math.min(2_048, this.config.backgroundMaxOutputTokens),
     })
-    const operations = parseMemoryOperations(extracted.text)
+    const { operations, episode } = parseExtraction(extracted.text)
+    const changes = operations.filter(
+      (operation): operation is Exclude<MemoryOperation, { action: 'touch' }> => operation.action !== 'touch',
+    )
+    const touched = operations.flatMap((operation) => operation.action === 'touch' ? [operation.key] : [])
 
     await this.database.transaction(async (transaction) => {
       await lockUserMemories(transaction, job.userId)
-      if (operations.length > 0) {
+      if (changes.length > 0) {
         const current = await listUserMemories(transaction, job.userId, this.config.userMemoryMaxItems * 2)
         // Another chat or the user changed the set since the prompt was
         // built; retry so the model sees it instead of adding near-duplicates.
@@ -647,7 +696,7 @@ export class MemoryProcessor {
           throw new MemorySetChangedError()
         }
         const byKey = new Map(current.map((row) => [row.key, row]))
-        for (const operation of operations) {
+        for (const operation of changes) {
           if (operation.action === 'delete') {
             await transaction
               .delete(userMemories)
@@ -665,6 +714,19 @@ export class MemoryProcessor {
           })
         }
       }
+      // Touching only extends a memory's life, so it needs no snapshot check.
+      await touchUserMemories(transaction, { userId: job.userId, keys: touched, chatId })
+      if (episode) {
+        await upsertUserMemory(transaction, {
+          userId: job.userId,
+          key: digestKey,
+          category: 'episode',
+          content: episode,
+          source: 'auto',
+          sourceChatId: chatId,
+        })
+      }
+      await promoteRecurringMemories(transaction, job.userId)
       await this.advanceCursor(transaction, job.userId, chatId, upTo)
     })
 
@@ -755,7 +817,7 @@ export class MemoryProcessor {
             key: row.key,
             category: row.category,
             content: row.content,
-            updatedAt: row.updatedAt.toISOString(),
+            lastSeenAt: row.lastSeenAt.toISOString().slice(0, 10),
           })))}`,
         ].join('\n\n'),
         max_output_tokens: this.config.backgroundMaxOutputTokens,
@@ -777,7 +839,7 @@ export class MemoryProcessor {
       )
       const merged = [
         ...pinned,
-        ...memories.map((memory) => ({ ...memory, source: 'auto' as const, updatedAt: new Date() })),
+        ...memories.map((memory) => ({ ...memory, source: 'auto' as const, updatedAt: new Date(), lastSeenAt: new Date() })),
       ]
       if (countUserMemoryTokens(this.tokenCounter, merged) > budgetTokens) {
         throw new Error('Consolidated memories exceed USER_MEMORY_TOKEN_BUDGET')
@@ -797,6 +859,13 @@ export class MemoryProcessor {
           // Snapshot rows are newest first, so this is the most recent source.
           // Deleting that chat removes the merged memory.
           const source = editable.find((row) => memory.sources.includes(row.key))
+          // A merged memory keeps its sources' history: first seen, last
+          // seen and how many chats confirmed it, so aging and promotion
+          // carry over.
+          const sources = editable.filter((row) => memory.sources.includes(row.key))
+          const lastSeenAt = sources.length
+            ? new Date(Math.max(...sources.map((row) => row.lastSeenAt.getTime())))
+            : new Date()
           await transaction.insert(userMemories).values({
             userId,
             key: memory.key,
@@ -804,7 +873,12 @@ export class MemoryProcessor {
             content: memory.content,
             source: source?.source ?? 'auto',
             sourceChatId: source?.sourceChatId ?? null,
-            createdAt: source?.createdAt ?? new Date(),
+            lastSeenAt,
+            reinforcedCount: Math.max(1, ...sources.map((row) => row.reinforcedCount)),
+            expiresAt: memoryExpiresAt(memory.category, lastSeenAt),
+            createdAt: sources.length
+              ? new Date(Math.min(...sources.map((row) => row.createdAt.getTime())))
+              : new Date(),
             updatedAt: source?.updatedAt ?? new Date(),
           })
         }

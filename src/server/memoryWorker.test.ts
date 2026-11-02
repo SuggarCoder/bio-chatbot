@@ -14,6 +14,7 @@ import {
   missingSummarySections,
   normalizeSummary,
   parseConsolidatedMemories,
+  parseExtraction,
   parseMemoryOperations,
 } from './memoryWorker.js'
 import { CharacterTokenCounter } from './tokenBudget.js'
@@ -108,9 +109,10 @@ test('consolidation keeps known sources and rejects unsafe results', () => {
 test('memory injection keeps user entries first within the budget and renders in a stable order', async () => {
   const now = new Date('2026-11-01T00:00:00Z')
   const older = new Date('2026-01-01T00:00:00Z')
-  // Columns in select order: id, key, category, content, source, sourceChatId, createdAt, updatedAt.
+  // Columns in select order: id, key, category, content, source, sourceChatId,
+  // lastSeenAt, reinforcedCount, expiresAt, createdAt, updatedAt.
   const row = (key: string, category: string, content: string, source: string, updatedAt: Date) =>
-    [crypto.randomUUID(), key, category, content, source, null, older, updatedAt]
+    [crypto.randomUUID(), key, category, content, source, null, updatedAt, 1, null, older, updatedAt]
   const rows = [
     row('newest_auto', 'other', 'a'.repeat(30), 'auto', now),
     row('pinned', 'work', 'b'.repeat(10), 'user', older),
@@ -118,14 +120,17 @@ test('memory injection keeps user entries first within the budget and renders in
   ]
   const client = {
     async query(config: { text: string }) {
-      if (config.text.includes('from "UserMemory"')) return { rows }
+      // The digest query filters on category = 'episode'; there are none here.
+      if (config.text.includes('from "UserMemory"')) {
+        return { rows: config.text.includes('"category" = $') ? [] : rows }
+      }
       throw new Error(`Unexpected query: ${config.text}`)
     },
   }
   const database = drizzle(client as never, { schema }) as unknown as Database
   const tokenCounter = new CharacterTokenCounter()
   const entry = (key: string, category: UserMemoryEntry['category'], content: string, source: UserMemoryEntry['source']) =>
-    ({ key, category, content, source, updatedAt: now })
+    ({ key, category, content, source, updatedAt: now, lastSeenAt: now })
   const twoEntries = countUserMemoryTokens(tokenCounter, [
     entry('pinned', 'work', 'b'.repeat(10), 'user'),
     entry('identity_fact', 'identity', 'c'.repeat(10), 'auto'),
@@ -141,4 +146,24 @@ test('memory injection keeps user entries first within the budget and renders in
   // Category order, not recency: identity before work.
   assert.match(instructions, /### 身份与背景\n- \(identity_fact\) c+\n### 工作与长期项目\n- \(pinned\) b+$/)
   assert.doesNotMatch(instructions, /newest_auto/)
+})
+
+test('extraction parses touch operations and the chat digest, and keeps digests out of operations', () => {
+  const result = parseExtraction(JSON.stringify({
+    operations: [
+      { action: 'touch', key: 'sample_batch' },
+      { action: 'upsert', key: 'episode_abc', category: 'other', content: 'x' },
+      { action: 'upsert', key: 'fake_digest', category: 'episode', content: 'x' },
+      { action: 'upsert', key: 'paper', category: 'current', content: '用户在准备一篇真菌组学论文' },
+    ],
+    episode: '  讨论了 tetM 和 sul1 的丰度解读，\n结论是需要 qPCR 验证。 ',
+  }))
+  assert.deepEqual(result.operations, [
+    { action: 'touch', key: 'sample_batch' },
+    { action: 'upsert', key: 'paper', category: 'current', content: '用户在准备一篇真菌组学论文' },
+  ])
+  assert.equal(result.episode, '讨论了 tetM 和 sul1 的丰度解读， 结论是需要 qPCR 验证。')
+  assert.equal(parseExtraction('{"operations":[],"episode":null}').episode, null)
+  assert.equal(parseExtraction('{"operations":[]}').episode, null)
+  assert.equal(parseExtraction(JSON.stringify({ operations: [], episode: 'x'.repeat(400) })).episode?.length, 300)
 })

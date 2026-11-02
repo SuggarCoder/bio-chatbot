@@ -22,6 +22,7 @@ import { GenerationFinalizer } from './generationFinalizer.js'
 import { MemoryProcessor } from './memoryWorker.js'
 import { indexChatTurn } from './chatSearch.js'
 import { createEmbedder } from './embeddings.js'
+import { purgeExpiredMemories } from './memoryPolicy.js'
 import {
   claimGeneration,
   claimOutboxBatch,
@@ -107,6 +108,8 @@ const backgroundActive = new Set<Promise<void>>()
 const heartbeatIntervalMs = 10_000
 const outboxPollIntervalMs = 250
 const reconcileIntervalMs = 15_000
+// Aged-out memories are already ignored by reads; this only frees the rows.
+const memoryPurgeIntervalMs = 10 * 60_000
 let stopping = false
 let schedulerWakePending = false
 let schedulerWakeResolver: (() => void) | undefined
@@ -350,6 +353,7 @@ async function mainLoop(): Promise<void> {
   let nextHeartbeatAt = 0
   let nextOutboxPollAt = 0
   let nextReconcileAt = 0
+  let nextMemoryPurgeAt = 0
 
   while (!stopping) {
     if (Date.now() >= nextHeartbeatAt) {
@@ -363,6 +367,14 @@ async function mainLoop(): Promise<void> {
     if (Date.now() >= nextReconcileAt) {
       await reconcile()
       nextReconcileAt = Date.now() + reconcileIntervalMs
+    }
+    if (Date.now() >= nextMemoryPurgeAt) {
+      const purged = await purgeExpiredMemories(database).catch((error: unknown) => {
+        console.warn('Memory purge failed', { error: error instanceof Error ? error.message : String(error) })
+        return 0
+      })
+      if (purged > 0) console.info('Purged aged-out memories', { purged })
+      nextMemoryPurgeAt = Date.now() + memoryPurgeIntervalMs
     }
 
     // Keep looking past blocked tenants, but bound scans when all are blocked.

@@ -56,8 +56,8 @@ export const memorySaveTool = defineLocalTool({
   input: z.object({
     content: z.string().trim().min(1).max(USER_MEMORY_CONTENT_MAX_CHARS)
       .describe('用第三人称陈述的一条事实，例如“用户偏好用 R 做差异分析”'),
-    category: z.enum(USER_MEMORY_CATEGORIES)
-      .describe('identity=身份与背景，work=工作与长期项目，preference=偏好与习惯，current=近期关注，other=其他'),
+    category: z.enum(USER_MEMORY_CATEGORIES.filter((category) => category !== 'episode') as ['identity', 'work', 'preference', 'current', 'other'])
+      .describe('identity=身份与背景，work=工作与长期项目，preference=偏好与习惯，other=其他（以上长期保留）；current=近期关注（一个月不再提会自动淘汰）'),
     key: z.string().trim().optional().describe('要覆盖的已有条目标识（snake_case）'),
   }),
   async run(context, input) {

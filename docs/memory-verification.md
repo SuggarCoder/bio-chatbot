@@ -20,7 +20,7 @@ PSQL="docker exec -i local-postgres psql -U app_user -d app_db"
 
 1. **确认部署成功：** GitHub → Actions → Deploy AI Chatbot，最近一次运行为绿色。
 2. **（建议）缩短提取延迟：** 测试期间在部署用的 env 文件里加 `MEMORY_EXTRACTION_DELAY_SECONDS=30`，然后重新部署。否则每次说完话要等约 5 分钟（300 秒，加上最多 15 秒的调度间隔），记忆才会出现。测完删掉这一行。
-3. **准备一个测试账号：** 下面的对话内容会写进这个账号的记忆。测完可以在设置页“清空全部记忆”。
+3. **准备一个测试账号：** 下面的对话内容会写进这个账号的记忆。测完可以在 账户菜单 →“记忆”里“清除全部记忆”。
 
 ## 1. 基础设施
 
@@ -101,16 +101,16 @@ U=<测试账号 id>
 
 2. 再追问一句业务问题，例如“耐药基因一般用什么数据库注释？”。
 3. 等待提取延迟（第 0 步设为 30 秒的话，约 45 秒）。
-4. 打开 账户菜单 → 记忆。
-
-**预期：**
-- 出现“身份与背景”或“工作与长期项目”条目（含微生物所、宏基因组/耐药），以及“偏好与习惯”条目（简短、英文注释）。
-- 来源显示“从对话中整理”。
-- 不应出现“耐药基因用什么数据库注释”这类一次性问题，也不应出现助手给出的建议。
+4. 查数据库（界面不展示记忆内容）：
 
 ```bash
-$PSQL -c "select category, source, content, \"updatedAt\" from \"UserMemory\" where \"userId\" = '$U' order by category"
+$PSQL -c "select category, source, content, \"lastSeenAt\"::date, \"expiresAt\"::date from \"UserMemory\" where \"userId\" = '$U' order by category"
 ```
+
+**预期：**
+- 有 `identity` 或 `work` 条目（含微生物所、宏基因组/耐药），以及 `preference` 条目（简短、英文注释），两者的 `expiresAt` 都为空。
+- 有一条 `episode`（本会话概要），`expiresAt` 约为 60 天后。
+- 不应出现“耐药基因用什么数据库注释”这类一次性问题，也不应出现助手给出的建议。
 
 ### B. 记忆注入
 
@@ -131,7 +131,7 @@ $PSQL -c "select category, source, content, \"updatedAt\" from \"UserMemory\" wh
 
 **预期：**
 - 执行步骤里出现“更新记忆”。
-- 马上刷新设置页，就能看到这一条，来源为“对话中让我记住的”，不需要等提取延迟。
+- 马上用 A 里的 SQL 查，就能看到这一条，`source` 为 `tool`，不需要等提取延迟。
 
 ### D. 即时忘记
 
@@ -139,7 +139,7 @@ $PSQL -c "select category, source, content, \"updatedAt\" from \"UserMemory\" wh
 
 > 忘掉我的项目编号。
 
-**预期：** 执行步骤里出现“删除记忆”，设置页里这条消失。等一个提取周期后，它也不会被后台重新加回来。
+**预期：** 执行步骤里出现“删除记忆”，用 A 里的 SQL 查不到这一条。等一个提取周期后，它也不会被后台重新加回来。
 
 ### E. 跨会话检索（语义）
 
@@ -199,11 +199,17 @@ $PSQL -c "select category, source, content, \"updatedAt\" from \"UserMemory\" wh
 - 第 4 步：无痕会话的 `MessageChunk` 数为 0，`UserMemory` 里查不到 B 公司。
 - 在普通对话里搜“跳槽”，也搜不到这次无痕对话。
 
-### H. 设置开关
+### H. 记忆开关和清除
 
-1. 关闭“使用并更新记忆”，新建对话问“你记得关于我的什么？”。**预期：** 不知道，且不会调用记忆工具。
-2. 重新开启，再关闭“引用历史对话”，问 E 里的问题。**预期：** 不调用“搜索历史对话”。
-3. 测完把两个开关都恢复开启。
+1. 在 账户菜单 →“记忆”里关闭“使用记忆”，新建对话，问“你记得关于我的什么？”，再问 E 里的问题。**预期：** 不知道你的信息，也不调用任何记忆或检索工具。
+2. 刷新页面后重新打开弹窗，开关仍是关闭状态。重新打开开关。
+3. 先记下当前条数，再点“清除全部记忆”并确认：
+
+   ```bash
+   $PSQL -c "select count(*) from \"UserMemory\" where \"userId\" = '$U'"
+   ```
+
+   **预期：** 清除后再查为 0；新建对话问“你记得关于我的什么？”时答不上来。之后做后面的场景前，先重新做一遍 A。
 
 ### I. 删除会话
 
@@ -214,8 +220,66 @@ $PSQL -c "select source, content from \"UserMemory\" where \"userId\" = '$U'"
 ```
 
 **预期：**
-- 从该会话自动整理的条目被删除；你在设置页手动添加的条目保留。
+- 从该会话整理出的条目（包括它的 `episode` 概要）被删除。
 - 该会话在 `MessageChunk` 里没有记录了。
+
+### K. 分层老化
+
+分层规则见 `docs/memory.md` 第 2 节。老化要等几周，这里直接改时间字段来模拟。
+
+1. **近期关注会被识别出来：** 新建对话，发送：
+
+   > 这两周在赶一批肠道菌群样本的数据，月底要交报告。
+
+   等一个提取周期后查数据库：
+
+   ```bash
+   $PSQL -c "select key, category, \"reinforcedCount\", \"expiresAt\"::date from \"UserMemory\" where \"userId\" = '$U' and category in ('current', 'work')"
+   ```
+
+   **预期：** 出现一条 `current`，`expiresAt` 约为 30 天后。
+
+2. **再次提到会续期：** 把它改成 20 天前见过、10 天后过期（把 `<key>` 换成上一步查到的 key）：
+
+   ```bash
+   $PSQL -c "update \"UserMemory\" set \"lastSeenAt\" = now() - interval '20 days', \"expiresAt\" = now() + interval '10 days' where \"userId\" = '$U' and key = '<key>'"
+   ```
+
+   然后在另一个新对话里提到它，例如“肠道那批样本的图再改改配色”，等一个提取周期后再查。
+
+   **预期：** `expiresAt` 回到约 30 天后，`reinforcedCount` 加 1。
+
+3. **反复出现会升级为长期：**
+
+   ```bash
+   $PSQL -c "update \"UserMemory\" set \"createdAt\" = now() - interval '15 days', \"reinforcedCount\" = 3 where \"userId\" = '$U' and key = '<key>'"
+   ```
+
+   再在任意对话里聊一轮，等一个提取周期后查。
+
+   **预期：** 这条变成 `work`，`expiresAt` 为空。
+
+4. **过期会淘汰：** 先把一条 `current` 设为已过期，再在新对话里问“我最近在忙什么？”：
+
+   ```bash
+   $PSQL -c "update \"UserMemory\" set \"expiresAt\" = now() - interval '1 minute' where \"userId\" = '$U' and category = 'current'"
+   ```
+
+   **预期：** 回答里不再提到它。10 分钟内 Worker 会把它物理删除：
+
+   ```bash
+   docker logs --since 15m ai-chatbot-worker 2>&1 | grep "Purged aged-out memories"
+   ```
+
+5. **近期对话只注入两周：** 在新对话里问“我们最近聊过什么？”，回答应能提到 A、E 等会话的内容。然后把会话概要设为 15 天前活跃：
+
+   ```bash
+   $PSQL -c "update \"UserMemory\" set \"lastSeenAt\" = now() - interval '15 days' where \"userId\" = '$U' and category = 'episode'"
+   ```
+
+   再新建对话问同样的问题。
+
+   **预期：** 不再凭记忆直接说出（概要已不注入），但可能会调用“搜索历史对话”或“查看最近对话”去查。
 
 ### J. 模型有没有乱调工具
 
@@ -285,7 +349,7 @@ await closeDatabase(db)
 
 在桌面浏览器和手机宽度下各看一次：
 
-- 账户菜单 →“记忆”：弹窗能正常打开和滚动；能添加、编辑、删除、清空；两个开关切换后刷新页面仍然保持。
+- 账户菜单 →“记忆”：弹窗里只有“使用记忆”开关和“清除全部记忆”两项，不展示任何记忆内容；开关切换后刷新页面仍然保持；清除前需要确认，完成后显示“已清除全部记忆”。
 - 首页“无痕对话”按钮能切换状态，并显示提示文字。
 - 无痕会话的标题旁有“无痕”标记。
 
@@ -295,7 +359,7 @@ await closeDatabase(db)
 
 1. 第 1.3 步的输出。
 2. 第 1.4 步中 `failed` 的任务和 `last_error`（如有）。
-3. A–J 中不符合预期的场景编号，以及当时的对话截图或执行步骤。
+3. A–K 中不符合预期的场景编号，以及当时的对话截图或执行步骤。
 4. 第 3 步的通过率和 `FAIL` 行。
 5. 第 4 步的相似度样例。
 

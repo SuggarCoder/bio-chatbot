@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 
 import { createMemoryToolRunner } from './agent/memoryTools.js'
 import type { BackgroundWorkItem } from './backgroundJobs.js'
@@ -15,11 +15,13 @@ import { chats, EMBEDDING_DIMENSIONS, messageChunks, messages, userMemories, use
 import { MemoryProcessor, type BackgroundModelClient } from './memoryWorker.js'
 import { CharacterTokenCounter } from './tokenBudget.js'
 import {
+  buildUserMemoryInstructions,
   listUserMemories,
   resolveMemoryAccess,
   updateMemorySettings,
   upsertUserMemory,
 } from './userMemory.js'
+import { episodeKey, MEMORY_POLICY, purgeExpiredMemories } from './memoryPolicy.js'
 import { indexChatTurn, listRecentUserChats, searchUserChats } from './chatSearch.js'
 import type { Embedder } from './embeddings.js'
 
@@ -290,7 +292,7 @@ test('cross-chat memory: access rules, search, deletion, tools and debounced ext
   }
 })
 
-test('memory HTTP API: settings, CRUD and incognito chats', { skip: !databaseUrl }, async () => {
+test('memory HTTP API: one switch, clear all, and incognito chats', { skip: !databaseUrl }, async () => {
   const { buildApp } = await import('./app.js')
   const database = createDatabase(databaseUrl as string)
   await migrateDatabase(database)
@@ -316,37 +318,137 @@ test('memory HTTP API: settings, CRUD and incognito chats', { skip: !databaseUrl
     userId = row!.userId
     await database.delete(userMemories).where(eq(userMemories.userId, userId))
 
-    const empty = await app.inject({ method: 'GET', url: `${base}/memory` })
-    assert.equal(empty.statusCode, 200)
-    assert.deepEqual(empty.json().memories, [])
+    const initial = await app.inject({ method: 'GET', url: `${base}/memory/settings` })
+    assert.equal(initial.statusCode, 200)
+    assert.deepEqual(initial.json(), { memoryEnabled: true, chatSearchEnabled: true })
 
-    const created = await app.inject({ method: 'POST', url: `${base}/memory`, payload: { content: '我在做真菌组学', category: 'work' } })
-    assert.equal(created.statusCode, 201)
-    assert.equal(created.json().source, 'user')
-    const id = created.json().id as string
+    const off = await app.inject({ method: 'PATCH', url: `${base}/memory/settings`, payload: { memoryEnabled: false, chatSearchEnabled: false } })
+    assert.deepEqual(off.json(), { memoryEnabled: false, chatSearchEnabled: false })
+    await app.inject({ method: 'PATCH', url: `${base}/memory/settings`, payload: { memoryEnabled: true, chatSearchEnabled: true } })
 
-    const invalid = await app.inject({ method: 'POST', url: `${base}/memory`, payload: { content: '' } })
-    assert.equal(invalid.statusCode, 400)
-
-    const edited = await app.inject({ method: 'PATCH', url: `${base}/memory/${id}`, payload: { content: '我在做植物真菌组学', category: 'identity' } })
-    assert.equal(edited.statusCode, 200)
-    assert.equal(edited.json().category, 'identity')
-
-    const settings = await app.inject({ method: 'PATCH', url: `${base}/memory/settings`, payload: { chatSearchEnabled: false } })
-    assert.deepEqual(settings.json(), { memoryEnabled: true, chatSearchEnabled: false })
-    await app.inject({ method: 'PATCH', url: `${base}/memory/settings`, payload: { chatSearchEnabled: true } })
-
-    assert.equal((await app.inject({ method: 'DELETE', url: `${base}/memory/${id}` })).statusCode, 204)
-    assert.equal((await app.inject({ method: 'DELETE', url: `${base}/memory/${id}` })).statusCode, 404)
-    await app.inject({ method: 'POST', url: `${base}/memory`, payload: { content: 'x' } })
+    // Clearing removes every tier, including conversation digests.
+    await upsertUserMemory(database, { userId, key: 'lab', category: 'identity', content: '在研究所工作', source: 'auto', sourceChatId: null })
+    await upsertUserMemory(database, { userId, key: 'episode_x', category: 'episode', content: '讨论了样本', source: 'auto', sourceChatId: null })
     assert.equal((await app.inject({ method: 'DELETE', url: `${base}/memory` })).statusCode, 204)
-    assert.deepEqual((await app.inject({ method: 'GET', url: `${base}/memory` })).json().memories, [])
+    const left = await database.select({ key: userMemories.key }).from(userMemories).where(eq(userMemories.userId, userId))
+    assert.deepEqual(left, [])
+
+    // The per-entry endpoints are gone: users do not browse memories.
+    assert.equal((await app.inject({ method: 'GET', url: `${base}/memory` })).statusCode, 404)
+    assert.equal((await app.inject({ method: 'POST', url: `${base}/memory`, payload: { content: 'x' } })).statusCode, 404)
   } finally {
     if (userId) {
       await database.delete(userMemories).where(eq(userMemories.userId, userId))
       if (chatId) await database.delete(chats).where(eq(chats.id, chatId))
     }
     await app.close()
+    await closeDatabase(database)
+  }
+})
+
+test('memory tiers: digests, touch, promotion and aging', { skip: !databaseUrl }, async () => {
+  const database = createDatabase(databaseUrl as string)
+  const userIds: string[] = []
+  try {
+    await migrateDatabase(database)
+    const [owner] = await database
+      .insert(users)
+      .values({ externalUserId: `memory-tiers-${crypto.randomUUID()}` })
+      .returning({ id: users.id })
+    userIds.push(owner!.id)
+    const userId = owner!.id
+    const newChat = async (title: string) => {
+      const [chat] = await database.insert(chats).values({ userId, title }).returning({ id: chats.id })
+      return chat!.id
+    }
+    const addTurn = async (chatId: string, user: string, assistant: string) => {
+      const [chat] = await database.select({ next: chats.nextMessageSeq }).from(chats).where(eq(chats.id, chatId))
+      const seq = chat!.next
+      await database.insert(messages).values([
+        { userId, chatId, seq, role: 'user', content: user },
+        { userId, chatId, seq: seq + 1n, role: 'assistant', status: 'completed', content: assistant },
+      ])
+      await database.update(chats).set({ nextMessageSeq: seq + 2n }).where(eq(chats.id, chatId))
+      return Number(seq + 1n)
+    }
+    const row = async (key: string) => {
+      const [found] = await database.select().from(userMemories).where(and(eq(userMemories.userId, userId), eq(userMemories.key, key)))
+      return found
+    }
+    const days = (date: Date | null | undefined) => date ? Math.round((date.getTime() - Date.now()) / 86_400_000) : null
+    const age = (key: string, input: { seenDaysAgo?: number; createdDaysAgo?: number; reinforced?: number; expiresInDays?: number }) =>
+      database.update(userMemories).set({
+        ...(input.seenDaysAgo !== undefined ? { lastSeenAt: sql`now() - make_interval(days => ${input.seenDaysAgo})` } : {}),
+        ...(input.createdDaysAgo !== undefined ? { createdAt: sql`now() - make_interval(days => ${input.createdDaysAgo})` } : {}),
+        ...(input.reinforced !== undefined ? { reinforcedCount: input.reinforced } : {}),
+        ...(input.expiresInDays !== undefined ? { expiresAt: sql`now() + make_interval(secs => ${input.expiresInDays * 86_400})` } : {}),
+      }).where(and(eq(userMemories.userId, userId), eq(userMemories.key, key)))
+
+    const first = await newChat('耐药基因分析')
+    const second = await newChat('论文准备')
+    const model = fakeModel((request) => {
+      if (request.input.includes('tetM')) {
+        return {
+          operations: [
+            { action: 'upsert', key: 'lab', category: 'identity', content: '用户在微生物所做宏基因组' },
+            { action: 'upsert', key: 'paper', category: 'current', content: '用户在准备一篇耐药基因的论文' },
+          ],
+          episode: '解读了土壤样本中 tetM 和 sul1 的丰度，结论是需要 qPCR 验证。',
+        }
+      }
+      return { operations: [{ action: 'touch', key: 'paper' }], episode: '继续讨论论文的图表安排。' }
+    })
+    const processor = new MemoryProcessor(config, database, new CharacterTokenCounter(), undefined, model.client)
+
+    // Profile and recent memories, plus the chat's digest.
+    await processor.process(memoryJob(userId, first, await addTurn(first, '我在微生物所，这批样本检出 tetM 了，我在写论文', '好的')))
+    const lab = await row('lab')
+    const paper = await row('paper')
+    const digest = await row(episodeKey(first))
+    assert.equal(lab?.expiresAt, null, 'profile memories never expire')
+    assert.equal(days(paper?.expiresAt), MEMORY_POLICY.recentTtlDays)
+    assert.equal(digest?.category, 'episode')
+    assert.equal(days(digest?.expiresAt), MEMORY_POLICY.episodeTtlDays)
+
+    // Another chat sees the digest as recent history; the chat itself does not.
+    const counter = new CharacterTokenCounter()
+    const forSecond = await buildUserMemoryInstructions(database, userId, { tokenBudget: 4_000, maxItems: 40, tokenCounter: counter, chatId: second })
+    assert.match(forSecond, /### 近期对话\n- \d{4}-\d{2}-\d{2}：解读了土壤样本中 tetM/)
+    const forFirst = await buildUserMemoryInstructions(database, userId, { tokenBudget: 4_000, maxItems: 40, tokenCounter: counter, chatId: first })
+    assert.doesNotMatch(forFirst, /### 近期对话/)
+
+    // Mentioning recent focus again in another chat keeps it alive and counts.
+    await age('paper', { seenDaysAgo: 20, expiresInDays: 10 })
+    await processor.process(memoryJob(userId, second, await addTurn(second, '论文的图怎么排？', '建议……')))
+    const touched = await row('paper')
+    assert.equal(days(touched?.expiresAt), MEMORY_POLICY.recentTtlDays)
+    assert.equal(touched?.reinforcedCount, 2)
+    assert.equal(touched?.category, 'current')
+    assert.ok((await row(episodeKey(second)))?.content.includes('图表'))
+
+    // Recent focus that keeps coming back for weeks becomes long-term work.
+    await age('paper', { createdDaysAgo: MEMORY_POLICY.promoteMinAgeDays + 1, reinforced: MEMORY_POLICY.promoteMinReinforcements })
+    await processor.process(memoryJob(userId, second, await addTurn(second, '论文图再调一下', '好的')))
+    const promoted = await row('paper')
+    assert.equal(promoted?.category, 'work')
+    assert.equal(promoted?.expiresAt, null)
+
+    // Aged-out memories disappear from reads at once and from storage on purge.
+    await upsertUserMemory(database, { userId, key: 'old_focus', category: 'current', content: '用户上个月在调 PCR 引物', source: 'auto', sourceChatId: first })
+    await age('old_focus', { expiresInDays: -0.001 })
+    await age(episodeKey(first), { seenDaysAgo: MEMORY_POLICY.episodeInjectDays + 1 })
+    assert.ok(!(await listUserMemories(database, userId)).some((memory) => memory.key === 'old_focus'))
+    const later = await buildUserMemoryInstructions(database, userId, { tokenBudget: 4_000, maxItems: 40, tokenCounter: counter })
+    assert.doesNotMatch(later, /PCR 引物/)
+    assert.doesNotMatch(later, /tetM/, 'digests older than the injection window are not injected')
+    assert.ok(await purgeExpiredMemories(database) >= 1)
+    assert.equal(await row('old_focus'), undefined)
+    assert.ok(await row(episodeKey(first)), 'a digest past the injection window is kept until it expires')
+  } finally {
+    if (userIds.length > 0) {
+      await database.delete(userMemories).where(inArray(userMemories.userId, userIds))
+      await database.delete(users).where(inArray(users.id, userIds))
+    }
     await closeDatabase(database)
   }
 })

@@ -15,6 +15,13 @@
       "when": 1793618188063,
       "tag": "0001_memory_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793622838005,
+      "tag": "0002_memory_tiers",
+      "breakpoints": true
     }
   ]
 }

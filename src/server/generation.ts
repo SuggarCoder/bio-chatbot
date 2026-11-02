@@ -1000,6 +1000,7 @@ export class GenerationService {
             tokenBudget: this.config.userMemoryTokenBudget,
             maxItems: this.config.userMemoryMaxItems,
             tokenCounter: this.tokenCounter,
+            chatId: input.chatId,
           })
         : ''
       let artifactCount = 0

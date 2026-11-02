@@ -63,15 +63,9 @@ import {
 } from './artifacts/repository.js'
 import { httpSchemas } from './httpSchemas.js'
 import {
-  createUserMemory,
   deleteUserMemories,
-  editUserMemory,
-  listUserMemories,
   loadMemorySettings,
-  normalizeMemoryCategory,
-  normalizeMemoryContent,
   updateMemorySettings,
-  type UserMemoryRecord,
 } from './userMemory.js'
 import {
   generationStreamKey,
@@ -681,28 +675,15 @@ export async function buildApp(
   )
 
   // -------------------------------------------------------------------------
-  // Memory: what the assistant remembers about the user, and its settings.
+  // Memory: users only see whether it is on, and can clear it. What is
+  // remembered, and how it ages, is managed by the system (memoryPolicy.ts).
   // -------------------------------------------------------------------------
 
-  const memoryDto = (row: UserMemoryRecord) => ({
-    id: row.id,
-    category: row.category,
-    content: row.content,
-    source: row.source,
-    sourceChatId: row.sourceChatId,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  })
-
-  app.get(`${API_BASE}/memory`, {
-    schema: { response: httpSchemas.memoryResponse },
+  app.get(`${API_BASE}/memory/settings`, {
+    schema: { response: httpSchemas.memorySettings.response },
   }, async (request) => {
     const user = await authenticate(request)
-    const [settings, memories] = await Promise.all([
-      loadMemorySettings(database, user.id),
-      listUserMemories(database, user.id),
-    ])
-    return { settings, memories: memories.map(memoryDto) }
+    return loadMemorySettings(database, user.id)
   })
 
   app.patch(`${API_BASE}/memory/settings`, {
@@ -714,63 +695,6 @@ export async function buildApp(
       memoryEnabled: typeof body.memoryEnabled === 'boolean' ? body.memoryEnabled : undefined,
       chatSearchEnabled: typeof body.chatSearchEnabled === 'boolean' ? body.chatSearchEnabled : undefined,
     })
-  })
-
-  app.post(`${API_BASE}/memory`, {
-    schema: httpSchemas.createMemory,
-  }, async (request, reply) => {
-    const user = await authenticate(request)
-    const body = readObjectBody(request)
-    const content = normalizeMemoryContent(body.content)
-    if (!content) {
-      return reply.code(400).send(
-        errorBody(request, 'invalid_request', 'content must be 1-500 characters'),
-      )
-    }
-    const memory = await createUserMemory(database, user.id, {
-      content,
-      category: normalizeMemoryCategory(body.category),
-    })
-    return reply.code(201).send(memoryDto(memory))
-  })
-
-  app.patch<{
-    Params: { memoryId: string }
-  }>(`${API_BASE}/memory/:memoryId`, {
-    schema: { params: httpSchemas.memoryIdParams, ...httpSchemas.updateMemory },
-  }, async (request, reply) => {
-    const user = await authenticate(request)
-    const memoryId = requireUuid(request, reply, request.params.memoryId, 'memoryId')
-    if (!memoryId) return
-    const body = readObjectBody(request)
-    const content = body.content === undefined ? undefined : normalizeMemoryContent(body.content)
-    if (content === null) {
-      return reply.code(400).send(
-        errorBody(request, 'invalid_request', 'content must be 1-500 characters'),
-      )
-    }
-    const memory = await editUserMemory(database, user.id, memoryId, {
-      content,
-      category: body.category === undefined ? undefined : normalizeMemoryCategory(body.category),
-    })
-    if (!memory) {
-      return reply.code(404).send(errorBody(request, 'memory_not_found', 'Memory not found'))
-    }
-    return memoryDto(memory)
-  })
-
-  app.delete<{
-    Params: { memoryId: string }
-  }>(`${API_BASE}/memory/:memoryId`, {
-    schema: { params: httpSchemas.memoryIdParams },
-  }, async (request, reply) => {
-    const user = await authenticate(request)
-    const memoryId = requireUuid(request, reply, request.params.memoryId, 'memoryId')
-    if (!memoryId) return
-    if (await deleteUserMemories(database, user.id, { ids: [memoryId] }) === 0) {
-      return reply.code(404).send(errorBody(request, 'memory_not_found', 'Memory not found'))
-    }
-    return reply.code(204).send()
   })
 
   app.delete(`${API_BASE}/memory`, async (request, reply) => {
