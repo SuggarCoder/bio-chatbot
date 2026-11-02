@@ -115,6 +115,82 @@ export class CharacterTokenCounter implements TokenCounter {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Incremental counting
+//
+// Tokenizing is synchronous and costs about 1 ms per 2 KB, so re-counting a
+// growing conversation on every step is quadratic (a 500-message chat took
+// 80 s of CPU). With chat templates that frame each message with special
+// tokens, a conversation costs the template's fixed framing plus the sum of
+// its messages, so each message is counted once (and cached) and selections
+// are made on sums. The sum can be off by a few tokens (e.g. a template that
+// adds a reasoning block after a final assistant turn), so every caller
+// still makes one exact count of what it finally sends and trims if needed.
+// ---------------------------------------------------------------------------
+
+const MESSAGE_COST_CACHE_LIMIT = 20_000
+const costCaches = new WeakMap<TokenCounter, { framing?: number; probe?: number; costs: Map<string, number> }>()
+/** Follows the measured message, so it is priced as a turn mid-conversation. */
+const PROBE: BudgetMessage = { role: 'user', content: 'a' }
+
+function costCache(counter: TokenCounter) {
+  let cache = costCaches.get(counter)
+  if (!cache) {
+    cache = { costs: new Map() }
+    costCaches.set(counter, cache)
+  }
+  return cache
+}
+
+/** Tokens the chat template adds around a conversation, independent of its messages. */
+export function conversationFramingTokens(counter: TokenCounter): number {
+  const cache = costCache(counter)
+  if (cache.framing === undefined) {
+    const first: BudgetMessage = { role: 'user', content: 'a' }
+    const second: BudgetMessage = { role: 'user', content: 'b' }
+    cache.framing = Math.max(0,
+      counter.countMessages([first]) + counter.countMessages([second]) -
+      counter.countMessages([first, second]))
+  }
+  return cache.framing
+}
+
+/**
+ * Tokens one message adds to a conversation, counted once per distinct
+ * message. It is measured followed by a short user turn, so template extras
+ * that only apply to a final assistant turn are left to the exact count.
+ */
+export function messageCostTokens(counter: TokenCounter, message: BudgetMessage): number {
+  const cache = costCache(counter)
+  cache.probe ??= counter.countMessages([PROBE])
+  const key = `${message.role}\u0000${createHash('sha1').update(message.content).digest('base64')}`
+  const cached = cache.costs.get(key)
+  if (cached !== undefined) {
+    // Refresh recency for the simple LRU below.
+    cache.costs.delete(key)
+    cache.costs.set(key, cached)
+    return cached
+  }
+  const cost = Math.max(0, counter.countMessages([message, PROBE]) - cache.probe)
+  cache.costs.set(key, cost)
+  if (cache.costs.size > MESSAGE_COST_CACHE_LIMIT) {
+    cache.costs.delete(cache.costs.keys().next().value!)
+  }
+  return cost
+}
+
+/** Estimated tokens of a conversation: framing plus the sum of its messages. */
+export function estimateConversationTokens(
+  counter: TokenCounter,
+  messages: BudgetMessage[],
+  instructions?: string,
+): number {
+  let total = conversationFramingTokens(counter)
+  if (instructions) total += messageCostTokens(counter, { role: 'system', content: instructions })
+  for (const message of messages) total += messageCostTokens(counter, message)
+  return total
+}
+
 /** Keep the newest user turn; evict oldest turns before invoking the provider. */
 export async function fitInputBudget<T extends BudgetMessage>(
   counter: TokenCounter,
@@ -124,25 +200,32 @@ export async function fitInputBudget<T extends BudgetMessage>(
     'chatHistoryTokenBudget' | 'chatSummaryTokenBudget' | 'instructionsTokenBudget'>,
 ): Promise<T[]> {
   await counter.initialize()
-  if (counter.countText(instructions) > config.instructionsTokenBudget) {
+  const instructionTokens = counter.countText(instructions)
+  if (instructionTokens > config.instructionsTokenBudget) {
     throw new Error('ASSEMBLED_INSTRUCTIONS_TOKEN_BUDGET_EXCEEDED')
   }
   const budget = Math.min(config.qwenMaxInputTokens,
     config.qwenContextWindowTokens - config.qwenMaxOutputTokens,
-    config.chatHistoryTokenBudget + config.chatSummaryTokenBudget + counter.countText(instructions))
+    config.chatHistoryTokenBudget + config.chatSummaryTokenBudget + instructionTokens)
   const starts = messages.flatMap((message, index) => message.role === 'user' ? [index] : [])
   if (!starts.length) throw new Error('CONTEXT_REQUIRES_USER_MESSAGE')
-  let low = 0
-  let high = starts.length - 1
-  const fits = (index: number) => counter.countMessages(messages.slice(starts[index]), instructions) <= budget
-  if (!fits(high)) throw new Error('LATEST_MESSAGE_TOKEN_BUDGET_EXCEEDED')
-  while (low < high) {
-    const mid = Math.floor((low + high) / 2)
-    if (fits(mid)) high = mid
-    else low = mid + 1
+
+  // Estimated cost of messages[index..] for every index, from the end.
+  const fixed = conversationFramingTokens(counter) +
+    (instructions ? messageCostTokens(counter, { role: 'system', content: instructions }) : 0)
+  const suffix = new Array<number>(messages.length + 1).fill(0)
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    suffix[index] = suffix[index + 1]! + messageCostTokens(counter, messages[index]!)
   }
-  const selected = messages.slice(starts[low])
+  // The earliest turn start whose estimate fits, then exact counts from there.
   // Final exact check is mandatory, including when instructions is empty.
-  if (counter.countMessages(selected, instructions) > budget) throw new Error('ASSEMBLED_CONTEXT_TOKEN_BUDGET_EXCEEDED')
-  return selected
+  const fitsExactly = (position: number) =>
+    counter.countMessages(messages.slice(starts[position]), instructions) <= budget
+  let position = starts.findIndex((start) => fixed + suffix[start]! <= budget)
+  if (position < 0) position = starts.length - 1
+  while (position < starts.length && !fitsExactly(position)) position += 1
+  if (position >= starts.length) throw new Error('LATEST_MESSAGE_TOKEN_BUDGET_EXCEEDED')
+  // If the estimate was pessimistic, an earlier turn may fit too.
+  while (position > 0 && fitsExactly(position - 1)) position -= 1
+  return messages.slice(starts[position])
 }

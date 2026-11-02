@@ -51,15 +51,18 @@ function truncateToTokens(
 ): string {
   if (counter.countText(value) <= budget) return value
   const lines = value.split('\n')
-  let low = 0
-  let high = lines.length
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2)
-    const candidate = lines.slice(0, middle).join('\n')
-    if (counter.countText(candidate) <= budget) low = middle
-    else high = middle - 1
+  // Count each line once (+1 for its newline) instead of re-counting
+  // ever-longer prefixes, then confirm the prefix with one exact count.
+  let kept = 0
+  let total = 0
+  for (const line of lines) {
+    const tokens = counter.countText(line) + 1
+    if (total + tokens > budget) break
+    total += tokens
+    kept += 1
   }
-  return `${lines.slice(0, low).join('\n')}\n[truncated]`.trim()
+  while (kept > 0 && counter.countText(lines.slice(0, kept).join('\n')) > budget) kept -= 1
+  return `${lines.slice(0, kept).join('\n')}\n[truncated]`.trim()
 }
 
 function sectionText(buffer: Buffer, section: ArtifactOutlineSection): string {
@@ -155,6 +158,8 @@ export async function assembleArtifactContext(
   }))
   const renderPrompt = () => buildArtifactSystemPrompt(promptCatalog, { patchEnabled })
   const fits = (instructions: string) => tokenCounter.countText(instructions) <= input.tokenBudget
+  /** Token counts of selectedPrompt.fragments, in the same order. */
+  const fragmentTokens: number[] = []
 
   if (!selected) {
     const instructions = renderPrompt()
@@ -205,6 +210,7 @@ export async function assembleArtifactContext(
     const order = ranked.length > 0 ? ranked : extracted.sections.map((section) => section.ordinal)
     const picked: ArtifactOutlineSection[] = []
     let usedTokens = 0
+    const sectionTokens = new Map<number, number>()
     for (const ordinal of order) {
       if (picked.length >= MAX_FRAGMENTS) break
       const section = byOrdinal.get(ordinal)!
@@ -212,6 +218,7 @@ export async function assembleArtifactContext(
       if (usedTokens + tokens > config.artifactFragmentTokenBudget) continue
       picked.push(section)
       usedTokens += tokens
+      sectionTokens.set(section.ordinal, tokens)
     }
     picked.sort((left, right) => left.ordinal - right.ordinal)
     selectedPrompt.outline = truncateToTokens(
@@ -225,14 +232,23 @@ export async function assembleArtifactContext(
       headingPath: section.headingPath,
       content: sectionText(buffer, section),
     }))
+    fragmentTokens.push(...picked.map((section) => sectionTokens.get(section.ordinal) ?? 0))
     selectedPrompt.status = 'outline_fragments_attached'
     selectedPrompt.edit = editModeFor(selected.byteLength, patchEnabled, false)
   }
 
   let instructions = renderPrompt()
-  while (selectedPrompt.fragments?.length && !fits(instructions)) {
-    selectedPrompt.fragments.pop()
+  let instructionTokens = tokenCounter.countText(instructions)
+  while (selectedPrompt.fragments?.length && instructionTokens > input.tokenBudget) {
+    // Drop as many trailing fragments as their known sizes say are needed,
+    // then re-count once, instead of re-counting after every fragment.
+    let excess = instructionTokens - input.tokenBudget
+    do {
+      selectedPrompt.fragments.pop()
+      excess -= fragmentTokens.pop() ?? excess
+    } while (selectedPrompt.fragments.length > 0 && excess > 0)
     instructions = renderPrompt()
+    instructionTokens = tokenCounter.countText(instructions)
   }
   if (!fits(instructions)) {
     selectedPrompt.content = undefined

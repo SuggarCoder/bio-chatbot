@@ -87,6 +87,16 @@ function shortDate(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
 
+function categoryHeading(category: UserMemoryCategory): string {
+  return `### ${MEMORY_CATEGORY_LABELS[category]}`
+}
+
+function renderMemoryLine(entry: UserMemoryEntry): string {
+  return entry.category === 'episode'
+    ? `- ${shortDate(entry.lastSeenAt)}：${entry.content}`
+    : `- (${entry.key}) ${entry.content}`
+}
+
 /** Entries kept first when the budget is tight: user-confirmed, then by category. */
 function injectionPriority(entry: UserMemoryEntry): number {
   const source = entry.source === 'auto' ? 1 : 0
@@ -105,14 +115,12 @@ export function renderUserMemoryInstructions(entries: UserMemoryEntry[]): string
       .filter((entry) => entry.category === category)
       .sort((left, right) => left.key.localeCompare(right.key))
     if (group.length === 0) continue
-    lines.push(`### ${MEMORY_CATEGORY_LABELS[category]}`)
+    lines.push(categoryHeading(category))
     if (category === 'episode') {
       // Conversation history reads best newest first, dated.
       group.sort((left, right) => right.lastSeenAt.getTime() - left.lastSeenAt.getTime() || left.key.localeCompare(right.key))
-      for (const entry of group) lines.push(`- ${shortDate(entry.lastSeenAt)}：${entry.content}`)
-      continue
     }
-    for (const entry of group) lines.push(`- (${entry.key}) ${entry.content}`)
+    for (const entry of group) lines.push(renderMemoryLine(entry))
   }
   return lines.join('\n')
 }
@@ -140,11 +148,24 @@ export function selectMemoriesWithinBudget(
   const ranked = [...entries].sort((left, right) =>
     injectionPriority(left) - injectionPriority(right) ||
     right.updatedAt.getTime() - left.updatedAt.getTime())
+  // Each line and heading is counted once (+1 for its newline); the sum
+  // selects, one exact count of the rendered set confirms.
+  let total = tokenCounter.countText(USER_MEMORY_HEADER)
+  const headed = new Set<UserMemoryCategory>()
   const selected: UserMemoryEntry[] = []
   for (const entry of ranked) {
-    const next = [...selected, entry]
-    if (countUserMemoryTokens(tokenCounter, next) > tokenBudget) continue
+    const heading = headed.has(entry.category)
+      ? 0
+      : tokenCounter.countText(categoryHeading(entry.category)) + 1
+    const cost = tokenCounter.countText(renderMemoryLine(entry)) + 1 + heading
+    if (total + cost > tokenBudget) continue
+    total += cost
+    headed.add(entry.category)
     selected.push(entry)
+  }
+  // Drop the lowest-priority entries while the exact count is over.
+  while (selected.length > 0 && countUserMemoryTokens(tokenCounter, selected) > tokenBudget) {
+    selected.pop()
   }
   return selected
 }

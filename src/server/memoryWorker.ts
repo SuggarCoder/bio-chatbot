@@ -25,7 +25,7 @@ import {
   userMemories,
   users,
 } from './db/schema.js'
-import type { TokenCounter } from './tokenBudget.js'
+import { messageCostTokens, type TokenCounter } from './tokenBudget.js'
 import {
   countUserMemoryTokens,
   listUserMemories,
@@ -427,12 +427,16 @@ export class MemoryProcessor {
     let retainedTokens = 0
     const candidates: typeof rows = []
     for (const row of rows) {
-      const content = row.content ?? ''
-      const cost = this.tokenCounter.countMessages([{
+      // Once one row falls outside the retained window, all older ones do.
+      if (candidates.length > 0) {
+        candidates.push(row)
+        continue
+      }
+      const cost = messageCostTokens(this.tokenCounter, {
         role: row.role as 'user' | 'assistant',
-        content,
-      }])
-      if (retainedTokens + cost <= retainedBudget && candidates.length === 0) {
+        content: row.content ?? '',
+      })
+      if (retainedTokens + cost <= retainedBudget) {
         retainedTokens += cost
       } else {
         candidates.push(row)
@@ -631,11 +635,13 @@ export class MemoryProcessor {
     // Keep the most recent turns that fit; older ones in a long burst are
     // already reflected by the rolling summary and later turns.
     const selected: WindowMessage[] = []
+    let selectedTokens = 0
     for (const row of [...window].reverse()) {
-      const next = [row, ...selected]
-      const tokens = this.tokenCounter.countText(renderTurns(next, EXTRACTION_CLIP))
-      if (selected.length > 0 && tokens > EXTRACTION_WINDOW_TOKENS) break
+      // Turns are joined by a blank line; count each turn once.
+      const tokens = this.tokenCounter.countText(renderTurns([row], EXTRACTION_CLIP)) + 2
+      if (selected.length > 0 && selectedTokens + tokens > EXTRACTION_WINDOW_TOKENS) break
       selected.unshift(row)
+      selectedTokens += tokens
     }
     const preceding = await this.database
       .select({ seq: messages.seq, role: messages.role, content: messages.content })

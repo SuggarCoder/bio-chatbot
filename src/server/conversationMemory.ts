@@ -14,7 +14,11 @@ import {
   chatSummaries,
   messages,
 } from './db/schema.js'
-import type { TokenCounter } from './tokenBudget.js'
+import {
+  conversationFramingTokens,
+  messageCostTokens,
+  type TokenCounter,
+} from './tokenBudget.js'
 import { notSupersededMessage } from './userMemory.js'
 
 /**
@@ -121,6 +125,9 @@ export async function buildBudgetedChatContext(
   let cursor = BigInt(input.contextMaxSeq + 1)
   let exhausted = false
   let omittedUnsummarized = false
+  // Each message is counted once; the running sum selects, one exact count
+  // below confirms.
+  let estimatedTokens = conversationFramingTokens(input.tokenCounter)
 
   while (!exhausted) {
     const rows = await database
@@ -154,26 +161,31 @@ export async function buildBudgetedChatContext(
         role: row.role as 'user' | 'assistant',
         content: row.content ?? '',
       }
-      const next = [candidate, ...selected]
-      const nextTokens = input.tokenCounter.countMessages(next.map(({ role, content }) => ({
-        role,
-        content,
-      })))
+      const nextTokens = estimatedTokens + messageCostTokens(input.tokenCounter, candidate)
       if (selected.length > 0 && nextTokens > input.historyTokenBudget) {
         omittedUnsummarized = candidate.seq > coveredMaxSeq
         exhausted = true
         break
       }
+      estimatedTokens = nextTokens
       selected.unshift(candidate)
     }
     cursor = rows.at(-1)!.seq
     if (rows.length < 100) break
   }
 
-  const rawMessages = selected.map(({ role, content }) => ({ role, content }))
-  const rawTokens = rawMessages.length > 0
+  let rawMessages = selected.map(({ role, content }) => ({ role, content }))
+  let rawTokens = rawMessages.length > 0
     ? input.tokenCounter.countMessages(rawMessages)
     : 0
+  // The estimate can be a few tokens short; drop the oldest turns until the
+  // exact count fits, as the old per-step exact count would have.
+  while (rawMessages.length > 1 && rawTokens > input.historyTokenBudget) {
+    const dropped = selected.shift()!
+    if (dropped.seq > coveredMaxSeq) omittedUnsummarized = true
+    rawMessages = rawMessages.slice(1)
+    rawTokens = input.tokenCounter.countMessages(rawMessages)
+  }
   const contextMessages = usableSummary
     ? [{ role: 'user' as const, content: usableSummary }, ...rawMessages]
     : rawMessages
