@@ -247,10 +247,26 @@ function DownArrowIcon() {
   return <span aria-hidden="true" class="i-lucide-chevron-down h-4 w-4 shrink-0" />
 }
 
+function useUserDisplayName() {
+  const chatStore = useChatStore()
+  return () =>
+    chatStore.currentUser()?.realName ||
+    chatStore.currentUser()?.name ||
+    chatStore.currentUser()?.userName ||
+    'GPAS2 用户'
+}
+
+function getAvatarInitial(name: string) {
+  const firstChar = Array.from(name.trim())[0] ?? ''
+  return firstChar.toUpperCase()
+}
+
 function ResearcherAvatar() {
+  const displayName = useUserDisplayName()
+
   return (
     <div class="grid h-12 w-12 place-items-center rounded-full bg-teal-600 text-sm font-semibold text-light-100">
-      GP
+      {getAvatarInitial(displayName())}
     </div>
   )
 }
@@ -802,11 +818,7 @@ function ExpandedSidebarPanel(props: {
   const [renameConversationId, setRenameConversationId] = createSignal<string | null>(null)
   const [renameValue, setRenameValue] = createSignal('')
   const [deleteConversationId, setDeleteConversationId] = createSignal<string | null>(null)
-  const displayName = () =>
-    chatStore.currentUser()?.realName ||
-    chatStore.currentUser()?.name ||
-    chatStore.currentUser()?.userName ||
-    'GPAS2 用户'
+  const displayName = useUserDisplayName()
   const jobTitle = () =>
     chatStore.currentUser()?.jobTitle || '研究人员'
 
