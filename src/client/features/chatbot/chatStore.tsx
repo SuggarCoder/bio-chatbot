@@ -1,11 +1,13 @@
 import {
+  batch,
   createContext,
   onMount,
   useContext,
   type ParentComponent,
 } from 'solid-js'
-import { createStore, produce } from 'solid-js/store'
+import { createStore, produce, reconcile, unwrap } from 'solid-js/store'
 import { artifactStore } from '../artifacts/artifactStore'
+import { conversationHasUpload } from '../gpasUpload/uploadJobs'
 
 import {
   ChatApiError,
@@ -27,6 +29,11 @@ import {
   type GenerationActivity,
   type GenerationActivityAction,
 } from './generationActivity'
+import { selectEvictions, touchRecent } from './lru'
+import { browserSessionStorage, sweepStreamResume } from './streamResume'
+
+/** Conversations whose messages stay in memory: the open one plus this many recent ones. */
+export const RECENT_CONVERSATIONS_KEPT = 8
 
 export type ChatMessageRole = 'user' | 'assistant'
 export type ChatMessageStatus =
@@ -117,6 +124,11 @@ type ChatStoreContextValue = {
     options?: { force?: boolean },
   ) => Promise<ChatConversation | undefined>
   loadOlderMessages: (id: string) => Promise<void>
+  /**
+   * Marks a conversation as the one on screen. Message lists of conversations
+   * not viewed recently are dropped; they load again when reopened.
+   */
+  markConversationViewed: (id: string) => void
   renameConversation: (id: string, title: string) => Promise<void>
   deleteConversation: (id: string) => Promise<void>
   updateConversationDraft: (id: string, value: string) => void
@@ -313,6 +325,57 @@ export const ChatStoreProvider: ParentComponent = (props) => {
     string,
     Promise<ChatConversation | undefined>
   >()
+  /** Conversations holding messages, most recently viewed first. */
+  let recentConversations: string[] = []
+
+  const canEvictConversation = (id: string) => {
+    const conversation = state.conversations[id]
+    if (!conversation) return true
+    return conversation.detailStatus === 'loaded' &&
+      !conversation.activeGeneration &&
+      !conversation.requestPending &&
+      !conversation.unsynced &&
+      !conversation.loadingOlderMessages &&
+      !pendingConversationLoads.has(id) &&
+      !conversationHasUpload(id) &&
+      // Local-only messages (pending uploads, failed starts) cannot be reloaded.
+      conversation.messages.every((message) => message.persisted && !message.uploadPending)
+  }
+
+  const evictStaleConversations = () => {
+    const evicted = selectEvictions(
+      recentConversations,
+      RECENT_CONVERSATIONS_KEPT + 1,
+      canEvictConversation,
+    )
+    if (evicted.length === 0) return
+    const evictedIds = new Set(evicted)
+    recentConversations = recentConversations.filter((id) => !evictedIds.has(id))
+    batch(() => {
+      for (const id of evicted) {
+        if (!state.conversations[id]) continue
+        setState('conversations', id, {
+          messages: [],
+          detailStatus: 'summary',
+          detailError: undefined,
+          hasMoreMessages: false,
+          beforeMessageSeq: undefined,
+          loadingOlderMessages: false,
+          olderMessagesError: undefined,
+        })
+      }
+    })
+  }
+
+  /** A conversation loaded without being opened (e.g. a background reply) is the least recent. */
+  const noteConversationLoaded = (id: string) => {
+    if (!recentConversations.includes(id)) recentConversations.push(id)
+  }
+
+  const markConversationViewed = (id: string) => {
+    recentConversations = touchRecent(recentConversations, id)
+    evictStaleConversations()
+  }
 
   const moveConversationToTop = (id: string) => {
     setState('order', (current) => [
@@ -352,6 +415,8 @@ export const ChatStoreProvider: ParentComponent = (props) => {
           draft.initializationErrorStatus = undefined
         }),
       )
+      // Resume state of streams that ended while no tab was watching.
+      sweepStreamResume(browserSessionStorage(), user.id)
     } catch (error) {
       setState('initialized', true)
       setState(
@@ -444,17 +509,45 @@ export const ChatStoreProvider: ParentComponent = (props) => {
       })
     }
     const request = fetchChat(id).then((detail) => {
+      const previous = state.conversations[id]
       const conversation = mapDetail(
         detail,
-        state.conversations[id],
+        previous ? unwrap(previous) : undefined,
       )
-      setState('conversations', id, conversation)
+
+      if (!previous) {
+        setState('conversations', id, conversation)
+      } else {
+        const { messages, ...fields } = conversation
+        batch(() => {
+          setState('conversations', id, fields)
+          // Unchanged messages keep their objects, so their bubbles (parsed
+          // markdown, highlighted code, rendered diagrams) are not rebuilt.
+          setState(
+            'conversations',
+            id,
+            'messages',
+            reconcile(messages, { key: 'id', merge: false }),
+          )
+        })
+      }
 
       if (!state.order.includes(id)) {
         setState('order', (current) => [id, ...current])
       }
+      noteConversationLoaded(id)
 
-      return conversation
+      const userId = state.currentUser?.id
+      if (userId) {
+        sweepStreamResume(browserSessionStorage(), userId, {
+          conversationId: id,
+          keepGenerationIds: new Set(
+            detail.activeGeneration ? [detail.activeGeneration.id] : [],
+          ),
+        })
+      }
+
+      return state.conversations[id]
     }).catch((error: unknown) => {
       if (state.conversations[id]) {
         setState('conversations', id, {
@@ -550,6 +643,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         draft.order = draft.order.filter((item) => item !== id)
       }),
     )
+    recentConversations = recentConversations.filter((item) => item !== id)
   }
 
   const updateConversationDraft = (id: string, value: string) => {
@@ -1098,6 +1192,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         conversation.updatedAt = Date.now()
       }),
     )
+    artifactStore.releaseGeneration(generationId)
   }
 
   return (
@@ -1116,6 +1211,7 @@ export const ChatStoreProvider: ParentComponent = (props) => {
         ensureConversationCreated,
         loadConversation,
         loadOlderMessages,
+        markConversationViewed,
         renameConversation,
         deleteConversation,
         updateConversationDraft,
