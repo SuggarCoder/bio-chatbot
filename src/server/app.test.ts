@@ -85,6 +85,10 @@ test('an overloaded database pool sheds new requests with 503 but keeps health c
     const request = () => app.inject({ method: 'POST', url: '/ai-chatbot/api/conversations', payload: { title: '' } })
     assert.equal((await request()).statusCode, 400, 'accepted (and validated) while the pool is idle')
     pool.waitingCount = 11
+    // A queue that just formed is absorbed...
+    assert.equal((await request()).statusCode, 400, 'a brief pool queue is not shed')
+    // ...one that persists for over a second is shed.
+    await new Promise((resolve) => setTimeout(resolve, 1_300))
     const shed = await request()
     assert.equal(shed.statusCode, 503)
     assert.equal(shed.headers['retry-after'], '2')

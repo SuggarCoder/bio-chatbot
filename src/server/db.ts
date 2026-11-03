@@ -578,7 +578,8 @@ async function queryChatMessagesPage(
   const sized = await database
     .select({
       id: messages.id,
-      bytes: sql<number>`octet_length(${messages.parts}::text) + coalesce(octet_length(${generations.metadata}::text), 0)`,
+      // Everything the page serialises: text appears in both content and parts.
+      bytes: sql<number>`octet_length(${messages.parts}::text) + coalesce(octet_length(${messages.content}), 0) + coalesce(octet_length(${generations.metadata}::text), 0)`,
     })
     .from(messages)
     .leftJoin(generations, eq(generations.assistantMessageId, messages.id))

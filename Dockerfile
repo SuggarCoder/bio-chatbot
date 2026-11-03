@@ -12,6 +12,11 @@ COPY . .
 
 RUN npm run build
 
+# Deploy gate (build already ran the type check): a failing unit test stops the image build, so
+# the rollout never starts and the running release keeps serving.
+# (Integration tests need PostgreSQL/Redis and skip themselves here.)
+RUN npm test
+
 RUN npm prune --omit=dev \
     && npm cache clean --force \
     && node -e "require('onnxruntime-node')"

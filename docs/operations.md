@@ -1,6 +1,6 @@
 # 运维手册
 
-适用于单机部署，规模约 100 人同时在线。本文涵盖部署拓扑、滚动发布、监控、备份恢复、Redis 配置和故障处置。数据保留期限见 [data-retention.md](data-retention.md)，首次部署清单见 [production-deployment.md](production-deployment.md)。
+适用于单机部署，规模约 100 人同时在线。本文涵盖部署拓扑、滚动发布、监控、备份恢复、Redis 配置和故障处置。数据保留期限见 [data-retention.md](data-retention.md)，容量上限、实测数据与扩容时机见 [capacity.md](capacity.md)，首次部署清单见 [production-deployment.md](production-deployment.md)。
 
 ## 1. 拓扑
 

@@ -233,7 +233,7 @@ const CANDIDATES_PER_METHOD = 40
 const SEARCH_STATEMENT_TIMEOUT_MS = 1_500
 
 /** At most this many searches run at once per process; others wait briefly. */
-class SearchSlots {
+export class SearchSlots {
   private active = 0
   private readonly waiting: Array<() => void> = []
 
