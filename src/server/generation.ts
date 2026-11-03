@@ -82,6 +82,7 @@ import {
 } from './generationQueue.js'
 import { GenerationStreamStore } from './streamStore.js'
 import { fitInputBudget, QwenTokenCounter, type TokenCounter } from './tokenBudget.js'
+import { metrics } from './metrics.js'
 import {
   GenerationByteBudget,
   GenerationByteLimitError,
@@ -583,8 +584,16 @@ export class GenerationService {
       },
     }
     this.runtimes.register(runtime)
-    runtime.completion = this.runProducer(input, start, runtime)
-    await runtime.completion
+    metrics.generationsStarted.inc()
+    metrics.generationsActive.inc()
+    const stopTimer = metrics.generationDuration.startTimer()
+    try {
+      runtime.completion = this.runProducer(input, start, runtime)
+      await runtime.completion
+    } finally {
+      stopTimer()
+      metrics.generationsActive.dec()
+    }
   }
 
   private async checkpoint(
@@ -1348,6 +1357,7 @@ export class GenerationService {
           emit({ type: 'tool.start', toolRunId: stepId, toolName: call.name })
           const toolStartedAt = new Date()
           const result = await toolRunner.execute(call)
+          metrics.toolCalls.inc({ tool: result.toolId ?? call.name, outcome: result.ok ? 'ok' : 'error' })
           await this.checkpoint(runtime, true)
           bytes.charge('tool', utf8Bytes(result.output))
           await recordToolRun(this.database, {
@@ -1696,6 +1706,8 @@ export class GenerationService {
       clearInterval(snapshotTimer)
       this.runtimes.delete(start.generationId, runtime)
       const memory = bytes.report()
+      metrics.generationBytes.observe(memory.totalBytes)
+      if (firstTokenAt !== null) metrics.generationFirstToken.observe((firstTokenAt - startedAt) / 1_000)
       if (memory.limited || memory.totalBytes >= memory.capBytes / 2) {
         console.warn('Generation used a large share of GENERATION_MAX_BYTES', {
           generationId: start.generationId,

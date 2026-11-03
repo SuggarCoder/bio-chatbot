@@ -1,0 +1,78 @@
+# Optional monitoring stack. Start it next to the application:
+#
+#   docker compose --env-file <deploy env> -p ai-chatbot-monitoring \
+#     -f deploy/monitoring/compose.monitoring.yml up -d
+#
+# It joins the application's `chatbot-backend` network to scrape the internal
+# metrics ports (never exposed publicly). Prometheus and Grafana listen on
+# 127.0.0.1 only; reach them through an SSH tunnel or a protected proxy.
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.2
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=10GB
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [chatbot-backend]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks: [chatbot-backend]
+
+  grafana:
+    image: grafana/grafana:11.1.4
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [chatbot-backend]
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: "${DATABASE_URL}?sslmode=disable"
+    networks: [chatbot-backend]
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: "${REDIS_URL}"
+    networks: [chatbot-backend]
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    command: [--path.rootfs=/host]
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    networks: [chatbot-backend]
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  chatbot-backend:
+    external: true
+    name: chatbot-backend

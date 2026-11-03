@@ -72,6 +72,8 @@ export type AppConfig = {
   agentToolLimit: number
   /** Ceiling on the bytes one generation pulls in: input, output, tool results, Artifact base. */
   generationMaxBytes: number
+  /** Internal port for /metrics and /healthz; 0 disables it. */
+  metricsPort: number
   objectStorage: ObjectStorageConfig
 }
 
@@ -481,6 +483,7 @@ export function readConfig(): AppConfig {
     agentMaxToolCalls: positiveInteger('AGENT_MAX_TOOL_CALLS', 4),
     agentToolLimit: positiveInteger('AGENT_TOOL_LIMIT', 8),
     generationMaxBytes,
+    metricsPort: positiveInteger('METRICS_PORT', 9464, true),
     objectStorage: readObjectStorageConfig(process.env, nodeEnv),
   }
 }

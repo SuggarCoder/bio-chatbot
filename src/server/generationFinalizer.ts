@@ -4,6 +4,7 @@ import {
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
+import { metrics } from './metrics.js'
 import {
   finalizeGeneration,
   type Database,
@@ -31,6 +32,12 @@ export class GenerationFinalizer {
       userMemoryJobDelaySeconds: this.config.memoryExtractionDelaySeconds,
       enqueueChatIndexJob: this.config.chatSearchEnabled,
     })
+    if (result.newlyFinalized) {
+      metrics.generationsFinished.inc({
+        status: result.generation.status,
+        error_code: result.generation.errorCode ?? 'none',
+      })
+    }
     const generation = result.generation
 
     if (result.newlyFinalized) {

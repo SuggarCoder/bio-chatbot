@@ -15,8 +15,9 @@ import { readConfig } from './config.js'
 import {
   closeDatabase,
   createDatabase,
-  verifyCoreSchema,
+  waitForDatabase,
 } from './db.js'
+import { initMetrics, metrics, startMetricsServer } from './metrics.js'
 import { GenerationService } from './generation.js'
 import { GenerationFinalizer } from './generationFinalizer.js'
 import { MemoryProcessor } from './memoryWorker.js'
@@ -47,6 +48,7 @@ import { GpasService } from './gpas.js'
 import { createGpasTools } from './gpas/tools/index.js'
 
 const config = readConfig()
+initMetrics('worker')
 const database = createDatabase(config.databaseUrl, config.pgPoolMax)
 const redis = createRedisClient(config)
 const objectStore = config.objectStorage.enabled
@@ -61,8 +63,19 @@ const artifactService = objectStore
   ? new ArtifactService(database, objectStore)
   : null
 
-await verifyCoreSchema(database)
-await redis.connect()
+// Dependencies that are restarting are waited for, not treated as fatal:
+// exiting here would only put the container into a restart loop.
+await waitForDatabase(database, { log: (message) => console.warn(message) })
+for (let attempt = 1; ; attempt += 1) {
+  try {
+    await redis.connect()
+    break
+  } catch (error) {
+    const delay = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5))
+    console.warn(`Redis not ready (${error instanceof Error ? error.message : String(error)}); retrying in ${delay} ms`)
+    await new Promise((resolve) => setTimeout(resolve, delay))
+  }
+}
 
 const runtimes = new GenerationRuntimeRegistry(config, redis, database)
 await runtimes.start()
@@ -116,6 +129,10 @@ const reconcileIntervalMs = 15_000
 // Aged-out memories are already ignored by reads; this only frees the rows.
 const memoryPurgeIntervalMs = 10 * 60_000
 let stopping = false
+/** When the scheduling loop last finished an iteration (liveness). */
+let lastLoopIterationAt = Date.now()
+/** Steps that are currently failing, for the health report. */
+const failingSteps = new Map<string, { failures: number; retryAt: number; error: string }>()
 let schedulerWakePending = false
 let schedulerWakeResolver: (() => void) | undefined
 
@@ -220,6 +237,8 @@ async function scheduleBackgroundOne(): Promise<boolean> {
   }, config.backgroundTimeoutMs)
   deadline.unref()
   backgroundControllers.add(controller)
+  const stopJobTimer = metrics.backgroundJobDuration.startTimer({ type: job.type })
+  let outcome = 'completed'
   const running = (async () => {
     try {
       if (
@@ -235,8 +254,11 @@ async function scheduleBackgroundOne(): Promise<boolean> {
         : await memoryProcessor.process(job, controller.signal)
       await completeBackgroundJob(database, job, usage)
     } catch (error) {
+      outcome = controller.signal.aborted ? 'timed_out' : 'failed'
       await failBackgroundJob(database, job, error)
     } finally {
+      stopJobTimer()
+      metrics.backgroundJobs.inc({ type: job.type, outcome })
       clearTimeout(deadline)
       backgroundControllers.delete(controller)
       await backgroundQueue.release(queued.jobId, token).catch(() => undefined)
@@ -253,18 +275,26 @@ async function scheduleBackgroundOne(): Promise<boolean> {
   return true
 }
 
+/** Leases are taken for 30 s; renewal failures are tolerated for 20 s of it. */
+const LEASE_SAFE_MS = 20_000
+
 async function runGeneration(
   item: GenerationWorkItem,
   lease: QueueLease,
 ): Promise<void> {
   let renewing = false
+  let lastRenewedAt = Date.now()
   const renewTimer = setInterval(() => {
     if (renewing) return
     renewing = true
     void queue.renew(lease).then((renewed) => {
+      // The lease belongs to someone else now: stop at once.
       if (!renewed) runtimes.abort(item.generationId, 'lease_lost')
+      else lastRenewedAt = Date.now()
     }).catch(() => {
-      runtimes.abort(item.generationId, 'lease_lost')
+      // Redis did not answer. A short blip is tolerated; once the lease may
+      // have expired (another worker could take the job), stop.
+      if (Date.now() - lastRenewedAt >= LEASE_SAFE_MS) runtimes.abort(item.generationId, 'lease_lost')
     }).finally(() => { renewing = false })
   }, config.generationLockRenewIntervalMs)
   renewTimer.unref()
@@ -362,6 +392,7 @@ function usageFromSnapshot(snapshot: Record<string, unknown> | null) {
 
 async function reconcile(): Promise<void> {
   const queued = await listQueuedGenerationJobs(database)
+  metrics.queuedGenerations.set(queued.length)
   for (const job of queued) {
     await queue.enqueue(job, job.schedulingWeight)
   }
@@ -400,6 +431,35 @@ async function reconcile(): Promise<void> {
   for (const job of background) await backgroundQueue.enqueue(job)
 }
 
+/**
+ * Runs one loop step. A failing step (PostgreSQL or Redis down, a timeout,
+ * a deadlock) is logged, counted and retried with backoff; it never ends the
+ * loop, so in-flight generations keep running through a dependency blip.
+ */
+async function runStep(name: string, step: () => Promise<unknown>): Promise<void> {
+  const failing = failingSteps.get(name)
+  if (failing && failing.retryAt > Date.now()) return
+  try {
+    await step()
+    if (failing) {
+      console.info('Worker loop step recovered', { step: name, failures: failing.failures })
+      failingSteps.delete(name)
+    }
+  } catch (error) {
+    const failures = (failing?.failures ?? 0) + 1
+    const message = error instanceof Error ? error.message : String(error)
+    failingSteps.set(name, {
+      failures,
+      retryAt: Date.now() + Math.min(30_000, 250 * 2 ** Math.min(failures, 7)),
+      error: message,
+    })
+    metrics.workerLoopErrors.inc({ step: name })
+    if (failures === 1 || failures % 20 === 0) {
+      console.warn('Worker loop step failed; retrying with backoff', { step: name, failures, error: message })
+    }
+  }
+}
+
 async function mainLoop(): Promise<void> {
   let nextHeartbeatAt = 0
   let nextOutboxPollAt = 0
@@ -408,40 +468,45 @@ async function mainLoop(): Promise<void> {
 
   while (!stopping) {
     if (Date.now() >= nextHeartbeatAt) {
-      await queue.heartbeat()
       nextHeartbeatAt = Date.now() + heartbeatIntervalMs
+      await runStep('heartbeat', () => queue.heartbeat())
     }
     if (Date.now() >= nextOutboxPollAt) {
-      await dispatchOutbox()
       nextOutboxPollAt = Date.now() + outboxPollIntervalMs
+      await runStep('outbox', dispatchOutbox)
     }
     if (Date.now() >= nextReconcileAt) {
-      await reconcile()
       nextReconcileAt = Date.now() + reconcileIntervalMs
+      await runStep('reconcile', reconcile)
     }
     if (Date.now() >= nextMemoryPurgeAt) {
-      const purged = await purgeExpiredMemories(database).catch((error: unknown) => {
-        console.warn('Memory purge failed', { error: error instanceof Error ? error.message : String(error) })
-        return 0
-      })
-      if (purged > 0) console.info('Purged aged-out memories', { purged })
       nextMemoryPurgeAt = Date.now() + memoryPurgeIntervalMs
+      await runStep('memory-purge', async () => {
+        const purged = await purgeExpiredMemories(database)
+        if (purged > 0) console.info('Purged aged-out memories', { purged })
+      })
     }
 
     // Keep looking past blocked tenants, but bound scans when all are blocked.
-    for (let scanned = 0; scanned < 16 && !stopping && active.size < config.globalGenerationConcurrency; scanned += 1) {
-      if (!await scheduleOne()) break
-    }
+    await runStep('schedule-generations', async () => {
+      for (let scanned = 0; scanned < 16 && !stopping && active.size < config.globalGenerationConcurrency; scanned += 1) {
+        if (!await scheduleOne()) break
+      }
+    })
 
-    let backgroundScheduled = false
-    do {
-      backgroundScheduled = await scheduleBackgroundOne()
-    } while (
-      backgroundScheduled &&
-      !stopping &&
-      backgroundActive.size < config.backgroundConcurrency
-    )
+    await runStep('schedule-background', async () => {
+      let backgroundScheduled = false
+      do {
+        backgroundScheduled = await scheduleBackgroundOne()
+      } while (
+        backgroundScheduled &&
+        !stopping &&
+        backgroundActive.size < config.backgroundConcurrency
+      )
+    })
 
+    lastLoopIterationAt = Date.now()
+    if (failingSteps.size === 0) metrics.workerLoopLastSuccess.setToCurrentTime()
     const nextPeriodicTaskAt = Math.min(
       nextHeartbeatAt,
       nextOutboxPollAt,
@@ -474,7 +539,20 @@ async function shutdown(signal: string): Promise<void> {
     redis.isOpen ? redis.close() : Promise.resolve(),
   ])
   objectStore?.close()
+  metricsServer?.close()
 }
+
+// Liveness: the loop iterates (a stuck loop fails it; failing dependencies
+// are reported but do not, since restarting would not fix them).
+const metricsServer = await startMetricsServer(config.metricsPort, async () => ({
+  ok: !stopping && Date.now() - lastLoopIterationAt < 60_000,
+  detail: {
+    loopAgeMs: Date.now() - lastLoopIterationAt,
+    activeGenerations: active.size,
+    activeBackgroundJobs: backgroundActive.size,
+    failingSteps: Object.fromEntries([...failingSteps].map(([step, value]) => [step, { failures: value.failures, error: value.error }])),
+  },
+}))
 
 process.on('SIGINT', () => {
   void shutdown('SIGINT').finally(() => process.exit(0))

@@ -1,0 +1,128 @@
+groups:
+  - name: chatbot
+    rules:
+      - alert: ChatbotTargetDown
+        expr: up{job=~"chatbot-.*"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: '{{ $labels.job }} {{ $labels.instance }} is not reachable'
+
+      - alert: WorkerLoopStalled
+        expr: time() - chatbot_worker_loop_last_success_timestamp_seconds > 120
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: 'Worker {{ $labels.instance }} has not completed a clean scheduling loop for 2 minutes'
+
+      - alert: WorkerLoopStepFailing
+        expr: increase(chatbot_worker_loop_errors_total[5m]) > 10
+        labels: { severity: warning }
+        annotations:
+          summary: 'Worker step {{ $labels.step }} keeps failing (dependency down?)'
+
+      - alert: GenerationErrorRateHigh
+        expr: |
+          sum(rate(chatbot_generations_finished_total{status!="completed",error_code!="generation_cancelled"}[10m]))
+            / clamp_min(sum(rate(chatbot_generations_finished_total[10m])), 1e-9) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'More than 10% of generations are failing'
+
+      - alert: GenerationQueueBacklog
+        expr: max(chatbot_generations_queued) > 50
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $value }} generations waiting to run'
+
+      - alert: ApiServerErrors
+        expr: sum(rate(chatbot_http_request_duration_seconds_count{status="5xx"}[5m])) > 0.5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'API is returning 5xx responses'
+
+      - alert: ApiLoadShedding
+        expr: sum(rate(chatbot_http_load_shed_total[5m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'API is shedding load ({{ $labels.reason }})'
+
+      - alert: EventLoopLagHigh
+        expr: chatbot_nodejs_eventloop_lag_p99_seconds > 0.5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $labels.role }} {{ $labels.instance }} event loop p99 lag {{ $value }}s'
+
+      - alert: HeapNearLimit
+        # NODE_OPTIONS sets --max-old-space-size (see compose.yaml); alert at
+        # about 80% of it. Adjust together with the container memory limits.
+        expr: chatbot_nodejs_heap_size_used_bytes > 0.8 * 1536 * 1024 * 1024
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $labels.role }} {{ $labels.instance }} heap usage is high'
+
+      - alert: DatabasePoolSaturated
+        expr: chatbot_db_pool_waiting > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Queries waiting for a PostgreSQL connection on {{ $labels.instance }}'
+
+      - alert: RedisErrors
+        expr: sum(rate(chatbot_redis_command_errors_total[5m])) > 0.1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Redis commands are failing'
+
+      - alert: GpasDegraded
+        expr: |
+          sum(rate(chatbot_gpas_request_duration_seconds_count{outcome!="ok"}[10m]))
+            / clamp_min(sum(rate(chatbot_gpas_request_duration_seconds_count[10m])), 1e-9) > 0.2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'More than 20% of GPAS calls fail'
+
+  - name: infrastructure
+    rules:
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.7 and redis_memory_max_bytes > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Redis memory above 70% of maxmemory'
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: 'PostgreSQL is not reachable'
+
+      - alert: PostgresConnectionsHigh
+        expr: sum(pg_stat_activity_count) / max(pg_settings_max_connections) > 0.8
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'PostgreSQL connections above 80% of max_connections'
+
+      - alert: DiskSpaceLow
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} < 0.15
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: 'Less than 15% disk space left on {{ $labels.mountpoint }}'
+
+      - alert: BackupMissing
+        expr: time() - chatbot_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: 'No successful database backup in the last 26 hours'

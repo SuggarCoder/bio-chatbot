@@ -52,6 +52,7 @@ function config(
     userMemoryMaxItems: 40,
     chatSearchEnabled: true,
     generationMaxBytes: 8 * 1024 * 1024,
+    metricsPort: 0,
     embeddingBaseUrl: 'http://embeddings.test/v1',
     embeddingApiKey: 'test',
     embeddingModel: 'test-embedding',

@@ -21,8 +21,10 @@ import {
   redisKey,
   consumeGenerationRateLimit,
   type RedisClient,
+  RedisUnavailableError,
 } from './cache.js'
 import type { AppConfig } from './config.js'
+import { metrics } from './metrics.js'
 import {
   createChat,
   createChatWithId,
@@ -84,6 +86,28 @@ type ErrorBody = {
     message: string
     requestId: string
   }
+}
+
+/**
+ * Errors that mean "a dependency is down or saturated", which clients should
+ * see as 503 + Retry-After rather than 500.
+ */
+export function dependencyUnavailable(error: unknown): { dependency: 'redis' | 'database'; retryAfterSeconds: number } | null {
+  if (error instanceof RedisUnavailableError) return { dependency: 'redis', retryAfterSeconds: 5 }
+  const candidate = error as { message?: unknown; code?: unknown; cause?: unknown }
+  const message = typeof candidate?.message === 'string' ? candidate.message : ''
+  const code = typeof candidate?.code === 'string' ? candidate.code : ''
+  // pg-pool checkout timeout, connection refused/reset, server shutting down,
+  // statement/lock timeouts (57014, 55P03), too many connections (53300),
+  // admin shutdown (57P01..57P03).
+  if (
+    /timeout exceeded when trying to connect|Connection terminated|ECONNREFUSED|ECONNRESET|Query read timeout/.test(message) ||
+    ['57014', '55P03', '53300', '57P01', '57P02', '57P03'].includes(code)
+  ) {
+    return { dependency: 'database', retryAfterSeconds: 2 }
+  }
+  if (candidate?.cause && candidate.cause !== error) return dependencyUnavailable(candidate.cause)
+  return null
 }
 
 function errorBody(
@@ -261,7 +285,25 @@ export async function buildApp(
   const { gpas, toolIds: agentToolCatalog } =
     dependencies.capabilityRuntime ?? createCapabilityRuntime(config)
 
+  app.addHook('onResponse', (request, reply, done) => {
+    metrics.httpRequestDuration.observe({
+      method: request.method,
+      // The route pattern, not the URL: ids must not become label values.
+      route: request.routeOptions.url ?? 'unmatched',
+      status: `${Math.floor(reply.statusCode / 100)}xx`,
+    }, reply.elapsedTime / 1_000)
+    done()
+  })
+
   app.setErrorHandler((error, request, reply) => {
+    const unavailable = dependencyUnavailable(error)
+    if (unavailable) {
+      // A dependency is down or saturated: tell clients to retry later
+      // instead of reporting an internal error.
+      request.log.warn({ dependency: unavailable.dependency, error: (error as Error).message }, 'Dependency unavailable')
+      reply.header('Retry-After', String(unavailable.retryAfterSeconds))
+      return reply.code(503).send(errorBody(request, `${unavailable.dependency}_unavailable`, 'Service is temporarily busy. Please retry shortly.'))
+    }
     if (error instanceof GpasUpstreamError) {
       request.log.warn({ gpas: error.diagnostics }, 'GPAS upstream request failed')
     }

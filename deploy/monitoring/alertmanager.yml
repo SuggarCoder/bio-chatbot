@@ -1,0 +1,10 @@
+# Fill in a receiver (e-mail, WeCom/DingTalk webhook, ...) before relying on
+# alerts. Until then alerts are visible in Prometheus and Alertmanager UIs.
+route:
+  receiver: default
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+receivers:
+  - name: default

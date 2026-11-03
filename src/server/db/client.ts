@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import pg from 'pg'
 
+import { metrics, registerPoolMetrics } from '../metrics.js'
 import * as schema from './schema.js'
 import {
   businessOperations,
@@ -27,18 +28,67 @@ export type Database = NodePgDatabase<typeof schema> & {
   $client: InstanceType<typeof Pool>
 }
 
-export function createDatabase(databaseUrl: string, maxConnections = 4): Database {
+export type DatabaseOptions = {
+  /** Server-side limit per statement; migrations pass 0 (no limit). */
+  statementTimeoutMs?: number
+}
+
+export function createDatabase(
+  databaseUrl: string,
+  maxConnections = 4,
+  options: DatabaseOptions = {},
+): Database {
+  const statementTimeout = options.statementTimeoutMs ?? 5_000
   const pool = new Pool({
     connectionString: databaseUrl,
     max: maxConnections,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
-    statement_timeout: 5_000,
+    statement_timeout: statementTimeout,
+    // A query whose server went silent (network partition) must not hold a
+    // connection forever; the server-side statement_timeout cannot fire then.
+    query_timeout: statementTimeout > 0 ? statementTimeout + 2_000 : undefined,
     lock_timeout: 2_000,
     idle_in_transaction_session_timeout: 10_000,
+    // Detect dead peers on idle connections instead of failing on next use.
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
   })
+  // pg-pool emits 'error' when the server closes an IDLE connection (restart,
+  // failover, pg_terminate_backend, idle timeouts). Without a listener Node
+  // treats it as unhandled and exits the process. The pool already discards
+  // that client; the next query opens a new connection.
+  pool.on('error', (error) => {
+    metrics.dbPoolErrors.inc()
+    console.warn('PostgreSQL idle connection error; it was discarded', { error: error.message })
+  })
+  registerPoolMetrics(pool, { max: maxConnections })
 
   return drizzle(pool, { schema })
+}
+
+/**
+ * Waits for PostgreSQL to accept connections and have the expected schema.
+ * A process started while the database restarts waits instead of exiting
+ * into a restart loop; a missing schema still fails at once.
+ */
+export async function waitForDatabase(
+  database: Database,
+  options: { maxWaitMs?: number; log?: (message: string) => void } = {},
+): Promise<void> {
+  const deadline = Date.now() + (options.maxWaitMs ?? 5 * 60_000)
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await verifyCoreSchema(database)
+      return
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.startsWith('Database schema is missing') || Date.now() >= deadline) throw error
+      const delay = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5))
+      options.log?.(`PostgreSQL not ready (${message}); retrying in ${delay} ms`)
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+  }
 }
 
 export async function closeDatabase(database: Database): Promise<void> {

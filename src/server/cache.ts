@@ -1,10 +1,22 @@
 import { createClient, type RedisClientType } from 'redis'
 
 import type { AppConfig } from './config.js'
+import { metrics } from './metrics.js'
 import { getMonthlyTokenUsage, type ChatContext, type Database } from './db.js'
 import type { BudgetedContextResult } from './conversationMemory.js'
 
 export type RedisClient = RedisClientType
+
+/**
+ * Redis did not answer (down, overloaded, out of memory, deadline). Callers
+ * use it to fail open (caches) or reject with 503 (queues, limits).
+ */
+export class RedisUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'RedisUnavailableError'
+  }
+}
 
 export function createRedisClient(config: AppConfig): RedisClient {
   const client = createClient({
@@ -38,19 +50,37 @@ export function withRedisDeadlines<T extends object>(client: T, timeoutMs = 2_00
       if (typeof value !== 'function') return value
       if (property === 'duplicate') return (...args: unknown[]) => withRedisDeadlines(value.apply(target, args), timeoutMs)
       if (!commands.has(String(property))) return value.bind(target)
-      return (...args: unknown[]) => new Promise((resolve, reject) => {
+      return (...args: unknown[]) => {
+        const command = String(property)
+        const stopTimer = metrics.redisCommandDuration.startTimer({ command })
+        return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           // Startup can report degraded health while reconnect continues in the
           // background. Shutdown must not wait forever on an unresponsive peer.
           if (property === 'close') {
             const destroy = Reflect.get(target, 'destroy', target)
-            if (typeof destroy === 'function') destroy.call(target)
+            // destroy() of an already closed client throws; nothing to clean up then.
+            if (typeof destroy === 'function') {
+              try { destroy.call(target) } catch { /* already closed */ }
+            }
           }
-          reject(new Error(`Redis ${String(property)} response deadline exceeded`))
+          reject(new RedisUnavailableError(`Redis ${command} response deadline exceeded`))
         }, property === 'connect' ? Math.max(timeoutMs, 5_000) : timeoutMs)
-        Promise.resolve().then(() => value.apply(target, args)).then(resolve, reject)
+        Promise.resolve().then(() => value.apply(target, args)).then(resolve, (error: unknown) => {
+          reject(error instanceof Error && !(error instanceof RedisUnavailableError)
+            ? new RedisUnavailableError(error.message, { cause: error })
+            : error)
+        })
           .finally(() => clearTimeout(timer))
-      })
+        }).then((result) => {
+          stopTimer()
+          return result
+        }, (error: unknown) => {
+          stopTimer()
+          metrics.redisCommandErrors.inc({ command })
+          throw error
+        })
+      }
     },
   })
 }

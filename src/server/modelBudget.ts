@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AppConfig } from './config.js'
 import { redisKey, type RedisClient } from './cache.js'
+import { metrics } from './metrics.js'
 
 // Shared by agent generation calls and background requests, across processes.
 export const acquireModelPermit = `
@@ -59,6 +60,7 @@ export function modelBudgetFetch(config: AppConfig, redis: RedisClient): typeof 
     deadline.unref()
     const waitUntil = Date.now() + 60_000
     let acquired = false
+    const stopWaitTimer = metrics.modelPermitWait.startTimer()
     let timer: ReturnType<typeof setInterval> | undefined
     let renewing = false
     let released = false
@@ -82,14 +84,22 @@ export function modelBudgetFetch(config: AppConfig, redis: RedisClient): typeof 
           await delay(200 + Math.random() * 100, undefined, { signal })
         }
       }
+      stopWaitTimer()
       signal.throwIfAborted()
       signal.addEventListener('abort', onAbort, { once: true })
+      let lastRenewedAt = Date.now()
       timer = setInterval(() => {
         if (renewing) return
         renewing = true
         void redis.eval(renewModelPermit, { keys: [key], arguments: [token] })
-          .then(value => { if (Number(value) !== 1) controller.abort() })
-          .catch(() => controller.abort()).finally(() => { renewing = false })
+          .then(value => {
+            if (Number(value) !== 1) controller.abort()
+            else lastRenewedAt = Date.now()
+          })
+          // Tolerate a Redis blip; once the 30 s permit may have expired, stop
+          // so the shared budget stays honest.
+          .catch(() => { if (Date.now() - lastRenewedAt >= 20_000) controller.abort() })
+          .finally(() => { renewing = false })
       }, 10_000)
       timer.unref()
       const response = await fetch(input, { ...init, signal })

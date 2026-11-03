@@ -69,6 +69,7 @@ export {
   createDatabase,
   migrateDatabase,
   verifyCoreSchema,
+  waitForDatabase,
 } from './db/client.js'
 export type { Database } from './db/client.js'
 import { forgetChatMemories, lockUserMemories } from './userMemory.js'

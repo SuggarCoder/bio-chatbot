@@ -322,6 +322,13 @@ export class GenerationStreamHub {
     }, { highWaterMark: SUBSCRIBER_HIGH_WATER_BYTES, size: (chunk) => chunk.length })
   }
 
+  /** Open SSE subscriptions in this process (for metrics). */
+  subscriberCount(): number {
+    let count = 0
+    for (const listeners of this.listeners.values()) count += listeners.size
+    return count
+  }
+
   async close(): Promise<void> {
     for (const listeners of this.listeners.values()) {
       for (const listener of listeners) {

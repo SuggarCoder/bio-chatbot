@@ -5,7 +5,7 @@ import { readConfig } from './config.js'
 import {
   closeDatabase,
   createDatabase,
-  verifyCoreSchema,
+  waitForDatabase,
 } from './db.js'
 import { GenerationService } from './generation.js'
 import { GenerationFinalizer } from './generationFinalizer.js'
@@ -15,8 +15,10 @@ import { ArtifactService } from './artifacts/service.js'
 import { GenerationStreamHub } from './streamStore.js'
 import { createCapabilityRuntime } from './capabilities/runtime.js'
 import { QwenTokenCounter } from './tokenBudget.js'
+import { initMetrics, registerCollectedGauge, startMetricsServer } from './metrics.js'
 
 const config = readConfig()
+initMetrics('api')
 const database = createDatabase(config.databaseUrl, config.pgPoolMax)
 const redis = createRedisClient(config)
 const objectStore = config.objectStorage.enabled
@@ -31,7 +33,7 @@ const artifactService = objectStore
   ? new ArtifactService(database, objectStore)
   : null
 
-await verifyCoreSchema(database)
+await waitForDatabase(database, { log: (message) => console.warn(message) })
 
 try {
   await redis.connect()
@@ -72,6 +74,10 @@ const app = await buildApp({
   objectStore,
   artifactService,
 })
+registerCollectedGauge('chatbot_sse_subscribers', 'Open SSE subscriptions in this API process.', () => streamHub.subscriberCount())
+// Liveness only: the process is up and its event loop answers. Readiness
+// (dependencies) is GET /ai-chatbot/api/health on the main port.
+const metricsServer = await startMetricsServer(config.metricsPort, async () => ({ ok: !shuttingDown }))
 app.log.info(
   {
     nodeEnv: config.nodeEnv,
@@ -100,6 +106,7 @@ async function shutdown(signal: string): Promise<void> {
     redis.isOpen ? redis.close() : Promise.resolve(),
   ])
   objectStore?.close()
+  metricsServer?.close()
 }
 
 process.on('SIGINT', () => {
