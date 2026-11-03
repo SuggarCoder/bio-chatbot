@@ -1,3 +1,13 @@
+import {
+  anySignal,
+  fullJitterDelay,
+  isAbortError,
+  parseRetryAfter,
+  pollDelay,
+  pollSleep,
+  sleep,
+  type Random,
+} from './backoff'
 import type { FileResultPage, FileResultQuery, GpasDetailPart, GpasDetailRequest, GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput, SampleKey } from '../../../server/gpasContracts'
 export type { GpasDetailRequest, GpasPart, GpasUploadBatch, GpasUploadPart, ProjectInput } from '../../../server/gpasContracts'
 
@@ -147,12 +157,15 @@ let loginRedirectStarted = false
 export class ChatApiError extends Error {
   status: number
   code: string
+  /** From a Retry-After response header, when the server sent one. */
+  retryAfterMs?: number
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, retryAfterMs?: number) {
     super(message)
     this.name = 'ChatApiError'
     this.status = status
     this.code = code
+    this.retryAfterMs = retryAfterMs
   }
 }
 
@@ -169,6 +182,7 @@ export async function parseApiError(response: Response): Promise<ChatApiError> {
     response.status,
     payload.error?.code || 'request_failed',
     payload.error?.message || `HTTP ${response.status}`,
+    parseRetryAfter(response.headers.get('retry-after')),
   )
 
   if (
@@ -264,11 +278,18 @@ export function deleteAllMemories() {
   return requestNoContent('/memory', { method: 'DELETE' })
 }
 
-export async function fetchChat(chatId: string) {
-  const pending = await retryRequest(() => requestJson<{ requests: RequestTicket<unknown>[] }>(`/conversations/${encodeURIComponent(chatId)}/requests`))
-  await Promise.all(pending.requests.map(ticket => waitForRequest(ticket)))
+export async function fetchChat(chatId: string, signal?: AbortSignal) {
+  const pending = await retryRequest(
+    () => requestJson<{ requests: RequestTicket<unknown>[] }>(
+      `/conversations/${encodeURIComponent(chatId)}/requests`,
+      { signal },
+    ),
+    { signal },
+  )
+  await Promise.all(pending.requests.map(ticket => waitForRequest(ticket, signal)))
   return requestJson<ChatDetailDto>(
     `/conversations/${encodeURIComponent(chatId)}`,
+    { signal },
   )
 }
 
@@ -321,25 +342,84 @@ export function generationUrl(chatId: string) {
 }
 
 type RequestTicket<T> = { id: string; status: string; result: T | null; error: { code: string; message: string } | null }
-async function retryRequest<T>(operation: () => Promise<T>): Promise<T> {
-  // Includes a lost acceptance response: the same idempotency key is always reused.
+
+export type RetryOptions = {
+  signal?: AbortSignal
+  /** Attempts including the first. */
+  maxAttempts?: number
+  baseMs?: number
+  capMs?: number
+  random?: Random
+}
+
+/** Retryable: a lost connection, a request timeout, a 5xx. Never the caller's abort or a 4xx. */
+function isRetryableRequestError(error: unknown) {
+  if (error instanceof ChatApiError) return error.status >= 500
+  return !isAbortError(error)
+}
+
+/**
+ * Retries with full-jitter exponential backoff (500 ms doubling to 8 s, six
+ * attempts), honouring Retry-After. The operation must be idempotent: the
+ * callers reuse one idempotency key, which also covers an acceptance response
+ * lost after the server committed.
+ */
+export async function retryRequest<T>(
+  operation: () => Promise<T>,
+  options: RetryOptions = {},
+): Promise<T> {
+  const maxAttempts = options.maxAttempts ?? 6
   for (let attempt = 0; ; attempt++) {
-    try { return await operation() } catch (error) {
-      if (attempt >= 30 || (error instanceof ChatApiError && error.status < 500)) throw error
-      await new Promise(resolve => setTimeout(resolve, Math.min(5000, 500 * (attempt + 1))))
+    options.signal?.throwIfAborted()
+    try {
+      return await operation()
+    } catch (error) {
+      if (
+        options.signal?.aborted ||
+        attempt + 1 >= maxAttempts ||
+        !isRetryableRequestError(error)
+      ) {
+        throw error
+      }
+      const backoff = fullJitterDelay(attempt, {
+        baseMs: options.baseMs ?? 500,
+        capMs: options.capMs ?? 8_000,
+        random: options.random,
+      })
+      const retryAfter = error instanceof ChatApiError ? error.retryAfterMs : undefined
+      await sleep(
+        retryAfter === undefined ? backoff : Math.max(retryAfter, backoff),
+        options.signal,
+      )
     }
   }
 }
-async function waitForRequest<T>(ticket: RequestTicket<T>): Promise<T> {
-  const deadline = Date.now() + 30 * 60_000
-  while (ticket.status === 'queued' || ticket.status === 'running') {
+
+const REQUEST_TIMEOUT_MS = 15_000
+const REQUEST_WAIT_MS = 30 * 60_000
+
+async function waitForRequest<T>(
+  ticket: RequestTicket<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const deadline = Date.now() + REQUEST_WAIT_MS
+  for (let attempt = 0; ticket.status === 'queued' || ticket.status === 'running'; attempt++) {
     if (Date.now() > deadline) throw new Error('请求仍在后台排队，请稍后重新打开会话查看结果。')
-    await new Promise(resolve => setTimeout(resolve, 2000))
-    ticket = await retryRequest(() => requestJson<RequestTicket<T>>(`/requests/${encodeURIComponent(ticket.id)}`, { signal: AbortSignal.timeout(15_000) }))
+    // 2 s growing to 15 s; a hidden tab waits until it is visible again.
+    await pollSleep(pollDelay(attempt, { baseMs: 2_000, capMs: 15_000 }), signal)
+    const ticketId = ticket.id
+    ticket = await retryRequest(
+      () => requestJson<RequestTicket<T>>(
+        `/requests/${encodeURIComponent(ticketId)}`,
+        { signal: anySignal([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) },
+      ),
+      { signal },
+    )
   }
   if (ticket.status !== 'succeeded' || !ticket.result) throw new Error(ticket.error?.message ?? '请求处理失败')
   return ticket.result
 }
+
 export async function createGeneration(
   chatId: string,
   input: {
@@ -351,6 +431,7 @@ export async function createGeneration(
     uploads?: GpasUploadBatch
     detail?: GpasDetailRequest
   },
+  signal?: AbortSignal,
 ) {
   type Result = {
     kind: 'business'
@@ -366,7 +447,7 @@ export async function createGeneration(
     `/conversations/${encodeURIComponent(chatId)}/messages`,
     {
       method: 'POST',
-      signal: AbortSignal.timeout(15_000),
+      signal: anySignal([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
       headers: { 'Idempotency-Key': input.clientMessageId },
       body: JSON.stringify({
         content: input.content,
@@ -377,8 +458,29 @@ export async function createGeneration(
         detail: input.detail,
       }),
     },
-  ))
-  return 'status' in accepted ? waitForRequest(accepted) : accepted
+  ), { signal })
+  return 'status' in accepted ? waitForRequest(accepted, signal) : accepted
+}
+
+export type GenerationStatusDto = GenerationDto & {
+  streamAvailable: boolean
+  assistantMessage: ChatMessageDto | null
+}
+
+/** The generation's status row: a few hundred bytes, unlike the whole conversation. */
+export function fetchGeneration(generationId: string, signal?: AbortSignal) {
+  return requestJson<GenerationStatusDto>(
+    `/generations/${encodeURIComponent(generationId)}`,
+    { signal: anySignal([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) },
+  )
+}
+
+export function isTerminalGenerationStatus(status: GenerationDto['status']) {
+  return status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'interrupted' ||
+    status === 'timed_out'
 }
 
 export function regenerateMessage(

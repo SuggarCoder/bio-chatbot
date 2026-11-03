@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createGeneration, fetchChat } from './chatApi'
+import { ChatApiError, createGeneration, fetchChat, parseApiError, retryRequest } from './chatApi'
 
 test('lost acceptance response retries the same key, then polls durable completion', async context => {
   let posts = 0
@@ -28,4 +28,43 @@ test('conversation reload discovers pending durable requests before loading mess
   assert.equal((await fetchChat('chat')).messages[0].id, 'saved')
   assert.equal(paths.length, 3)
   assert.ok(paths[1].endsWith('/requests/ticket'))
+})
+test('retries are bounded and stop at client errors', async () => {
+  let calls = 0
+  await assert.rejects(retryRequest(async () => {
+    calls++
+    throw new ChatApiError(503, 'unavailable', 'down')
+  }, { baseMs: 1, capMs: 1 }), { status: 503 })
+  assert.equal(calls, 6)
+
+  calls = 0
+  await assert.rejects(retryRequest(async () => {
+    calls++
+    throw new ChatApiError(409, 'conflict', 'no')
+  }, { baseMs: 1 }), { status: 409 })
+  assert.equal(calls, 1)
+})
+test('a retry waits at least the Retry-After the server sent', async () => {
+  let calls = 0
+  const started = Date.now()
+  await assert.rejects(retryRequest(async () => {
+    calls++
+    throw await parseApiError(new Response(
+      JSON.stringify({ error: { code: 'busy', message: 'busy' } }),
+      { status: 503, headers: { 'retry-after': '0.3' } },
+    ))
+  }, { maxAttempts: 2, baseMs: 1, capMs: 1 }), { status: 503, retryAfterMs: 300 })
+  assert.equal(calls, 2)
+  assert.ok(Date.now() - started >= 290, 'waited for Retry-After')
+})
+test('an aborted request stops retrying at once', async () => {
+  const controller = new AbortController()
+  let calls = 0
+  const pending = retryRequest(async () => {
+    calls++
+    if (calls === 1) setTimeout(() => controller.abort(), 10)
+    throw new TypeError('network down')
+  }, { signal: controller.signal, baseMs: 60_000, capMs: 60_000, random: () => 1 })
+  await assert.rejects(pending, { name: 'AbortError' })
+  assert.equal(calls, 1)
 })
