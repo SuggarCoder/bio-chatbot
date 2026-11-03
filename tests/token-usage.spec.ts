@@ -10,7 +10,7 @@ const quota = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
-async function mockApi(page: Page, onReset: () => void) {
+async function mockApi(page: Page, onReset: () => void, quotaDelayMs: () => number = () => 0) {
   await page.route('**/ai-chatbot/api/**', async (route) => {
     const request = route.request()
     const pathname = new URL(request.url()).pathname
@@ -27,7 +27,11 @@ async function mockApi(page: Page, onReset: () => void) {
       } })
     }
     if (pathname.endsWith('/api/conversations')) return route.fulfill({ json: { conversations: [] } })
-    if (pathname.endsWith('/api/usage/quota') && request.method() === 'GET') return route.fulfill({ json: quota() })
+    if (pathname.endsWith('/api/usage/quota') && request.method() === 'GET') {
+      const delay = quotaDelayMs()
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+      return route.fulfill({ json: quota() }).catch(() => undefined)
+    }
     if (pathname.endsWith('/api/usage/quota/reset') && request.method() === 'POST') {
       onReset()
       return route.fulfill({ json: quota({
@@ -41,15 +45,55 @@ async function mockApi(page: Page, onReset: () => void) {
   })
 }
 
+async function openTokenUsage(page: Page) {
+  await page.getByRole('button', { name: '打开账户菜单' }).first().click()
+  await page.getByText('Tokens 使用量').first().click()
+  return page.getByRole('dialog', { name: 'Token 使用量' })
+}
+
+/** Waits for the open animation, then reads the panel's box. */
+async function settledBox(page: Page, dialog: ReturnType<Page['getByRole']>) {
+  await page.waitForTimeout(350)
+  const box = await dialog.boundingBox()
+  if (!box) throw new Error('dialog has no box')
+  return box
+}
+
+test('the card keeps its position and size while the usage loads', async ({ page }) => {
+  await mockApi(page, () => undefined, () => 1_500)
+  await page.goto('/ai-chatbot/')
+
+  const dialog = await openTokenUsage(page)
+  await expect(dialog).toHaveAttribute('aria-busy', 'true')
+  const loading = await settledBox(page, dialog)
+  await expect(dialog).toHaveAttribute('aria-busy', 'false', { timeout: 5_000 })
+  const loaded = await settledBox(page, dialog)
+
+  expect(Math.abs(loaded.y - loading.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(loaded.height - loading.height)).toBeLessThanOrEqual(1)
+})
+
+test('reopening shows the last usage at once while it refreshes', async ({ page }) => {
+  let delay = 0
+  await mockApi(page, () => undefined, () => delay)
+  await page.goto('/ai-chatbot/')
+
+  let dialog = await openTokenUsage(page)
+  await expect(dialog.getByRole('progressbar', { name: '周限额已使用' })).toHaveAttribute('aria-valuenow', '72')
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+
+  delay = 10_000
+  dialog = await openTokenUsage(page)
+  await expect(dialog.getByRole('progressbar', { name: '周限额已使用' })).toHaveAttribute('aria-valuenow', '72', { timeout: 1_000 })
+})
+
 test('the account menu opens token usage, and a Reset 卷 resets both limits after confirmation', async ({ page }) => {
   let resets = 0
   await mockApi(page, () => { resets += 1 })
   await page.goto('/ai-chatbot/')
 
-  await page.getByRole('button', { name: '打开账户菜单' }).first().click()
-  await page.getByRole('menuitem', { name: 'Tokens 使用量' }).or(page.getByText('Tokens 使用量')).first().click()
-
-  const dialog = page.getByRole('dialog', { name: 'Token 使用量' })
+  const dialog = await openTokenUsage(page)
   await expect(dialog).toBeVisible()
   await expect(dialog.getByRole('progressbar', { name: '周限额已使用' })).toHaveAttribute('aria-valuenow', '72')
   await expect(dialog.getByRole('progressbar', { name: '月限额已使用' })).toHaveAttribute('aria-valuenow', '56')
