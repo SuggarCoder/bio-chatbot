@@ -1,5 +1,5 @@
 import {
-  applyMonthlyQuota,
+  applyQuotaUsage,
   type RedisClient,
 } from './cache.js'
 import type { AppConfig } from './config.js'
@@ -41,7 +41,7 @@ export class GenerationFinalizer {
 
     if (result.newlyFinalized) {
       await Promise.allSettled([
-        applyMonthlyQuota(
+        applyQuotaUsage(
           this.redis,
           this.config,
           input.userId,

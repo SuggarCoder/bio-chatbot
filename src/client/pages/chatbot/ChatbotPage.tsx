@@ -24,6 +24,7 @@ import {
   deleteMessageVote,
   fetchGeneration,
   isTerminalGenerationStatus,
+  isTokenQuotaError,
   regenerateMessage,
   setMessageVote,
 } from '../../features/chatbot/chatApi'
@@ -77,6 +78,7 @@ import type { GpasDetailRequest, GpasUploadBatch } from '../../features/chatbot/
 import { InputDialog } from '../../shared/ui/InputDialog'
 import { ModalDialog } from '../../shared/ui/ModalDialog'
 import { MemorySettingsHost, openMemorySettings } from '../../features/memory/MemorySettingsDialog'
+import { openTokenUsage, TokenUsageHost } from '../../features/usage/TokenUsageDialog'
 import { PopupMenu, type PopupMenuEntry, type PopupMenuItem } from '../../shared/ui/PopupMenu'
 import { Tooltip } from '../../shared/ui/Tooltip'
 import { ArtifactCard } from '../../features/artifacts/ArtifactCard'
@@ -92,7 +94,6 @@ type LayoutContextValue = {
 const LayoutContext = createContext<LayoutContextValue>()
 const activeReplyControllers = new Map<string, AbortController>()
 const startingReplies = new Set<string>()
-const noop = () => undefined
 
 function cancelAssistantReply(generationId: string) {
   const controller = activeReplyControllers.get(generationId)
@@ -286,7 +287,7 @@ function buildAccountMenuItems(): PopupMenuEntry[] {
     {
       label: 'Tokens 使用量',
       icon: <UsageIcon />,
-      onSelect: noop,
+      onSelect: openTokenUsage,
     },
   ]
 }
@@ -430,6 +431,7 @@ async function runAssistantReply(
       chatStore.setActiveGeneration(conversationId, generationId, streamId)
       chatStore.confirmUserMessage(conversationId, started.userMessage)
     } catch (error) {
+      if (isTokenQuotaError(error)) openTokenUsage()
       chatStore.failGenerationStart(
         conversationId,
         error instanceof Error
@@ -1580,8 +1582,13 @@ function MessageActionToolbar(props: {
     setRegenerating(true)
     try {
       await props.onRegenerate()
-    } catch {
-      showNotice('重新生成失败')
+    } catch (error) {
+      if (isTokenQuotaError(error)) {
+        openTokenUsage()
+        showNotice('Token 额度已用完')
+      } else {
+        showNotice('重新生成失败')
+      }
       setRegenerating(false)
     }
   }
@@ -2935,6 +2942,7 @@ function ChatbotChrome(props: ParentProps) {
   return (
     <LayoutContext.Provider value={{ isSidebarOpen, closeSidebar }}>
       <MemorySettingsHost />
+      <TokenUsageHost />
       <section class="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-900">
         <div class="relative flex h-full w-full overflow-hidden bg-slate-50">
           <aside class={sidebarClass()}>

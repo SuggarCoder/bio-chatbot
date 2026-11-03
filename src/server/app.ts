@@ -1,4 +1,5 @@
 import { DurableIngress } from './ingress.js'
+import { assertTokenQuota, getTokenQuota, redeemResetVoucher, TokenQuotaError } from './tokenQuota.js'
 import { AdmissionQueue } from './admission.js'
 import { findGenerationStart } from './db.js'
 import fastifyStatic from '@fastify/static'
@@ -331,6 +332,12 @@ export async function buildApp(
       request.log.warn({ gpas: error.diagnostics }, 'GPAS upstream request failed')
     }
     if (error instanceof AuthenticationError) {
+      return reply.code(error.statusCode).send(
+        errorBody(request, error.code, error.message),
+      )
+    }
+
+    if (error instanceof TokenQuotaError) {
       return reply.code(error.statusCode).send(
         errorBody(request, error.code, error.message),
       )
@@ -775,6 +782,24 @@ export async function buildApp(
     const user = await authenticate(request)
     await deleteUserMemories(database, user.id)
     return reply.code(204).send()
+  })
+
+  // -------------------------------------------------------------------------
+  // Token quota: weekly and monthly usage, and Reset 卷 that restart both.
+  // -------------------------------------------------------------------------
+
+  app.get(`${API_BASE}/usage/quota`, {
+    schema: httpSchemas.tokenQuota,
+  }, async (request) => {
+    const user = await authenticate(request)
+    return getTokenQuota(database, redis, config, user)
+  })
+
+  app.post(`${API_BASE}/usage/quota/reset`, {
+    schema: httpSchemas.tokenQuota,
+  }, async (request) => {
+    const user = await authenticate(request)
+    return redeemResetVoucher(database, redis, config, user)
   })
 
   app.get(`${API_BASE}/conversations`, {
@@ -1317,6 +1342,9 @@ export async function buildApp(
       if (detail && (projectInput || uploads)) {
         return reply.code(400).send(errorBody(request, 'invalid_request', '查看分析详情不能同时附带表单或上传文件。'))
       }
+      // Fail fast instead of queueing a request the worker would reject.
+      // Form confirmations call GPAS, not the model, so they stay allowed.
+      if (!projectInput) await assertTokenQuota(database, redis, config, user)
       const rate = await consumeGenerationRateLimit(redis, config, user.id, 'capability')
       if (!rate.allowed) throw new GenerationRejectedError('请求过于频繁，请稍后重试。', 429, 'intent_rate_limited', rate.retryAfterMs)
       const ticket = await ingress.submit({ userId: user.id, chatId, requestId: clientMessageId,

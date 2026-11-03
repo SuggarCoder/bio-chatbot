@@ -2,7 +2,8 @@ import { createClient, type RedisClientType } from 'redis'
 
 import type { AppConfig } from './config.js'
 import { metrics } from './metrics.js'
-import { getMonthlyTokenUsage, type ChatContext, type Database } from './db.js'
+import { getTokenUsage, type ChatContext, type Database } from './db.js'
+import { quotaPeriods, type QuotaPeriod } from './quotaPeriods.js'
 import type { BudgetedContextResult } from './conversationMemory.js'
 
 export type RedisClient = RedisClientType
@@ -158,34 +159,17 @@ export async function consumeGenerationRateLimit(
   }
 }
 
-function monthlyPeriod(now = new Date()) {
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
-  const expiresAt = new Date(end)
-  expiresAt.setUTCDate(expiresAt.getUTCDate() + 7)
-
-  return {
-    start,
-    end,
-    key: `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}`,
-    ttlSeconds: Math.max(
-      60,
-      Math.floor((expiresAt.getTime() - now.getTime()) / 1000),
-    ),
-  }
-}
-
-export async function readMonthlyQuota(
+export async function readPeriodUsage(
   database: Database,
   redis: RedisClient,
   config: AppConfig,
   userId: string,
+  period: QuotaPeriod,
 ): Promise<number> {
   if (!redis.isReady) {
     throw new RedisUnavailableError('Redis is unavailable')
   }
 
-  const period = monthlyPeriod()
   const key = redisKey(config, `quota:user:${userId}:${period.key}`)
   const cached = await redis.get(key)
 
@@ -193,7 +177,7 @@ export async function readMonthlyQuota(
     return Number(cached)
   }
 
-  const total = await getMonthlyTokenUsage(
+  const total = await getTokenUsage(
     database,
     userId,
     period.start,
@@ -201,50 +185,71 @@ export async function readMonthlyQuota(
   )
   // PostgreSQL usage events are the source of truth. The cached total is
   // re-read from them at least hourly, so any drift (lost increments, a
-  // Redis restart) heals on its own.
+  // Redis restart, background-job usage) heals on its own.
   await redis.set(key, String(total), {
     EX: Math.min(period.ttlSeconds, QUOTA_CACHE_SECONDS),
   })
   return total
 }
 
-/** How long a cached monthly total is trusted before re-reading PostgreSQL. */
+/** Full-period token totals (before any Reset 卷 baseline is subtracted). */
+export async function readQuotaUsage(
+  database: Database,
+  redis: RedisClient,
+  config: AppConfig,
+  userId: string,
+  now = new Date(),
+) {
+  const periods = quotaPeriods(now)
+  const [weekly, monthly] = await Promise.all([
+    readPeriodUsage(database, redis, config, userId, periods.weekly),
+    readPeriodUsage(database, redis, config, userId, periods.monthly),
+  ])
+  return { periods, weekly, monthly }
+}
+
+/** How long a cached period total is trusted before re-reading PostgreSQL. */
 const QUOTA_CACHE_SECONDS = 3_600
 /** A generation's usage is applied at most once within this window. */
 const QUOTA_APPLIED_MARKER_SECONDS = 86_400
 
 /**
- * Adds a finished generation's tokens to the cached total, once. A missing
- * total is NOT created here: INCRBY on a missing key would start from zero
- * and undercount until it expired; the next read rebuilds it from PostgreSQL.
+ * Adds a finished generation's tokens to the cached weekly and monthly
+ * totals, once. A missing total is NOT created here: INCRBY on a missing key
+ * would start from zero and undercount until it expired; the next read
+ * rebuilds it from PostgreSQL.
  */
 const applyQuotaScript = `
 if redis.call('EXISTS', KEYS[1]) == 1 then
   return 0
 end
 redis.call('SET', KEYS[1], '1', 'EX', ARGV[2])
-if redis.call('EXISTS', KEYS[2]) == 1 then
-  redis.call('INCRBY', KEYS[2], ARGV[1])
+for index = 2, #KEYS do
+  if redis.call('EXISTS', KEYS[index]) == 1 then
+    redis.call('INCRBY', KEYS[index], ARGV[1])
+  end
 end
 return 1
 `
 
-export async function applyMonthlyQuota(
+export async function applyQuotaUsage(
   redis: RedisClient,
   config: AppConfig,
   userId: string,
   generationId: string,
   totalTokens: number,
+  now = new Date(),
 ): Promise<void> {
   if (!redis.isReady) {
     return
   }
 
-  const period = monthlyPeriod()
+  const periods = quotaPeriods(now)
   await redis.eval(applyQuotaScript, {
     keys: [
       redisKey(config, `quota:applied:${generationId}`),
-      redisKey(config, `quota:user:${userId}:${period.key}`),
+      redisKey(config, `quota:user:${userId}:${periods.weekly.key}`),
+      redisKey(config, `quota:user:${userId}:${periods.monthly.key}`),
     ],
     arguments: [String(totalTokens), String(QUOTA_APPLIED_MARKER_SECONDS)],
   })

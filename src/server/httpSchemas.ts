@@ -49,6 +49,20 @@ const memorySettings = z.object({
   chatSearchEnabled: z.boolean(),
 })
 
+const quotaWindow = z.object({
+  used: z.number().int().nonnegative(),
+  limit: z.number().int().nonnegative(),
+  percent: z.number().min(0).max(100),
+  resetsAt: isoDate,
+})
+
+const tokenQuota = z.object({
+  weekly: quotaWindow,
+  monthly: quotaWindow,
+  resetVouchers: z.number().int().nonnegative(),
+  lastResetAt: nullableString,
+})
+
 const messagePart = z.discriminatedUnion('type', [
   gpasPartSchema,
   gpasUploadPartSchema,
@@ -271,6 +285,9 @@ export const httpSchemas = {
   memorySettings: {
     body: jsonSchema(memorySettings.partial()),
     response: { 200: jsonSchema(memorySettings), ...errorResponses },
+  },
+  tokenQuota: {
+    response: { 200: jsonSchema(tokenQuota), ...errorResponses },
   },
   renameChat: {
     body: jsonSchema(z.object({

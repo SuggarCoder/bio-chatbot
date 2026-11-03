@@ -29,6 +29,8 @@ test('all Fastify route schemas compile at startup', async () => {
     assert.match(routes, /ai-chatbot\/api\//)
     assert.match(routes, /conversations/)
     assert.match(routes, /generations/)
+    assert.match(routes, /usage\/quota/)
+    assert.match(routes, /reset \(POST\)/)
 
     const invalidBody = await app.inject({
       method: 'POST',

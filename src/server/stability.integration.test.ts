@@ -6,11 +6,12 @@ import { dependencyUnavailable } from './app.js'
 import { mockUserInfoResponse } from './auth.js'
 import { BackgroundQueue } from './backgroundJobs.js'
 import { GenerationQueue } from './generationQueue.js'
-import { applyMonthlyQuota, createRedisClient, readMonthlyQuota, redisKey, RedisUnavailableError } from './cache.js'
+import { applyQuotaUsage, createRedisClient, readQuotaUsage, redisKey, RedisUnavailableError } from './cache.js'
 import type { AppConfig } from './config.js'
 import { closeDatabase, createChat, createDatabase, createGenerationStart, deleteChat, migrateDatabase, syncUser } from './db.js'
 import { runRetention } from './retention.js'
-import { users } from './db/schema.js'
+import { usageEvents, users } from './db/schema.js'
+import { assertTokenQuota, getTokenQuota, grantResetVouchers, redeemResetVoucher } from './tokenQuota.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 const redisUrl = process.env.TEST_REDIS_URL
@@ -99,12 +100,12 @@ test('a lost quota counter is rebuilt from PostgreSQL, not restarted from zero',
     const user = await syncUser(database, { ...mockUserInfoResponse.data, userId: crypto.randomUUID() })
     // No cached total (e.g. after a Redis restart): applying usage must not
     // create a counter that starts from zero.
-    await applyMonthlyQuota(redis, config, user.id, crypto.randomUUID(), 500)
+    await applyQuotaUsage(redis, config, user.id, crypto.randomUUID(), 500)
     const keys = await redis.keys(`${config.redisPrefix}quota:user:*`)
     assert.deepEqual(keys, [])
-    assert.equal(await readMonthlyQuota(database, redis, config, user.id), 0, 'rebuilt from usage events')
-    await applyMonthlyQuota(redis, config, user.id, crypto.randomUUID(), 500)
-    assert.equal(await readMonthlyQuota(database, redis, config, user.id), 500, 'existing totals are incremented')
+    assert.deepEqual(await readQuotaUsage(database, redis, config, user.id).then(({ weekly, monthly }) => [weekly, monthly]), [0, 0], 'rebuilt from usage events')
+    await applyQuotaUsage(redis, config, user.id, crypto.randomUUID(), 500)
+    assert.deepEqual(await readQuotaUsage(database, redis, config, user.id).then(({ weekly, monthly }) => [weekly, monthly]), [500, 500], 'existing totals are incremented')
     await database.delete(users).where(eq(users.id, user.id))
   } finally {
     await closeDatabase(database)
@@ -197,6 +198,58 @@ test('draining a user\'s generation queue leaves no per-user keys behind', { ski
     assert.equal(Number(await redis.hExists(redisKey(config, 'queue:user-weights'), userId)), 0)
     assert.equal(await queue.pop(), null)
   } finally {
+    await redis.close()
+  }
+})
+
+test('a Reset 卷 is spent once and restarts both quota windows', { skip: !redisUrl || !databaseUrl }, async () => {
+  const config = {
+    redisUrl,
+    redisPrefix: `test:quota-reset:${crypto.randomUUID()}:`,
+    tokenLimits: {
+      free: { weekly: 1_000, monthly: 4_000 },
+      pro: { weekly: 1_000, monthly: 4_000 },
+      enterprise: { weekly: 1_000, monthly: 4_000 },
+    },
+  } as unknown as AppConfig
+  const redis = createRedisClient(config)
+  await redis.connect()
+  const database = createDatabase(databaseUrl as string)
+  try {
+    await migrateDatabase(database)
+    const user = await syncUser(database, { ...mockUserInfoResponse.data, userId: crypto.randomUUID() })
+    await database.insert(usageEvents).values({ userId: user.id, kind: 'chat', inputTokens: 900n, outputTokens: 200n })
+
+    const exhausted = await getTokenQuota(database, redis, config, user)
+    assert.equal(exhausted.weekly.used, 1_100)
+    assert.equal(exhausted.weekly.percent, 100)
+    await assert.rejects(assertTokenQuota(database, redis, config, user), { code: 'weekly_quota_exceeded' })
+    await assert.rejects(redeemResetVoucher(database, redis, config, user), { code: 'no_reset_voucher' })
+
+    assert.equal(await grantResetVouchers(database, user.id, 1, 'test'), 1)
+    // Two concurrent redemptions of a single voucher: exactly one succeeds.
+    const results = await Promise.allSettled([
+      redeemResetVoucher(database, redis, config, user),
+      redeemResetVoucher(database, redis, config, user),
+    ])
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1)
+    const fulfilled = results.find((result) => result.status === 'fulfilled')
+    assert.ok(fulfilled?.status === 'fulfilled')
+    assert.equal(fulfilled.value.resetVouchers, 0)
+    assert.equal(fulfilled.value.weekly.used, 0)
+    assert.equal(fulfilled.value.monthly.used, 0)
+    assert.ok(fulfilled.value.lastResetAt)
+    await assertTokenQuota(database, redis, config, user)
+
+    // Usage after the reset counts again.
+    await database.insert(usageEvents).values({ userId: user.id, kind: 'chat', inputTokens: 100n, outputTokens: 20n })
+    await redis.del(await redis.keys(`${config.redisPrefix}quota:user:*`))
+    const after = await getTokenQuota(database, redis, config, user)
+    assert.equal(after.weekly.used, 120)
+    assert.equal(after.monthly.used, 120)
+    await database.delete(users).where(eq(users.id, user.id))
+  } finally {
+    await closeDatabase(database)
     await redis.close()
   }
 })

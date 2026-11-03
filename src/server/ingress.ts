@@ -3,12 +3,25 @@ import { and, eq, inArray, sql } from 'drizzle-orm'
 import type { Database } from './db.js'
 import { chats, ingressRequests, users } from './db/schema.js'
 import { AuthenticationError } from './auth.js'
+import { TokenQuotaError } from './tokenQuota.js'
 import type { AppConfig } from './config.js'
 import type { GpasDetailRequest, GpasUploadBatch, projectInputSchema } from './gpasContracts.js'
 import type { z } from 'zod'
 
 export type IngressPayload = { content: string; artifactId?: string; supersedesGenerationId?: string; projectInput?: z.infer<typeof projectInputSchema>; uploads?: GpasUploadBatch; detail?: GpasDetailRequest }
 export type IngressRow = typeof ingressRequests.$inferSelect
+
+/** Whether a failed request is re-queued, and what the client is told otherwise. */
+export function classifyIngressFailure(error: unknown, attempts: number) {
+  const status = typeof error === 'object' && error && 'statusCode' in error ? Number(error.statusCode) : 500
+  // An exhausted token quota does not heal by retrying; report it as is.
+  const quotaExceeded = error instanceof TokenQuotaError
+  const transient = !quotaExceeded && (status >= 500 || status === 429) && attempts < 8
+  const detail = error instanceof AuthenticationError || quotaExceeded
+    ? { code: error.code, message: error.message }
+    : { code: 'request_failed', message: '请求暂时无法完成，请重试。' }
+  return { transient, detail }
+}
 export type IngressContext = { check(): Promise<void> }
 export function sealCredential(cookie: string, key: string, aad: string): string {
   const iv = randomBytes(12)
@@ -123,9 +136,7 @@ export class DurableIngress {
       const result = await this.execute(row, cookie, { check })
       await this.db.update(ingressRequests).set({ status: 'succeeded', result, credential: null, leaseUntil: null, updatedAt: new Date() }).where(owned)
     } catch (error) {
-      const status = typeof error === 'object' && error && 'statusCode' in error ? Number(error.statusCode) : 500
-      const transient = (status >= 500 || status === 429) && row.attempts < 8
-      const detail = error instanceof AuthenticationError ? { code: error.code, message: error.message } : { code: 'request_failed', message: '请求暂时无法完成，请重试。' }
+      const { transient, detail } = classifyIngressFailure(error, row.attempts)
       await this.db.update(ingressRequests).set({ status: transient ? 'queued' : 'failed',
         error: transient ? null : detail, credential: transient ? row.credential : null, leaseUntil: null,
         availableAt: new Date(Date.now() + Math.min(60_000, 1000 * 2 ** row.attempts)), updatedAt: new Date(),

@@ -58,7 +58,8 @@ export type AppConfig = {
   gpas2AuthMode: 'mock' | 'upstream'
   gpas2UserInfoUrl?: string
   chatRateLimitPerMinute: number
-  monthlyTokenLimit: number
+  /** Per service tier; 0 means unlimited. Periods are Beijing-time calendar weeks/months. */
+  tokenLimits: TokenLimits
   globalGenerationConcurrency: number
   providerGenerationConcurrency: number
   modelGenerationConcurrency: number
@@ -93,6 +94,23 @@ export type ObjectStorageConfig = {
   forcePathStyle: boolean
   maxAttempts: number
   serverSideEncryption?: 'AES256'
+}
+
+export type TokenLimitTier = 'free' | 'pro' | 'enterprise'
+export type TokenLimits = Record<TokenLimitTier, { weekly: number; monthly: number }>
+
+function readTokenLimits(): TokenLimits {
+  // MONTHLY_TOKEN_LIMIT predates per-tier limits and stays the default.
+  const monthlyDefault = positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true)
+  const weeklyDefault = positiveInteger('WEEKLY_TOKEN_LIMIT', 0, true)
+  const tier = (name: TokenLimitTier) => {
+    const suffix = name.toUpperCase()
+    return {
+      weekly: positiveInteger(`WEEKLY_TOKEN_LIMIT_${suffix}`, weeklyDefault, true),
+      monthly: positiveInteger(`MONTHLY_TOKEN_LIMIT_${suffix}`, monthlyDefault, true),
+    }
+  }
+  return { free: tier('free'), pro: tier('pro'), enterprise: tier('enterprise') }
 }
 
 function required(name: string): string {
@@ -464,7 +482,7 @@ export function readConfig(): AppConfig {
     gpas2AuthMode: authMode,
     gpas2UserInfoUrl,
     chatRateLimitPerMinute: positiveInteger('CHAT_RATE_LIMIT_PER_MINUTE', 10),
-    monthlyTokenLimit: positiveInteger('MONTHLY_TOKEN_LIMIT', 0, true),
+    tokenLimits: readTokenLimits(),
     globalGenerationConcurrency: positiveInteger('GLOBAL_GENERATION_CONCURRENCY', 96),
     providerGenerationConcurrency: positiveInteger('PROVIDER_GENERATION_CONCURRENCY', 96),
     modelGenerationConcurrency: positiveInteger('MODEL_GENERATION_CONCURRENCY', 96),

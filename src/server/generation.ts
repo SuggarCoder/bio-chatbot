@@ -1,4 +1,5 @@
 import { modelBudgetFetch } from './modelBudget.js'
+import { assertTokenQuota } from './tokenQuota.js'
 import OpenAI from 'openai'
 
 import {
@@ -6,7 +7,6 @@ import {
   consumeGenerationRateLimit,
   getCachedBudgetedChatContext,
   getCachedChatContext,
-  readMonthlyQuota,
   setCachedChatContext,
   setCachedBudgetedChatContext,
   type RedisClient,
@@ -365,23 +365,7 @@ export class GenerationService {
       )
     }
 
-    const quota = await readMonthlyQuota(
-      this.database,
-      this.redis,
-      this.config,
-      input.user.id,
-    )
-
-    if (
-      this.config.monthlyTokenLimit > 0 &&
-      quota >= this.config.monthlyTokenLimit
-    ) {
-      throw new GenerationRejectedError(
-        'Monthly token quota exceeded',
-        429,
-        'monthly_quota_exceeded',
-      )
-    }
+    await assertTokenQuota(this.database, this.redis, this.config, input.user)
 
     if (input.supersedesGenerationId) {
       await this.cancel(

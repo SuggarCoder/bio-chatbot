@@ -80,6 +80,8 @@ export const users = pgTable(
     /** Let the model search and list the user's other chats. */
     chatSearchEnabled: boolean('chatSearchEnabled').notNull().default(true),
     memoryConsolidatedAt: timestampTz('memoryConsolidatedAt'),
+    /** Unused Reset 卷: each one resets the weekly and monthly token quota. */
+    resetVoucherBalance: integer('resetVoucherBalance').notNull().default(0),
     createdAt: timestampTz('createdAt').notNull().defaultNow(),
     updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
     deletedAt: timestampTz('deletedAt'),
@@ -97,6 +99,10 @@ export const users = pgTable(
     check(
       'chk_user_max_queued_generations',
       sql`${table.maxQueuedGenerations} >= 1`,
+    ),
+    check(
+      'chk_user_reset_voucher_balance',
+      sql`${table.resetVoucherBalance} >= 0`,
     ),
     index('idx_user_team')
       .on(table.externalTeamId)
@@ -1164,6 +1170,40 @@ export const usageMonthly = pgTable(
   },
   (table) => [
     primaryKey({ name: 'pk_usage_monthly', columns: [table.userId, table.month, table.kind] }),
+  ],
+)
+
+/**
+ * Reset 卷 ledger. `grant` rows record vouchers issued by an admin; `redeem`
+ * rows record a reset and snapshot the usage that preceded it in the week
+ * and month containing `resetAt`, which is then excluded from the quota.
+ */
+export const quotaVoucherEvents = pgTable(
+  'QuotaVoucherEvent',
+  {
+    id: bigserial('id', { mode: 'bigint' }).primaryKey(),
+    userId: uuid('userId')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: varchar('kind', { length: 16 }).notNull(),
+    delta: integer('delta').notNull(),
+    resetAt: timestampTz('resetAt'),
+    weeklyBaseline: bigintValue('weeklyBaseline'),
+    monthlyBaseline: bigintValue('monthlyBaseline'),
+    note: text('note'),
+    createdAt: timestampTz('createdAt').notNull().defaultNow(),
+  },
+  (table) => [
+    check('chk_quota_voucher_kind', sql`${table.kind} in ('grant', 'redeem')`),
+    check(
+      'chk_quota_voucher_redeem',
+      sql`${table.kind} <> 'redeem' or (${table.resetAt} is not null and ${table.weeklyBaseline} >= 0 and ${table.monthlyBaseline} >= 0)`,
+    ),
+    index('idx_quota_voucher_user_kind_created').on(
+      table.userId,
+      table.kind,
+      table.createdAt.desc(),
+    ),
   ],
 )
 

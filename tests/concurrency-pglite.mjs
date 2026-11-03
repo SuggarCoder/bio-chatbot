@@ -113,7 +113,7 @@ try {
  const concurrency=Number(process.env.REVIEW_CONCURRENCY ?? 100);
  const cfg={requestEncryptionKey:Buffer.alloc(32,7).toString('base64'),ingressConcurrency:8,agentToolLimit:8,nodeEnv:'test',serveClient:false,gpas2AuthMode:'upstream',gpas2UserInfoUrl:'https://mock.invalid/user/info',
   qwenApiKey:'mock',qwenBaseUrl:'https://mock.invalid/v1',qwenModel:'mock',redisPrefix:'review:',
-  chatRateLimitPerMinute:10,monthlyTokenLimit:0,contextMemoryEnabled:false,userMemoryEnabled:false,
+  chatRateLimitPerMinute:10,tokenLimits:{free:{weekly:0,monthly:0},pro:{weekly:0,monthly:0},enterprise:{weekly:0,monthly:0}},contextMemoryEnabled:false,userMemoryEnabled:false,
   artifactProtocolEnabled:false,qwenTokenizerPath:'models/qwen-tokenizer'};
  const redis={isReady:true,eval:async()=>[1,0,9],get:async()=>null,set:async()=> 'OK'};
  const runtime=createCapabilityRuntime(cfg);

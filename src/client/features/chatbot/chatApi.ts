@@ -271,6 +271,39 @@ export function updateMemorySettings(settings: Partial<MemorySettingsDto>) {
   })
 }
 
+export type TokenQuotaWindowDto = {
+  used: number
+  /** 0 means unlimited. */
+  limit: number
+  /** Used share, 0–100. */
+  percent: number
+  resetsAt: string
+}
+
+export type TokenQuotaDto = {
+  weekly: TokenQuotaWindowDto
+  monthly: TokenQuotaWindowDto
+  resetVouchers: number
+  lastResetAt: string | null
+}
+
+/** Error codes the server uses when a token quota blocks a new reply. */
+export const TOKEN_QUOTA_ERROR_CODES = ['weekly_quota_exceeded', 'monthly_quota_exceeded'] as const
+
+export function isTokenQuotaError(error: unknown) {
+  return error instanceof ChatApiError &&
+    (TOKEN_QUOTA_ERROR_CODES as readonly string[]).includes(error.code)
+}
+
+export function fetchTokenQuota() {
+  return requestJson<TokenQuotaDto>('/usage/quota')
+}
+
+/** Spends one Reset 卷, restarting the weekly and monthly quota. */
+export function redeemResetVoucher() {
+  return requestJson<TokenQuotaDto>('/usage/quota/reset', { method: 'POST' })
+}
+
 async function requestNoContent(path: string, init: RequestInit): Promise<void> {
   const response = await fetch(`${API_BASE}${path}`, { ...init, credentials: 'include' })
   if (!response.ok) throw await parseApiError(response)
@@ -419,7 +452,11 @@ async function waitForRequest<T>(
       { signal },
     )
   }
-  if (ticket.status !== 'succeeded' || !ticket.result) throw new Error(ticket.error?.message ?? '请求处理失败')
+  if (ticket.status !== 'succeeded' || !ticket.result) {
+    // Keep the server's code (e.g. weekly_quota_exceeded) so the UI can react to it.
+    if (ticket.error) throw new ChatApiError(422, ticket.error.code, ticket.error.message)
+    throw new Error('请求处理失败')
+  }
   return ticket.result
 }
 

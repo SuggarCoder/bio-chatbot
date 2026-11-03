@@ -2241,8 +2241,8 @@ export async function finalizeGeneration(
   })
 }
 
-export async function getMonthlyTokenUsage(
-  database: Database,
+export async function getTokenUsage(
+  database: Database | Parameters<Parameters<Database['transaction']>[0]>[0],
   userId: string,
   periodStart: Date,
   periodEnd: Date,

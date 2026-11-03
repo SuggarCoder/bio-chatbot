@@ -70,7 +70,7 @@ function config(
     backgroundTimeoutMs: 120_000,
     gpas2AuthMode: 'mock',
     chatRateLimitPerMinute: 10,
-    monthlyTokenLimit: 0,
+    tokenLimits: { free: { weekly: 0, monthly: 0 }, pro: { weekly: 0, monthly: 0 }, enterprise: { weekly: 0, monthly: 0 } },
     globalGenerationConcurrency: 4,
     providerGenerationConcurrency: 4,
     modelGenerationConcurrency: 4,
