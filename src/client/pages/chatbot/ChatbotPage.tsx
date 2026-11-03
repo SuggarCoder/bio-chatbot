@@ -219,14 +219,6 @@ function AddIcon() {
   return <span aria-hidden="true" class="i-lucide-plus h-4 w-4 shrink-0" />
 }
 
-function UploadFileIcon() {
-  return <span aria-hidden="true" class="i-lucide-upload h-4 w-4 shrink-0" />
-}
-
-function CloudTransferIcon() {
-  return <span aria-hidden="true" class="i-lucide-cloud h-4 w-4 shrink-0" />
-}
-
 function QuestionMarkIcon() {
   return <span aria-hidden="true" class="i-lucide-circle-help h-4 w-4 shrink-0 text-slate-500" />
 }
@@ -1172,26 +1164,15 @@ function ChatComposer(props: {
         </Show>
 
         <div class="flex items-center justify-between gap-3 px-2">
-          <PopupMenu
-            buttonLabel="打开附件菜单"
-            buttonClass="grid h-11 w-11 place-items-center rounded-full text-slate-500 transition duration-200 hover:border-slate-300 hover:bg-slate-50 hover:text-teal-700"
-            menuWidth={208}
-            placement="top-end"
-            items={[
-              {
-                label: '上传文件',
-                icon: <UploadFileIcon />,
-                onSelect: openFilePicker,
-              },
-              {
-                label: '云端传输',
-                icon: <CloudTransferIcon />,
-                onSelect: noop,
-              },
-            ]}
+          <button
+            type="button"
+            aria-label="上传文件"
+            title="上传文件"
+            class="grid h-11 w-11 place-items-center rounded-full text-slate-500 transition duration-200 hover:border-slate-300 hover:bg-slate-50 hover:text-teal-700 cursor-pointer"
+            onClick={openFilePicker}
           >
             <AddIcon />
-          </PopupMenu>
+          </button>
           <Show when={props.generating}>
             <button
               type="button"
