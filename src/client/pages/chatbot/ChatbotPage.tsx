@@ -19,12 +19,16 @@ import { ProjectInitForm } from '../../features/chatbot/ProjectInitForm'
 import { appRoutes, getAppPathname } from '../../routes'
 import {
   cancelGeneration,
+  ChatApiError,
   createGeneration,
   deleteMessageVote,
+  fetchGeneration,
+  isTerminalGenerationStatus,
   regenerateMessage,
   setMessageVote,
 } from '../../features/chatbot/chatApi'
 import { gsap } from 'gsap'
+import { pollDelay, pollSleep } from '../../features/chatbot/backoff'
 import {
   runChatStream,
   StreamCompletedError,
@@ -113,55 +117,54 @@ function cancelAllAssistantReplies() {
   activeReplyControllers.clear()
 }
 
-function waitForDelay(duration: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) {
-      reject(new DOMException('The operation was aborted', 'AbortError'))
-      return
-    }
+const PERSISTED_REPLY_WAIT_MS = 30 * 60_000
 
-    const handleAbort = () => {
-      window.clearTimeout(timeoutId)
-      reject(new DOMException('The operation was aborted', 'AbortError'))
-    }
-    const timeoutId = window.setTimeout(() => {
-      signal.removeEventListener('abort', handleAbort)
-      resolve()
-    }, duration)
-
-    signal.addEventListener(
-      'abort',
-      handleAbort,
-      { once: true },
-    )
-  })
-}
-
+/**
+ * The stream gave up (e.g. the API or Redis is down for longer than the
+ * stream's own retries). Polls the generation's small status row, 2 s growing
+ * to 30 s with jitter and paused while the tab is hidden, and reloads the
+ * conversation once, after the generation has ended. Resolves true when the
+ * reloaded conversation has settled this generation.
+ */
 async function waitForPersistedReply(
   conversationId: string,
+  generationId: string,
   chatStore: ReturnType<typeof useChatStore>,
   signal: AbortSignal,
 ) {
-  for (let attempt = 0; attempt < 150; attempt += 1) {
-    signal.throwIfAborted()
-    const conversation = await chatStore.loadConversation(
-      conversationId,
-      { force: true },
-    )
-    const latestMessage = conversation?.messages.at(-1)
+  const deadline = Date.now() + PERSISTED_REPLY_WAIT_MS
 
-    if (
-      latestMessage?.role === 'assistant' &&
-      latestMessage.status === 'done'
-    ) {
-      return true
+  for (let attempt = 0; Date.now() < deadline; attempt += 1) {
+    if (attempt > 0) {
+      await pollSleep(pollDelay(attempt - 1, { baseMs: 2_000, capMs: 30_000 }), signal)
+    }
+    let ended = false
+
+    try {
+      const generation = await fetchGeneration(generationId, signal)
+      ended = isTerminalGenerationStatus(generation.status)
+    } catch (error) {
+      if (signal.aborted) throw error
+      if (error instanceof ChatApiError && error.status === 404) {
+        ended = true
+      } else if (
+        error instanceof ChatApiError &&
+        error.status < 500 &&
+        error.status !== 429
+      ) {
+        return false
+      }
+      // Otherwise still unavailable: keep polling.
     }
 
-    if (conversation && !conversation.activeGeneration) {
-      return false
+    if (ended) {
+      const conversation = await chatStore.loadConversation(
+        conversationId,
+        { force: true },
+      )
+      return Boolean(conversation) &&
+        conversation?.activeGeneration?.generationId !== generationId
     }
-
-    await waitForDelay(2_000, signal)
   }
 
   return false
@@ -673,6 +676,7 @@ async function runAssistantReply(
     if (error instanceof StreamCompletedError) {
       deleteAdaptiveStreamSession(generationId)
       await chatStore.loadConversation(conversationId, { force: true })
+      artifactStore.releaseGeneration(generationId)
       return
     }
 
@@ -680,11 +684,17 @@ async function runAssistantReply(
       chatStore.getConversation(conversationId)?.activeGeneration &&
       await waitForPersistedReply(
         conversationId,
+        generationId,
         chatStore,
         controller.signal,
-      )
+      ).catch(() => false)
     ) {
       deleteAdaptiveStreamSession(generationId)
+      artifactStore.releaseGeneration(generationId)
+      return
+    }
+
+    if (controller.signal.aborted) {
       return
     }
 
@@ -1718,7 +1728,12 @@ function ChatMessageBubble(props: {
           </span>
         </Show>
 
-        <div class="message-content text-base leading-7">
+        <div
+          class="message-content text-base leading-7"
+          // Settled replies off screen skip layout and paint (long conversations
+          // hold tens of thousands of nodes); the streaming one never does.
+          classList={{ 'message-content-settled': !isUser() && !liveGenerationId() }}
+        >
           <Show
             when={!isUser()}
             fallback={
@@ -1995,6 +2010,10 @@ function SessionConversationView(props: { conversationId: string }) {
 
   createEffect(() => {
     artifactStore.setVisibleConversation(props.conversationId)
+  })
+  createEffect(() => {
+    const conversationId = props.conversationId
+    untrack(() => chatStore.markConversationViewed(conversationId))
   })
   onCleanup(() => {
     conversationLoadRevision += 1

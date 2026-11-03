@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { UploadError, cancelledError, type SliceRequest, type UploadTransport } from './gpasUploadApi'
-import { UploadSession, unitsFromPairing, type UploadEnvironment, type UploadUnit } from './uploadEngine'
+import { ConcurrencyPool, UploadSession, unitsFromPairing, type UploadEnvironment, type UploadUnit } from './uploadEngine'
 
 const CHUNK = 10
 const tick = () => new Promise<void>(resolve => setImmediate(resolve))
@@ -102,6 +102,25 @@ test('one pool across files: concurrency is global and R1/R2 interleave', async 
   assert.equal(i2.fileId, 's_R2.fq-id-1')
   assert.equal(i1.pairKey, 'P1')
   assert.equal(i1.groupId, 'group-1')
+})
+
+test('jobs sharing a pool keep to one concurrency budget together', async () => {
+  const h = harness()
+  const pool = new ConcurrencyPool(3)
+  const env = { ...h.env, pool }
+  const first = new UploadSession([{ kind: 'single', file: bytes('a.fq', 60) }], 'clinic', env, { chunkSize: CHUNK, concurrency: 3 })
+  const second = new UploadSession([{ kind: 'single', file: bytes('b.fq', 60) }], 'clinic', env, { chunkSize: CHUNK, concurrency: 3 })
+  const outcomes = await Promise.all([first.run(new AbortController().signal), second.run(new AbortController().signal)])
+  assert.ok(outcomes.every(outcome => outcome.allUploaded))
+  assert.equal(h.slices.length, 12)
+  assert.ok(h.maxInFlight <= 3, `in flight: ${h.maxInFlight}`)
+
+  // Without a shared pool each job had its own three slots.
+  const separate = harness()
+  await Promise.all(['c.fq', 'd.fq'].map(name =>
+    new UploadSession([{ kind: 'single', file: bytes(name, 60) }], 'clinic', separate.env, { chunkSize: CHUNK, concurrency: 3 })
+      .run(new AbortController().signal)))
+  assert.ok(separate.maxInFlight > 3)
 })
 
 test('retryable failures back off with bounded jitter, then succeed', async () => {

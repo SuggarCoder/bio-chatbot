@@ -12,7 +12,7 @@ import {
 import { Portal } from 'solid-js/web'
 
 import { CodeBlock } from './CodeBlock'
-import { renderStrictMermaid } from './mermaid'
+import { cachedMermaidSvg, renderMermaidCached } from './mermaid'
 
 type DiagramSize = { width: number; height: number }
 type ViewportSize = { width: number; height: number }
@@ -317,23 +317,34 @@ export const MermaidBlock: Component<{
   let closeButtonRef: HTMLButtonElement | undefined
   let dialogRef: HTMLElement | undefined
   let revision = 0
+  // The render effect depends on the source text itself: a parent that
+  // rebuilds its props object on every streamed delta must not re-render it.
+  const source = createMemo(() => props.source)
+  const streaming = createMemo(() => props.isStreaming ?? false)
 
   createEffect(() => {
-    const source = props.source
-    const streaming = props.isStreaming ?? false
+    const currentSource = source()
+    const isStreaming = streaming()
     const current = ++revision
     setActiveView('preview')
     setExpanded(false)
     setError('')
 
-    if (streaming) {
+    if (isStreaming) {
       setSvg('')
       setRendering(false)
       return
     }
 
+    const cached = cachedMermaidSvg(currentSource)
+    if (cached !== undefined) {
+      setSvg(cached)
+      setRendering(false)
+      return
+    }
+
     setRendering(true)
-    void renderStrictMermaid(source).then((result) => {
+    void renderMermaidCached(currentSource).then((result) => {
       if (current === revision) setSvg(result)
     }).catch((reason) => {
       if (current === revision) {
@@ -395,10 +406,10 @@ export const MermaidBlock: Component<{
 
   return (
     <Show
-      when={!props.isStreaming}
+      when={!streaming()}
       fallback={
         <CodeBlock
-          code={props.source}
+          code={source()}
           language="mermaid"
           isStreaming
           showLineNumbers
@@ -475,7 +486,7 @@ export const MermaidBlock: Component<{
           <Match when={activeView() === 'source'}>
             <CodeBlock
               class="rounded-none border-0"
-              code={props.source}
+              code={source()}
               language="mermaid"
               showLineNumbers
             />

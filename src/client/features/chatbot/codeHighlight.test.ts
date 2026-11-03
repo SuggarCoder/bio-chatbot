@@ -2,11 +2,38 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  cachedHighlight,
   highlightCodeWithShiki,
   normalizeCodeLanguage,
   plainHighlightedCode,
+  rememberHighlight,
+  reuseUnchangedLines,
   splitCodeLines,
 } from './codeHighlight'
+
+test('a re-highlight keeps the line arrays of unchanged lines', async () => {
+  const before = await highlightCodeWithShiki('def a():\n    return 1\nx = ', 'python')
+  const after = await highlightCodeWithShiki('def a():\n    return 1\nx = 42\ny = 1', 'python')
+  const lines = reuseUnchangedLines(before.lines, after.lines)
+  assert.equal(lines.length, 4)
+  assert.equal(lines[0], before.lines[0])
+  assert.equal(lines[1], before.lines[1])
+  assert.notEqual(lines[2], before.lines[2])
+  assert.equal(lines[3], after.lines[3])
+  assert.deepEqual(lines, after.lines)
+})
+
+test('finished highlights are cached by language and exact source', async () => {
+  const source = 'SELECT 1;\n-- cached'
+  assert.equal(cachedHighlight(source, 'sql'), undefined)
+  const result = await highlightCodeWithShiki(source, 'sql')
+  rememberHighlight(result, 'sql')
+  assert.equal(cachedHighlight(source, 'sql'), result)
+  assert.equal(cachedHighlight(source, 'python'), undefined)
+  assert.equal(cachedHighlight(`${source} `, 'sql'), undefined)
+  rememberHighlight(plainHighlightedCode('plain', 'text'), 'text')
+  assert.equal(cachedHighlight('plain', 'text'), undefined, 'plain fallbacks are not cached')
+})
 
 test('normalizes supported language aliases and rejects unknown languages', () => {
   assert.equal(normalizeCodeLanguage(' py '), 'python')

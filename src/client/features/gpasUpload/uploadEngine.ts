@@ -2,8 +2,8 @@
  * Chunked GPAS upload engine, independent of UI.
  *
  * - One chunk size drives both `totalPieces` and slicing.
- * - One concurrency pool is shared by every chunk of every file; R1 and R2 of
- *   a pair upload side by side.
+ * - One concurrency pool is shared by every chunk of every file (in the
+ *   browser, of every job in the tab); R1 and R2 of a pair upload side by side.
  * - Abort scopes: batch → unit (single file or pair) → chunk. When a chunk runs
  *   out of attempts the rest of its unit is aborted and awaited before the unit
  *   is marked failed, so no request outlives its file.
@@ -63,6 +63,11 @@ export type UploadEnvironment = {
   random: () => number
   isOnline: () => boolean
   waitOnline: (signal: AbortSignal) => Promise<void>
+  /**
+   * Limiter shared with other sessions, so concurrent jobs together keep to
+   * one concurrency budget. Without it each run gets its own pool.
+   */
+  pool?: ConcurrencyPool
 }
 
 export type UploadOptions = {
@@ -116,18 +121,8 @@ function waitForOnline(signal: AbortSignal): Promise<void> {
   })
 }
 
-export const browserUploadEnvironment = (): UploadEnvironment => ({
-  transport: gpasUploadTransport,
-  hash: sha256Hex,
-  fileMN: buildFileMN,
-  sleep: abortableSleep,
-  random: Math.random,
-  isOnline: () => navigator.onLine,
-  waitOnline: waitForOnline,
-})
-
 /** FIFO limiter whose waiters leave the queue when their signal aborts. */
-class Pool {
+export class ConcurrencyPool {
   private active = 0
   private waiters: Array<{ grant: () => void }> = []
 
@@ -170,6 +165,20 @@ class Pool {
     this.waiters.shift()?.grant()
   }
 }
+
+/** One chunk budget for every upload job in the tab, not one per job. */
+const sharedUploadPool = new ConcurrencyPool(defaultUploadOptions.concurrency)
+
+export const browserUploadEnvironment = (): UploadEnvironment => ({
+  transport: gpasUploadTransport,
+  hash: sha256Hex,
+  fileMN: buildFileMN,
+  sleep: abortableSleep,
+  random: Math.random,
+  isOnline: () => navigator.onLine,
+  waitOnline: waitForOnline,
+  pool: sharedUploadPool,
+})
 
 /** Child controller that follows its parent; dispose to drop the listener. */
 function childController(parent: AbortSignal) {
@@ -252,7 +261,7 @@ export class UploadSession<F extends UploadFile> {
     this.authFailed = false
     this.cancelled = false
     const batch = childController(signal)
-    const pool = new Pool(this.options.concurrency)
+    const pool = this.env.pool ?? new ConcurrencyPool(this.options.concurrency)
     const pending = this.units.filter(unit => unitFiles(unit).some(file => this.state(file).status !== 'uploaded'))
     for (const unit of pending) {
       for (const file of unitFiles(unit)) this.update(file, { status: 'pending', error: undefined })
@@ -299,7 +308,7 @@ export class UploadSession<F extends UploadFile> {
     return item
   }
 
-  private async runUnit(unit: UploadUnit<F>, pool: Pool, batch: AbortController): Promise<void> {
+  private async runUnit(unit: UploadUnit<F>, pool: ConcurrencyPool, batch: AbortController): Promise<void> {
     const files = unitFiles(unit)
     const resuming = this.unitStates.get(unit)!.taskReady
     try {
@@ -375,7 +384,7 @@ export class UploadSession<F extends UploadFile> {
     unitState.taskReady = true
   }
 
-  private async uploadUnitChunks(unit: UploadUnit<F>, pool: Pool, scope: AbortController, batch: AbortController): Promise<void> {
+  private async uploadUnitChunks(unit: UploadUnit<F>, pool: ConcurrencyPool, scope: AbortController, batch: AbortController): Promise<void> {
     const channel: UploadChannel = unit.kind === 'paired' ? 'dual' : 'single'
     let firstFailure: unknown
     const queues = unitFiles(unit).map(file => {
@@ -420,7 +429,7 @@ export class UploadSession<F extends UploadFile> {
     file: F,
     no: number,
     channel: UploadChannel,
-    pool: Pool,
+    pool: ConcurrencyPool,
     signal: AbortSignal,
     onFatal: (failure: UploadError) => void,
   ): Promise<void> {

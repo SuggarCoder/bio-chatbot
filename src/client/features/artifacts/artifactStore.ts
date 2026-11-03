@@ -55,6 +55,37 @@ const pendingArtifactLoads = new Map<string, Promise<ArtifactClientEntity>>()
 let deltaFrame: number | undefined
 let clearSelectionAfterClose = false
 
+/** Artifacts whose content stays in memory (besides the open one). */
+export const MAX_LOADED_ARTIFACTS = 20
+/** Ids with loaded content, least recently used first. */
+let loadedArtifactOrder: string[] = []
+
+/**
+ * Marks an artifact's content as just used and drops the content (not the
+ * title or type, which cards show) of the least recently used ones beyond
+ * the cap. Opening an evicted artifact fetches its version again.
+ */
+function touchLoadedArtifact(artifactId: string) {
+  loadedArtifactOrder = [
+    ...loadedArtifactOrder.filter((id) => id !== artifactId),
+    artifactId,
+  ]
+  while (loadedArtifactOrder.length > MAX_LOADED_ARTIFACTS) {
+    const victimIndex = loadedArtifactOrder.findIndex(
+      (id) => id !== artifactState.activeArtifactId,
+    )
+    if (victimIndex < 0) return
+    const [victim] = loadedArtifactOrder.splice(victimIndex, 1)
+    if (artifactState.artifactsById[victim]) {
+      setArtifactState('artifactsById', victim, {
+        content: undefined,
+        loadedVersion: undefined,
+        versions: [],
+      })
+    }
+  }
+}
+
 type PanelChangeCause = 'artifact-start' | 'artifact-commit' | 'user'
 
 function clearPanelSelection() {
@@ -146,6 +177,7 @@ export const artifactStore = {
       content: draft.content,
       renderStatus: 'ready',
     })
+    touchLoadedArtifact(input.artifactId)
     const shouldReveal = shouldRevealCommittedArtifact({
       visibleConversationId: artifactState.visibleConversationId,
       draftConversationId: draft.conversationId,
@@ -208,6 +240,7 @@ export const artifactStore = {
       setArtifactState('artifactsById', artifactId, 'language', loaded.language ?? undefined)
       setArtifactState('artifactsById', artifactId, 'loadedVersion', desiredVersion)
     }
+    if (artifactState.artifactsById[artifactId]) touchLoadedArtifact(artifactId)
   },
   openGpasResult(selection: GpasResultSelection) {
     clearSelectionAfterClose = false
@@ -242,6 +275,7 @@ export const artifactStore = {
       renderStatus: 'ready',
     })
     setArtifactState('activeVersion', restored.version)
+    touchLoadedArtifact(artifactId)
     return restored.version
   },
   close(cause: PanelChangeCause = 'user') {

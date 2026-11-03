@@ -521,6 +521,18 @@
   animation: gpas-fade-in .22s ease-out;
 }
 
+/*
+ * Off-screen replies are not laid out or painted until scrolled near; `auto`
+ * remembers each reply's real height once it has rendered. Paint containment
+ * clips at the box, so leave room for the diagrams' shadows.
+ */
+.message-content-settled {
+  content-visibility: auto;
+  /* Width matters too: the bubble is sized to its content, up to max-w-3xl. */
+  contain-intrinsic-size: auto 48rem auto 480px;
+  overflow-clip-margin: 32px;
+}
+
 @keyframes gpas-skeleton-shimmer {
   to {
     transform: translateX(100%);

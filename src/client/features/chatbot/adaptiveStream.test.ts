@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   AdaptiveStreamSession,
+  appendGraphemes,
   getAdaptiveRate,
   splitGraphemes,
 } from './adaptiveStream'
@@ -208,4 +209,26 @@ test('a surrogate pair split across deltas is never emitted as two graphemes', (
   }
 
   assert.equal(visible, '🧬')
+})
+
+test('appending graphemes does not spread them into push arguments', () => {
+  const target = ['a']
+  appendGraphemes(target, 'é中'.repeat(200_000))
+  assert.equal(target.length, 400_001)
+  assert.equal(target[1], 'é')
+})
+
+test('restoring a 300k-character answer after a reload does not overflow the stack', () => {
+  const frames = new FakeFrames()
+  const session = new AdaptiveStreamSession('generation-6', {
+    scheduler: frames.scheduler,
+    reducedMotion: false,
+    onTerminal: () => undefined,
+  })
+  session.subscribe({ append: () => undefined, replace: () => undefined })
+
+  const restored = '序列比对结果'.repeat(50_000)
+  assert.doesNotThrow(() => session.push(0, restored))
+  assert.equal(session.canonicalText.length, restored.length)
+  assert.equal(session.backlog, restored.length)
 })

@@ -1,5 +1,7 @@
 import type { HighlighterCore, ThemedToken } from 'shiki/core'
 
+import { hashString, LruCache } from './lru'
+
 export const STREAMING_HIGHLIGHT_MAX_CHARS = 128 * 1024
 export const STATIC_HIGHLIGHT_MAX_CHARS = 256 * 1024
 
@@ -157,4 +159,55 @@ export async function highlightCodeWithShiki(
   } catch {
     return plainHighlightedCode(source, language)
   }
+}
+
+function sameToken(left: CodeToken, right: CodeToken) {
+  return left.content === right.content &&
+    left.color === right.color &&
+    left.bgColor === right.bgColor &&
+    (left.fontStyle ?? 0) === (right.fontStyle ?? 0)
+}
+
+export function sameCodeLine(left: CodeToken[], right: CodeToken[]) {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    if (!sameToken(left[index], right[index])) return false
+  }
+  return true
+}
+
+/**
+ * Returns `next` with every line that equals the line at the same index in
+ * `previous` replaced by that previous array, so the rendered list keeps the
+ * DOM of unchanged lines (a streaming block only changes its last lines).
+ */
+export function reuseUnchangedLines(
+  previous: readonly CodeToken[][],
+  next: CodeToken[][],
+): CodeToken[][] {
+  return next.map((line, index) => {
+    const before = previous[index]
+    return before && sameCodeLine(before, line) ? before : line
+  })
+}
+
+/** Finished highlights, so remounting a block (switching back to a conversation) costs nothing. */
+const highlightCache = new LruCache<string, HighlightedCode>(100)
+
+function highlightCacheKey(source: string, language?: string) {
+  return `${normalizeCodeLanguage(language) ?? ''}:${source.length}:${hashString(source)}`
+}
+
+export function cachedHighlight(
+  source: string,
+  language?: string,
+): HighlightedCode | undefined {
+  const hit = highlightCache.get(highlightCacheKey(source, language))
+  return hit && hit.source === source ? hit : undefined
+}
+
+export function rememberHighlight(result: HighlightedCode, language?: string) {
+  if (!result.highlighted) return
+  highlightCache.set(highlightCacheKey(result.source, language), result)
 }
