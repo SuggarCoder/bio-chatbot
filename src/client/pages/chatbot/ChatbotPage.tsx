@@ -199,18 +199,6 @@ function LogoutIcon() {
   return <span aria-hidden="true" class="i-lucide-log-out h-4 w-4 shrink-0" />
 }
 
-function SettingsIcon() {
-  return <span aria-hidden="true" class="i-lucide-settings-2 h-4 w-4 shrink-0" />
-}
-
-function LanguageIcon() {
-  return <span aria-hidden="true" class="i-lucide-languages h-4 w-4 shrink-0" />
-}
-
-function HelpIcon() {
-  return <span aria-hidden="true" class="i-lucide-circle-help h-4 w-4 shrink-0" />
-}
-
 function UsageIcon() {
   return <span aria-hidden="true" class="i-lucide-chart-line h-4 w-4 shrink-0" />
 }
@@ -294,24 +282,6 @@ function buildAccountMenuItems(): PopupMenuEntry[] {
       label: '记忆',
       icon: <span aria-hidden="true" class="i-lucide-brain h-4 w-4 shrink-0" />,
       onSelect: openMemorySettings,
-    },
-    {
-      label: '设置',
-      icon: <SettingsIcon />,
-      onSelect: noop,
-    },
-    {
-      label: '语言',
-      icon: <LanguageIcon />,
-      onSelect: noop,
-    },
-    {
-      label: '帮助手册',
-      icon: <HelpIcon />,
-      onSelect: noop,
-    },
-    {
-      type: 'separator',
     },
     {
       label: 'Tokens 使用量',
