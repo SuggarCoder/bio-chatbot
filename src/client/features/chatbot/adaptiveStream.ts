@@ -96,6 +96,23 @@ export function splitGraphemes(text: string) {
   return result
 }
 
+/**
+ * Appends the graphemes of `text` to `target` one by one. Spreading them into
+ * push() passes every grapheme as an argument and overflows the stack for
+ * long texts (a restored answer of ~120k graphemes).
+ */
+export function appendGraphemes(target: string[], text: string) {
+  if (!text) return target
+
+  if (segmenter) {
+    for (const entry of segmenter.segment(text)) target.push(entry.segment)
+    return target
+  }
+
+  for (const grapheme of splitGraphemes(text)) target.push(grapheme)
+  return target
+}
+
 class GraphemeQueue {
   private values: string[] = []
   private head = 0
@@ -124,7 +141,7 @@ class GraphemeQueue {
       candidate = this.values.pop() + candidate
     }
 
-    this.values.push(...splitGraphemes(candidate))
+    appendGraphemes(this.values, candidate)
   }
 
   replace(text: string) {
