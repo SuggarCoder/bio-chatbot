@@ -87,18 +87,29 @@ const workerEnv = {
   CHAT_SEARCH_ENABLED: 'false',
   PGAPPNAME: 'fault-worker',
 }
-let workerExited: number | null = null
-const worker = spawn(process.execPath, ['--import', 'tsx', 'src/server/worker.ts'], { env: workerEnv, stdio: ['ignore', 'pipe', 'pipe'] })
 const workerLog: string[] = []
-worker.stdout!.on('data', (chunk) => workerLog.push(String(chunk)))
-worker.stderr!.on('data', (chunk) => workerLog.push(String(chunk)))
-worker.on('exit', (code) => { workerExited = code ?? -1 })
+function startWorker(port: number, name: string) {
+  const state = { exited: null as number | null }
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/server/worker.ts'], {
+    env: { ...workerEnv, METRICS_PORT: String(port), PGAPPNAME: name },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  child.stdout!.on('data', (chunk) => workerLog.push(`[${name}] ${String(chunk)}`))
+  child.stderr!.on('data', (chunk) => workerLog.push(`[${name}] ${String(chunk)}`))
+  child.on('exit', (code) => { state.exited = code ?? -1 })
+  return { child, state, port }
+}
+const primary = startWorker(metricsPort, 'fault-worker')
+const worker = primary.child
+let secondary: ReturnType<typeof startWorker> | null = null
+// Read through a getter so the checks below see the current value.
+const workerExitedNow = () => primary.state.exited
 
-async function healthy(timeoutMs: number): Promise<boolean> {
+async function healthy(timeoutMs: number, port = metricsPort): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://127.0.0.1:${metricsPort}/healthz`)
+      const response = await fetch(`http://127.0.0.1:${port}/healthz`)
       if (response.ok) return true
     } catch { /* not up yet */ }
     await delay(250)
@@ -142,21 +153,21 @@ try {
   redis!.kill('SIGSTOP')
   await delay(5_000)
   redis!.kill('SIGCONT')
-  record('worker survives a 5 s Redis freeze', workerExited === null && await healthy(30_000))
+  record('worker survives a 5 s Redis freeze', workerExitedNow() === null && await healthy(30_000))
   record('a generation completes after the freeze', await finalStatus(await submit('after freeze'), 45_000) === 'completed')
 
   // Redis restarted, losing all data.
   redis!.kill('SIGTERM')
   await delay(3_000)
-  record('worker survives Redis being down for 3 s', workerExited === null)
+  record('worker survives Redis being down for 3 s', workerExitedNow() === null)
   await startRedis()
-  record('worker recovers after Redis restarts empty', workerExited === null && await healthy(45_000))
+  record('worker recovers after Redis restarts empty', workerExitedNow() === null && await healthy(45_000))
   record('a generation completes after the Redis restart', await finalStatus(await submit('after restart'), 60_000) === 'completed')
 
   // PostgreSQL closes the worker's connections (restart/failover).
   const killed = await admin.query(`select pg_terminate_backend(pid) from pg_stat_activity where application_name = 'fault-worker'`)
   await delay(2_000)
-  record('worker survives PostgreSQL closing its connections', workerExited === null && await healthy(30_000), `${killed.rowCount} connections closed`)
+  record('worker survives PostgreSQL closing its connections', workerExitedNow() === null && await healthy(30_000), `${killed.rowCount} connections closed`)
   record('a generation completes after the connections were closed', await finalStatus(await submit('after pg'), 45_000) === 'completed')
 
   // A Redis blip in the middle of a running generation must not interrupt it.
@@ -168,12 +179,34 @@ try {
   const slowStatus = await finalStatus(slow, 60_000)
   record('a running generation survives a 4 s Redis freeze', slowStatus === 'completed', slowStatus)
 
+  // Rolling deploy with two workers: worker A is replaced while both run
+  // slow generations. A drains its own runs; B keeps taking new work.
+  secondary = startWorker(metricsPort + 1, 'fault-worker-2')
+  record('second worker starts', await healthy(60_000, secondary.port))
+  const draining = await Promise.all([1, 2, 3, 4].map((index) => submit(`SLOW drained answer ${index}`)))
+  for (let waited = 0; waited < 20_000; waited += 250) {
+    const rows = await database.select({ status: generations.status }).from(generations)
+    if (rows.filter((row) => row.status === 'running').length >= 4) break
+    await delay(250)
+  }
+  await delay(1_000)
   worker.kill('SIGTERM')
-  const deadline = Date.now() + 40_000
-  while (workerExited === null && Date.now() < deadline) await delay(200)
-  record('worker exits cleanly on SIGTERM', workerExited === 0, `exit ${workerExited}`)
+  await delay(500)
+  const duringDrain = await Promise.all([submit('submitted during drain 1'), submit('submitted during drain 2')])
+  const deadline = Date.now() + 60_000
+  while (workerExitedNow() === null && Date.now() < deadline) await delay(200)
+  const drainedStatuses = await Promise.all(draining.map((id) => finalStatus(id, 30_000)))
+  record('SIGTERM lets running generations finish (drain)', drainedStatuses.every((status) => status === 'completed'), drainedStatuses.join(','))
+  record('worker exits cleanly on SIGTERM', workerExitedNow() === 0, `exit ${workerExitedNow()}`)
+  const takenOver = await Promise.all(duringDrain.map((id) => finalStatus(id, 60_000)))
+  record('work submitted during the drain completes on the other worker', takenOver.every((status) => status === 'completed'), takenOver.join(','))
+  secondary.child.kill('SIGTERM')
+  const secondDeadline = Date.now() + 60_000
+  while (secondary.state.exited === null && Date.now() < secondDeadline) await delay(200)
+  record('second worker exits cleanly', secondary.state.exited === 0, `exit ${secondary.state.exited}`)
 } finally {
-  if (workerExited === null) worker.kill('SIGKILL')
+  if (workerExitedNow() === null) worker.kill('SIGKILL')
+  if (secondary && secondary.state.exited === null) secondary.child.kill('SIGKILL')
   redis!.kill('SIGKILL')
   model.close()
   await closeDatabase(database)

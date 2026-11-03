@@ -24,17 +24,23 @@ function referencedMetricNames(): Set<string> {
   for (const match of sources.matchAll(/\bchatbot_[a-z0-9_]+/g)) {
     names.add(match[0].replace(/_(bucket|count|sum)$/, ''))
   }
-  // Written by the backup job through node-exporter's textfile collector.
-  names.delete('chatbot_backup_last_success_timestamp_seconds')
   return names
 }
+
+test('backup metrics referenced by alerts are written by the backup job', () => {
+  const script = readFileSync('deploy/backup/backup.sh', 'utf8')
+  const backupNames = [...referencedMetricNames()].filter((name) => name.startsWith('chatbot_backup_'))
+  assert.ok(backupNames.length >= 3)
+  assert.deepEqual(backupNames.filter((name) => !script.includes(`${name} $(`)), [])
+})
 
 test('every metric referenced by alerts and the dashboard is exported', async () => {
   initMetrics('api')
   registerPoolMetrics({ totalCount: 1, idleCount: 1, waitingCount: 0 }, { max: 4 })
   registerCollectedGauge('chatbot_sse_subscribers', 'test', () => 0)
   const exported = new Set((await registry.getMetricsAsJSON()).map((metric) => metric.name))
-  const missing = [...referencedMetricNames()].filter((name) => !exported.has(name))
+  // chatbot_backup_* come from the backup job via node-exporter's textfile collector.
+  const missing = [...referencedMetricNames()].filter((name) => !name.startsWith('chatbot_backup_') && !exported.has(name))
   assert.deepEqual(missing, [])
 })
 

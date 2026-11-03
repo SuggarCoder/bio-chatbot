@@ -30,13 +30,13 @@ PostgreSQL 必须安装 **pgvector**（跨会话检索用，`0001` 会执行 `CR
 
 ## 连接预算
 
-| 进程 | PostgreSQL max | Redis 连接 |
-|---|---:|---:|
-| API | 20 | 2 |
-| Worker | 16 | 2 |
-| 迁移/运维预留 | 4 | 6 |
+| 进程 | 实例数 | 每实例 PostgreSQL max | Redis 连接 |
+|---|---:|---:|---:|
+| API（app、app-2） | 2 | 12 | 2 |
+| Worker（worker、worker-2） | 2 | 12 | 2 |
+| 备份、迁移、运维预留 | — | 4 | 6 |
 
-合计约 40，PostgreSQL `max_connections` 至少 50（默认 100 足够）。增加实例时必须重新计算数据库总连接预算。
+合计约 52，PostgreSQL `max_connections` 保持默认 100 即可。增加实例时必须重新计算数据库总连接预算。拓扑、滚动发布、备份恢复见 [operations.md](operations.md)。
 
 ## 容量设计（100 用户 × 每人 3 路 chat，上游 LLM 100 并发，8 核 16G）
 
@@ -263,8 +263,8 @@ SQL 测试使用 PostgreSQL/WASM 执行真实迁移和查询，验证业务幂�
 默认值按上面的容量设计（上游 100 并发）设定；上游配额不同时按比例调整：
 
 ```env
-API_PG_POOL_MAX=20
-WORKER_PG_POOL_MAX=16
+API_PG_POOL_MAX=12
+WORKER_PG_POOL_MAX=12
 AUTH_CACHE_TTL_SECONDS=30
 INGRESS_CONCURRENCY=24
 UPSTREAM_CONCURRENCY=100

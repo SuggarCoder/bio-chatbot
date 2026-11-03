@@ -126,3 +126,17 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: 'No successful database backup in the last 26 hours'
+
+      - alert: BackupFailed
+        expr: chatbot_backup_last_run_failed == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'The last database backup attempt failed (it is retried hourly)'
+
+      - alert: BackupRestoreCheckStale
+        expr: time() - chatbot_backup_restore_verify_last_success_timestamp_seconds > 8 * 86400
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: 'No successful backup restore check in 8 days'

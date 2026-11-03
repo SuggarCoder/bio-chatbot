@@ -538,6 +538,25 @@ async function shutdown(signal: string): Promise<void> {
   // Let the loop finish its current step, so nothing it was starting is
   // missed by the drain below.
   await Promise.race([mainLoopDone, wait(5_000)])
+
+  // Drain: no new work is taken, running generations and jobs may finish
+  // (a rolling deploy then interrupts nobody). Leases keep renewing and the
+  // heartbeat keeps going meanwhile. Docker's stop_grace_period must exceed
+  // this drain plus the abort below.
+  const drainMs = config.workerDrainTimeoutMs
+  const inFlight = [...active, ...backgroundActive, ...(retentionRun ? [retentionRun] : [])]
+  if (drainMs > 0 && inFlight.length > 0) {
+    console.info('Worker draining', { generations: active.size, backgroundJobs: backgroundActive.size, timeoutMs: drainMs })
+    const heartbeat = setInterval(() => { void queue.heartbeat().catch(() => undefined) }, heartbeatIntervalMs)
+    const startedAt = Date.now()
+    await Promise.race([Promise.allSettled(inFlight), wait(drainMs)])
+    clearInterval(heartbeat)
+    console.info('Worker drain finished', {
+      elapsedMs: Date.now() - startedAt,
+      interrupted: active.size + backgroundActive.size,
+    })
+  }
+
   runtimes.abortAll('shutdown')
   for (const controller of backgroundControllers) {
     controller.abort(new Error('Worker shutting down'))

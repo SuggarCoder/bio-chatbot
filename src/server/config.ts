@@ -74,6 +74,8 @@ export type AppConfig = {
   generationMaxBytes: number
   /** Internal port for /metrics and /healthz; 0 disables it. */
   metricsPort: number
+  /** Worker: on SIGTERM, how long running generations may finish before they are interrupted. */
+  workerDrainTimeoutMs: number
   /** API: shed new requests when the p99 event-loop delay exceeds this (0 disables). */
   loadShedEventLoopMs?: number
   /** API: shed new requests when this many queries wait for a pool connection (0 disables). */
@@ -490,6 +492,7 @@ export function readConfig(): AppConfig {
     agentToolLimit: positiveInteger('AGENT_TOOL_LIMIT', 8),
     generationMaxBytes,
     metricsPort: positiveInteger('METRICS_PORT', 9464, true),
+    workerDrainTimeoutMs: positiveInteger('WORKER_DRAIN_TIMEOUT_MS', 170_000, true),
     loadShedEventLoopMs: positiveInteger('LOAD_SHED_EVENT_LOOP_MS', 500, true),
     loadShedPoolWaiting: positiveInteger('LOAD_SHED_POOL_WAITING', 32, true),
     objectStorage: readObjectStorageConfig(process.env, nodeEnv),

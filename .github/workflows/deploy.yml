@@ -30,7 +30,8 @@ jobs:
       - linux
       - x64
 
-    timeout-minutes: 45
+    # Two worker drains (up to 200 s each) fit comfortably.
+    timeout-minutes: 60
     env:
       DEPLOY_ENV_FILE: /home/lu/.env
 
@@ -268,10 +269,50 @@ jobs:
               node dist/server/migrate.js
           fi
 
-          "${compose[@]}" \
-            up \
-            -d \
-            --remove-orphans
+          if [ -n "${RESET_DATABASE_CONFIRM:-}" ]; then
+            # Everything was stopped for the reset: start it all at once.
+            "${compose[@]}" up -d --remove-orphans
+            exit 0
+          fi
+
+          # Rolling deploy: start services that do not exist yet (first
+          # rollout of app-2/worker-2/db-backup), then replace one instance
+          # at a time so the other keeps serving. Migrations ran above and
+          # must stay compatible with the release still running.
+          "${compose[@]}" up -d --no-recreate --remove-orphans
+
+          ready() {
+            # Readiness, not just liveness: PostgreSQL, Redis and a worker
+            # heartbeat must all be ok.
+            local body
+            body="$(curl --fail --silent --max-time 5 "http://10.88.20.19:$1/ai-chatbot/api/health")" || return 1
+            [[ "$body" == *'"status":"ok"'* ]]
+          }
+
+          roll() {
+            local service="$1" container="$2" port="${3:-}"
+            echo "Replacing ${service}"
+            # For a worker this waits for its drain (stop_grace_period).
+            "${compose[@]}" up -d --no-deps "$service"
+            for attempt in $(seq 1 60); do
+              health="$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || echo missing)"
+              if [ "$health" = healthy ] && { [ -z "$port" ] || ready "$port"; }; then
+                echo "${service} is ready"
+                return 0
+              fi
+              sleep 3
+            done
+            echo "${service} did not become ready; stopping the rollout (the other instance keeps serving)"
+            "${compose[@]}" ps
+            "${compose[@]}" logs --tail=200 "$service"
+            return 1
+          }
+
+          roll app ai-chatbot 8090
+          roll app-2 ai-chatbot-2 8091
+          roll worker ai-chatbot-worker
+          roll worker-2 ai-chatbot-worker-2
+          "${compose[@]}" up -d --no-deps db-backup
 
       - name: Verify application
         shell: bash
@@ -284,15 +325,17 @@ jobs:
             -p ai-chatbot
           )
 
+          ready() {
+            local body
+            body="$(curl --fail --silent --show-error --max-time 5 "http://10.88.20.19:$1/ai-chatbot/api/health")" || return 1
+            echo "$body"
+            [[ "$body" == *'"status":"ok"'* ]]
+          }
+
           for attempt in $(seq 1 30); do
             echo "Health check ${attempt}/30"
 
-            if curl \
-              --fail \
-              --silent \
-              --show-error \
-              http://10.88.20.19:8090/ai-chatbot/api/health
-            then
+            if ready 8090 && ready 8091; then
               echo
               echo "Deployment succeeded"
               exit 0

@@ -62,10 +62,14 @@ services:
   node-exporter:
     image: prom/node-exporter:v1.8.2
     restart: unless-stopped
-    command: [--path.rootfs=/host]
+    command:
+      - --path.rootfs=/host
+      # db-backup writes chatbot_backup.prom here (NODE_EXPORTER_TEXTFILE_DIR).
+      - --collector.textfile.directory=/textfile
     pid: host
     volumes:
       - /:/host:ro,rslave
+      - ${NODE_EXPORTER_TEXTFILE_DIR:-/home/lu/node-exporter-textfile}:/textfile:ro
     networks: [chatbot-backend]
 
 volumes:

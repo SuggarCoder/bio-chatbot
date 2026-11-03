@@ -1,225 +1,212 @@
+# Production topology on one host (about 100 concurrent users):
+#   app, app-2        API instances behind the host nginx upstream (8090, 8091)
+#   worker, worker-2  generation/background workers (drain on SIGTERM)
+#   db-backup         nightly pg_dump with retention and restore checks
+# Deploys replace one instance at a time (see .github/workflows/deploy.yml),
+# so migrations must stay backward compatible with the previous release.
+#
+# PostgreSQL connections: 2 x API_PG_POOL_MAX + 2 x WORKER_PG_POOL_MAX
+# (48 by default) plus backup and exporter; keep max_connections >= 100.
+
+x-environment: &common-environment
+  NODE_ENV: production
+  NODE_TLS_REJECT_UNAUTHORIZED: "${NODE_TLS_REJECT_UNAUTHORIZED:-1}"
+  HOST: 0.0.0.0
+  PORT: "8090"
+  DATABASE_URL: "${DATABASE_URL}"
+  REDIS_URL: "${REDIS_URL}"
+  REDIS_KEY_PREFIX: "${REDIS_KEY_PREFIX:-gpas2cb:prod:v3:}"
+  REQUEST_ENCRYPTION_KEY: "${REQUEST_ENCRYPTION_KEY:?set a stable base64 32-byte key}"
+  AUTH_CACHE_TTL_SECONDS: "${AUTH_CACHE_TTL_SECONDS:-30}"
+  INGRESS_CONCURRENCY: "${INGRESS_CONCURRENCY:-24}"
+  UPSTREAM_CONCURRENCY: "${UPSTREAM_CONCURRENCY:-100}"
+  UPSTREAM_TOKENS_PER_MINUTE: "${UPSTREAM_TOKENS_PER_MINUTE:-0}"
+  UPSTREAM_REQUESTS_PER_MINUTE: "${UPSTREAM_REQUESTS_PER_MINUTE:-0}"
+  QWEN_API_KEY: "${QWEN_API_KEY}"
+  QWEN_BASE_URL: "${QWEN_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
+  QWEN_MODEL: "${QWEN_MODEL:-qwen3.6-flash}"
+  QWEN_TOKENIZER_PATH: /app/models/qwen-tokenizer
+  QWEN_CONTEXT_WINDOW_TOKENS: "${QWEN_CONTEXT_WINDOW_TOKENS:-1000000}"
+  QWEN_MAX_INPUT_TOKENS: "${QWEN_MAX_INPUT_TOKENS:-983616}"
+  QWEN_MAX_OUTPUT_TOKENS: "${QWEN_MAX_OUTPUT_TOKENS:-40960}"
+  GENERATION_MAX_BYTES: "${GENERATION_MAX_BYTES:-8388608}"
+  CHAT_HISTORY_TOKEN_BUDGET: "${CHAT_HISTORY_TOKEN_BUDGET:-131072}"
+  CHAT_SUMMARY_TOKEN_BUDGET: "${CHAT_SUMMARY_TOKEN_BUDGET:-12288}"
+  SUMMARY_TARGET_TOKENS: "${SUMMARY_TARGET_TOKENS:-6144}"
+  SUMMARY_TRIGGER_TOKENS: "${SUMMARY_TRIGGER_TOKENS:-16384}"
+  INSTRUCTIONS_TOKEN_BUDGET: "${INSTRUCTIONS_TOKEN_BUDGET:-65536}"
+  CONTEXT_MEMORY_ENABLED: "${CONTEXT_MEMORY_ENABLED:-true}"
+  USER_MEMORY_ENABLED: "${USER_MEMORY_ENABLED:-true}"
+  USER_MEMORY_TOKEN_BUDGET: "${USER_MEMORY_TOKEN_BUDGET:-2048}"
+  USER_MEMORY_MAX_ITEMS: "${USER_MEMORY_MAX_ITEMS:-40}"
+  CHAT_SEARCH_ENABLED: "${CHAT_SEARCH_ENABLED:-true}"
+  EMBEDDING_MODEL: "${EMBEDDING_MODEL:-text-embedding-v4}"
+  EMBEDDING_BASE_URL: "${EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+  EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+  CHAT_SEARCH_MIN_SIMILARITY: "${CHAT_SEARCH_MIN_SIMILARITY:-0.35}"
+  MEMORY_EXTRACTION_DELAY_SECONDS: "${MEMORY_EXTRACTION_DELAY_SECONDS:-300}"
+  MEMORY_EXTRACTION_MAX_PENDING_TURNS: "${MEMORY_EXTRACTION_MAX_PENDING_TURNS:-6}"
+  MEMORY_CONSOLIDATION_INTERVAL_HOURS: "${MEMORY_CONSOLIDATION_INTERVAL_HOURS:-24}"
+  BACKGROUND_MODEL: "${BACKGROUND_MODEL:-qwen3.6-flash}"
+  BACKGROUND_MAX_OUTPUT_TOKENS: "${BACKGROUND_MAX_OUTPUT_TOKENS:-4096}"
+  BACKGROUND_CONCURRENCY: "${BACKGROUND_CONCURRENCY:-2}"
+  BACKGROUND_TIMEOUT_MS: "${BACKGROUND_TIMEOUT_MS:-120000}"
+  ARTIFACT_PROTOCOL_TOKEN_BUDGET: "${ARTIFACT_PROTOCOL_TOKEN_BUDGET:-4096}"
+  ARTIFACT_FULL_CONTENT_TOKEN_BUDGET: "${ARTIFACT_FULL_CONTENT_TOKEN_BUDGET:-40960}"
+  ARTIFACT_OUTLINE_TOKEN_BUDGET: "${ARTIFACT_OUTLINE_TOKEN_BUDGET:-8192}"
+  ARTIFACT_FRAGMENT_TOKEN_BUDGET: "${ARTIFACT_FRAGMENT_TOKEN_BUDGET:-32768}"
+  ARTIFACT_PATCH_ENABLED: "${ARTIFACT_PATCH_ENABLED:-false}"
+  GPAS2_AUTH_MODE: "${GPAS2_AUTH_MODE:-upstream}"
+  GPAS2_USER_INFO_URL: "${GPAS2_USER_INFO_URL}"
+  CHAT_RATE_LIMIT_PER_MINUTE: "${CHAT_RATE_LIMIT_PER_MINUTE:-10}"
+  MONTHLY_TOKEN_LIMIT: "${MONTHLY_TOKEN_LIMIT:-0}"
+  GLOBAL_GENERATION_CONCURRENCY: "${GLOBAL_GENERATION_CONCURRENCY:-96}"
+  PROVIDER_GENERATION_CONCURRENCY: "${PROVIDER_GENERATION_CONCURRENCY:-96}"
+  MODEL_GENERATION_CONCURRENCY: "${MODEL_GENERATION_CONCURRENCY:-96}"
+  GENERATION_TIMEOUT_MS: "${GENERATION_TIMEOUT_MS:-180000}"
+  GENERATION_LOCK_LEASE_MS: "${GENERATION_LOCK_LEASE_MS:-30000}"
+  GENERATION_LOCK_RENEW_INTERVAL_MS: "${GENERATION_LOCK_RENEW_INTERVAL_MS:-10000}"
+  GENERATION_CANCEL_POLL_INTERVAL_MS: "${GENERATION_CANCEL_POLL_INTERVAL_MS:-5000}"
+  GENERATION_SNAPSHOT_INTERVAL_MS: "${GENERATION_SNAPSHOT_INTERVAL_MS:-5000}"
+  OBJECT_STORAGE_ENABLED: "${OBJECT_STORAGE_ENABLED:-false}"
+  ARTIFACT_PROTOCOL_ENABLED: "${ARTIFACT_PROTOCOL_ENABLED:-false}"
+  AGENT_MAX_TOOL_CALLS: "${AGENT_MAX_TOOL_CALLS:-4}"
+  AGENT_TOOL_LIMIT: "${AGENT_TOOL_LIMIT:-8}"
+  S3_ENDPOINT: "${S3_ENDPOINT:-}"
+  S3_ALLOW_INSECURE_HTTP: "${S3_ALLOW_INSECURE_HTTP:-false}"
+  S3_REGION: "${S3_REGION:-us-east-1}"
+  S3_BUCKET: "${S3_BUCKET:-}"
+  S3_ACCESS_KEY_ID: "${S3_ACCESS_KEY_ID:-}"
+  S3_SECRET_ACCESS_KEY: "${S3_SECRET_ACCESS_KEY:-}"
+  S3_FORCE_PATH_STYLE: "${S3_FORCE_PATH_STYLE:-true}"
+  S3_MAX_ATTEMPTS: "${S3_MAX_ATTEMPTS:-3}"
+  S3_SERVER_SIDE_ENCRYPTION: "${S3_SERVER_SIDE_ENCRYPTION:-}"
+  APP_COMMIT: "${APP_COMMIT:-local}"
+  METRICS_PORT: "9464"
+  # Heap cap below mem_limit, so V8 collects before the kernel kills.
+  NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_MB:-1536}"
+  WORKER_DRAIN_TIMEOUT_MS: "${WORKER_DRAIN_TIMEOUT_MS:-170000}"
+  LOAD_SHED_EVENT_LOOP_MS: "${LOAD_SHED_EVENT_LOOP_MS:-500}"
+  LOAD_SHED_POOL_WAITING: "${LOAD_SHED_POOL_WAITING:-32}"
+
+x-service: &common-service
+  image: ai-chatbot:latest
+  restart: unless-stopped
+  init: true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  volumes:
+    - type: bind
+      source: /home/lu/models
+      target: /app/models
+      read_only: true
+      bind:
+        create_host_path: false
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - chatbot-backend
+  security_opt:
+    - no-new-privileges:true
+  # Liveness only (the process runs and its loop turns). Readiness, which
+  # also needs PostgreSQL and Redis, is /ai-chatbot/api/health.
+  healthcheck:
+    test:
+      [
+        "CMD-SHELL",
+        "node -e \"fetch('http://127.0.0.1:9464/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""
+      ]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 60s
+
+x-api: &api-service
+  <<: *common-service
+  environment:
+    <<: *common-environment
+    PG_POOL_MAX: "${API_PG_POOL_MAX:-12}"
+  mem_limit: "${API_MEM_LIMIT:-2g}"
+  # In-flight requests finish; SSE clients reconnect to the other instance.
+  stop_grace_period: 30s
+
+x-worker: &worker-service
+  <<: *common-service
+  command: ["node", "dist/server/worker.js"]
+  environment:
+    <<: *common-environment
+    PG_POOL_MAX: "${WORKER_PG_POOL_MAX:-12}"
+  mem_limit: "${WORKER_MEM_LIMIT:-3g}"
+  # Drain (WORKER_DRAIN_TIMEOUT_MS) + abort (15 s) + margin.
+  stop_grace_period: 200s
+
 services:
   app:
+    <<: *api-service
     build:
       context: .
       dockerfile: Dockerfile
-
-    image: ai-chatbot:latest
     container_name: ai-chatbot
-
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-    init: true
-
-    environment:
-      NODE_ENV: production
-      NODE_TLS_REJECT_UNAUTHORIZED: "${NODE_TLS_REJECT_UNAUTHORIZED:-1}"
-      HOST: 0.0.0.0
-      PORT: "8090"
-      APP_COMMIT: "${APP_COMMIT:-local}"
-      DATABASE_URL: "${DATABASE_URL}"
-      PG_POOL_MAX: "${API_PG_POOL_MAX:-20}"
-      REDIS_URL: "${REDIS_URL}"
-      REDIS_KEY_PREFIX: "${REDIS_KEY_PREFIX:-gpas2cb:prod:v3:}"
-      REQUEST_ENCRYPTION_KEY: "${REQUEST_ENCRYPTION_KEY:?set a stable base64 32-byte key}"
-      AUTH_CACHE_TTL_SECONDS: "${AUTH_CACHE_TTL_SECONDS:-30}"
-      INGRESS_CONCURRENCY: "${INGRESS_CONCURRENCY:-24}"
-      UPSTREAM_CONCURRENCY: "${UPSTREAM_CONCURRENCY:-100}"
-      UPSTREAM_TOKENS_PER_MINUTE: "${UPSTREAM_TOKENS_PER_MINUTE:-0}"
-      UPSTREAM_REQUESTS_PER_MINUTE: "${UPSTREAM_REQUESTS_PER_MINUTE:-0}"
-      QWEN_API_KEY: "${QWEN_API_KEY}"
-      QWEN_BASE_URL: "${QWEN_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
-      QWEN_MODEL: "${QWEN_MODEL:-qwen3.6-flash}"
-      QWEN_TOKENIZER_PATH: /app/models/qwen-tokenizer
-      QWEN_CONTEXT_WINDOW_TOKENS: "${QWEN_CONTEXT_WINDOW_TOKENS:-1000000}"
-      QWEN_MAX_INPUT_TOKENS: "${QWEN_MAX_INPUT_TOKENS:-983616}"
-      QWEN_MAX_OUTPUT_TOKENS: "${QWEN_MAX_OUTPUT_TOKENS:-40960}"
-      GENERATION_MAX_BYTES: "${GENERATION_MAX_BYTES:-8388608}"
-      CHAT_HISTORY_TOKEN_BUDGET: "${CHAT_HISTORY_TOKEN_BUDGET:-131072}"
-      CHAT_SUMMARY_TOKEN_BUDGET: "${CHAT_SUMMARY_TOKEN_BUDGET:-12288}"
-      SUMMARY_TARGET_TOKENS: "${SUMMARY_TARGET_TOKENS:-6144}"
-      SUMMARY_TRIGGER_TOKENS: "${SUMMARY_TRIGGER_TOKENS:-16384}"
-      INSTRUCTIONS_TOKEN_BUDGET: "${INSTRUCTIONS_TOKEN_BUDGET:-65536}"
-      CONTEXT_MEMORY_ENABLED: "${CONTEXT_MEMORY_ENABLED:-true}"
-      USER_MEMORY_ENABLED: "${USER_MEMORY_ENABLED:-true}"
-      USER_MEMORY_TOKEN_BUDGET: "${USER_MEMORY_TOKEN_BUDGET:-2048}"
-      USER_MEMORY_MAX_ITEMS: "${USER_MEMORY_MAX_ITEMS:-40}"
-      CHAT_SEARCH_ENABLED: "${CHAT_SEARCH_ENABLED:-true}"
-      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-text-embedding-v4}"
-      EMBEDDING_BASE_URL: "${EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
-      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
-      CHAT_SEARCH_MIN_SIMILARITY: "${CHAT_SEARCH_MIN_SIMILARITY:-0.35}"
-      MEMORY_EXTRACTION_DELAY_SECONDS: "${MEMORY_EXTRACTION_DELAY_SECONDS:-300}"
-      MEMORY_EXTRACTION_MAX_PENDING_TURNS: "${MEMORY_EXTRACTION_MAX_PENDING_TURNS:-6}"
-      MEMORY_CONSOLIDATION_INTERVAL_HOURS: "${MEMORY_CONSOLIDATION_INTERVAL_HOURS:-24}"
-      BACKGROUND_MODEL: "${BACKGROUND_MODEL:-qwen3.6-flash}"
-      BACKGROUND_MAX_OUTPUT_TOKENS: "${BACKGROUND_MAX_OUTPUT_TOKENS:-4096}"
-      BACKGROUND_CONCURRENCY: "${BACKGROUND_CONCURRENCY:-2}"
-      BACKGROUND_TIMEOUT_MS: "${BACKGROUND_TIMEOUT_MS:-120000}"
-      ARTIFACT_PROTOCOL_TOKEN_BUDGET: "${ARTIFACT_PROTOCOL_TOKEN_BUDGET:-4096}"
-      ARTIFACT_FULL_CONTENT_TOKEN_BUDGET: "${ARTIFACT_FULL_CONTENT_TOKEN_BUDGET:-40960}"
-      ARTIFACT_OUTLINE_TOKEN_BUDGET: "${ARTIFACT_OUTLINE_TOKEN_BUDGET:-8192}"
-      ARTIFACT_FRAGMENT_TOKEN_BUDGET: "${ARTIFACT_FRAGMENT_TOKEN_BUDGET:-32768}"
-      ARTIFACT_PATCH_ENABLED: "${ARTIFACT_PATCH_ENABLED:-false}"
-      GPAS2_AUTH_MODE: "${GPAS2_AUTH_MODE:-upstream}"
-      GPAS2_USER_INFO_URL: "${GPAS2_USER_INFO_URL}"
-      CHAT_RATE_LIMIT_PER_MINUTE: "${CHAT_RATE_LIMIT_PER_MINUTE:-10}"
-      MONTHLY_TOKEN_LIMIT: "${MONTHLY_TOKEN_LIMIT:-0}"
-      GLOBAL_GENERATION_CONCURRENCY: "${GLOBAL_GENERATION_CONCURRENCY:-96}"
-      PROVIDER_GENERATION_CONCURRENCY: "${PROVIDER_GENERATION_CONCURRENCY:-96}"
-      MODEL_GENERATION_CONCURRENCY: "${MODEL_GENERATION_CONCURRENCY:-96}"
-      GENERATION_TIMEOUT_MS: "${GENERATION_TIMEOUT_MS:-180000}"
-      GENERATION_LOCK_LEASE_MS: "${GENERATION_LOCK_LEASE_MS:-30000}"
-      GENERATION_LOCK_RENEW_INTERVAL_MS: "${GENERATION_LOCK_RENEW_INTERVAL_MS:-10000}"
-      GENERATION_CANCEL_POLL_INTERVAL_MS: "${GENERATION_CANCEL_POLL_INTERVAL_MS:-5000}"
-      GENERATION_SNAPSHOT_INTERVAL_MS: "${GENERATION_SNAPSHOT_INTERVAL_MS:-1000}"
-      OBJECT_STORAGE_ENABLED: "${OBJECT_STORAGE_ENABLED:-false}"
-      ARTIFACT_PROTOCOL_ENABLED: "${ARTIFACT_PROTOCOL_ENABLED:-false}"
-      AGENT_MAX_TOOL_CALLS: "${AGENT_MAX_TOOL_CALLS:-4}"
-      AGENT_TOOL_LIMIT: "${AGENT_TOOL_LIMIT:-8}"
-      S3_ENDPOINT: "${S3_ENDPOINT:-}"
-      S3_ALLOW_INSECURE_HTTP: "${S3_ALLOW_INSECURE_HTTP:-false}"
-      S3_REGION: "${S3_REGION:-us-east-1}"
-      S3_BUCKET: "${S3_BUCKET:-}"
-      S3_ACCESS_KEY_ID: "${S3_ACCESS_KEY_ID:-}"
-      S3_SECRET_ACCESS_KEY: "${S3_SECRET_ACCESS_KEY:-}"
-      S3_FORCE_PATH_STYLE: "${S3_FORCE_PATH_STYLE:-true}"
-      S3_MAX_ATTEMPTS: "${S3_MAX_ATTEMPTS:-3}"
-      S3_SERVER_SIDE_ENCRYPTION: "${S3_SERVER_SIDE_ENCRYPTION:-}"
-
     ports:
       - "10.88.20.19:8090:8090"
 
-    volumes:
-      - type: bind
-        source: /home/lu/models
-        target: /app/models
-        read_only: true
-        bind:
-          create_host_path: false
-
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-    networks:
-      - chatbot-backend
-
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "node -e \"fetch('http://127.0.0.1:8090/ai-chatbot/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 10s
-
-    security_opt:
-      - no-new-privileges:true
+  app-2:
+    <<: *api-service
+    container_name: ai-chatbot-2
+    ports:
+      - "10.88.20.19:8091:8090"
 
   worker:
-    image: ai-chatbot:latest
+    <<: *worker-service
     container_name: ai-chatbot-worker
+
+  worker-2:
+    <<: *worker-service
+    container_name: ai-chatbot-worker-2
+
+  db-backup:
+    image: pgvector/pgvector:pg17
+    container_name: ai-chatbot-db-backup
     restart: unless-stopped
+    init: true
+    entrypoint: ["/bin/bash", "/backup/backup.sh"]
+    environment:
+      DATABASE_URL: "${DATABASE_URL}"
+      BACKUP_HOUR_UTC: "${BACKUP_HOUR_UTC:-18}"
+      BACKUP_RETENTION_DAYS: "${BACKUP_RETENTION_DAYS:-14}"
+      BACKUP_WEEKLY_RETENTION_WEEKS: "${BACKUP_WEEKLY_RETENTION_WEEKS:-8}"
+      BACKUP_VERIFY_RESTORE: "${BACKUP_VERIFY_RESTORE:-true}"
+      TEXTFILE_DIR: /textfile
+    volumes:
+      - type: bind
+        source: ./deploy/backup
+        target: /backup
+        read_only: true
+      - type: bind
+        source: "${BACKUP_DIR:-/home/lu/backups/ai-chatbot}"
+        target: /backups
+        bind:
+          create_host_path: true
+      - type: bind
+        source: "${NODE_EXPORTER_TEXTFILE_DIR:-/home/lu/node-exporter-textfile}"
+        target: /textfile
+        bind:
+          create_host_path: true
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-    init: true
-    command: ["node", "dist/server/worker.js"]
-    environment:
-      NODE_ENV: production
-      NODE_TLS_REJECT_UNAUTHORIZED: "${NODE_TLS_REJECT_UNAUTHORIZED:-1}"
-      HOST: 0.0.0.0
-      PORT: "8090"
-      DATABASE_URL: "${DATABASE_URL}"
-      PG_POOL_MAX: "${WORKER_PG_POOL_MAX:-16}"
-      REDIS_URL: "${REDIS_URL}"
-      REDIS_KEY_PREFIX: "${REDIS_KEY_PREFIX:-gpas2cb:prod:v3:}"
-      REQUEST_ENCRYPTION_KEY: "${REQUEST_ENCRYPTION_KEY:?set a stable base64 32-byte key}"
-      INGRESS_CONCURRENCY: "${INGRESS_CONCURRENCY:-24}"
-      UPSTREAM_CONCURRENCY: "${UPSTREAM_CONCURRENCY:-100}"
-      UPSTREAM_TOKENS_PER_MINUTE: "${UPSTREAM_TOKENS_PER_MINUTE:-0}"
-      UPSTREAM_REQUESTS_PER_MINUTE: "${UPSTREAM_REQUESTS_PER_MINUTE:-0}"
-      QWEN_API_KEY: "${QWEN_API_KEY}"
-      QWEN_BASE_URL: "${QWEN_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
-      QWEN_MODEL: "${QWEN_MODEL:-qwen3.6-flash}"
-      QWEN_TOKENIZER_PATH: /app/models/qwen-tokenizer
-      QWEN_CONTEXT_WINDOW_TOKENS: "${QWEN_CONTEXT_WINDOW_TOKENS:-1000000}"
-      QWEN_MAX_INPUT_TOKENS: "${QWEN_MAX_INPUT_TOKENS:-983616}"
-      QWEN_MAX_OUTPUT_TOKENS: "${QWEN_MAX_OUTPUT_TOKENS:-40960}"
-      GENERATION_MAX_BYTES: "${GENERATION_MAX_BYTES:-8388608}"
-      CHAT_HISTORY_TOKEN_BUDGET: "${CHAT_HISTORY_TOKEN_BUDGET:-131072}"
-      CHAT_SUMMARY_TOKEN_BUDGET: "${CHAT_SUMMARY_TOKEN_BUDGET:-12288}"
-      SUMMARY_TARGET_TOKENS: "${SUMMARY_TARGET_TOKENS:-6144}"
-      SUMMARY_TRIGGER_TOKENS: "${SUMMARY_TRIGGER_TOKENS:-16384}"
-      INSTRUCTIONS_TOKEN_BUDGET: "${INSTRUCTIONS_TOKEN_BUDGET:-65536}"
-      CONTEXT_MEMORY_ENABLED: "${CONTEXT_MEMORY_ENABLED:-true}"
-      USER_MEMORY_ENABLED: "${USER_MEMORY_ENABLED:-true}"
-      USER_MEMORY_TOKEN_BUDGET: "${USER_MEMORY_TOKEN_BUDGET:-2048}"
-      USER_MEMORY_MAX_ITEMS: "${USER_MEMORY_MAX_ITEMS:-40}"
-      CHAT_SEARCH_ENABLED: "${CHAT_SEARCH_ENABLED:-true}"
-      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-text-embedding-v4}"
-      EMBEDDING_BASE_URL: "${EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
-      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
-      CHAT_SEARCH_MIN_SIMILARITY: "${CHAT_SEARCH_MIN_SIMILARITY:-0.35}"
-      MEMORY_EXTRACTION_DELAY_SECONDS: "${MEMORY_EXTRACTION_DELAY_SECONDS:-300}"
-      MEMORY_EXTRACTION_MAX_PENDING_TURNS: "${MEMORY_EXTRACTION_MAX_PENDING_TURNS:-6}"
-      MEMORY_CONSOLIDATION_INTERVAL_HOURS: "${MEMORY_CONSOLIDATION_INTERVAL_HOURS:-24}"
-      BACKGROUND_MODEL: "${BACKGROUND_MODEL:-qwen3.6-flash}"
-      BACKGROUND_MAX_OUTPUT_TOKENS: "${BACKGROUND_MAX_OUTPUT_TOKENS:-4096}"
-      BACKGROUND_CONCURRENCY: "${BACKGROUND_CONCURRENCY:-2}"
-      BACKGROUND_TIMEOUT_MS: "${BACKGROUND_TIMEOUT_MS:-120000}"
-      ARTIFACT_PROTOCOL_TOKEN_BUDGET: "${ARTIFACT_PROTOCOL_TOKEN_BUDGET:-4096}"
-      ARTIFACT_FULL_CONTENT_TOKEN_BUDGET: "${ARTIFACT_FULL_CONTENT_TOKEN_BUDGET:-40960}"
-      ARTIFACT_OUTLINE_TOKEN_BUDGET: "${ARTIFACT_OUTLINE_TOKEN_BUDGET:-8192}"
-      ARTIFACT_FRAGMENT_TOKEN_BUDGET: "${ARTIFACT_FRAGMENT_TOKEN_BUDGET:-32768}"
-      ARTIFACT_PATCH_ENABLED: "${ARTIFACT_PATCH_ENABLED:-false}"
-      GPAS2_AUTH_MODE: "${GPAS2_AUTH_MODE:-upstream}"
-      GPAS2_USER_INFO_URL: "${GPAS2_USER_INFO_URL}"
-      CHAT_RATE_LIMIT_PER_MINUTE: "${CHAT_RATE_LIMIT_PER_MINUTE:-10}"
-      MONTHLY_TOKEN_LIMIT: "${MONTHLY_TOKEN_LIMIT:-0}"
-      GLOBAL_GENERATION_CONCURRENCY: "${GLOBAL_GENERATION_CONCURRENCY:-96}"
-      PROVIDER_GENERATION_CONCURRENCY: "${PROVIDER_GENERATION_CONCURRENCY:-96}"
-      MODEL_GENERATION_CONCURRENCY: "${MODEL_GENERATION_CONCURRENCY:-96}"
-      GENERATION_TIMEOUT_MS: "${GENERATION_TIMEOUT_MS:-180000}"
-      GENERATION_LOCK_LEASE_MS: "${GENERATION_LOCK_LEASE_MS:-30000}"
-      GENERATION_LOCK_RENEW_INTERVAL_MS: "${GENERATION_LOCK_RENEW_INTERVAL_MS:-10000}"
-      GENERATION_CANCEL_POLL_INTERVAL_MS: "${GENERATION_CANCEL_POLL_INTERVAL_MS:-5000}"
-      GENERATION_SNAPSHOT_INTERVAL_MS: "${GENERATION_SNAPSHOT_INTERVAL_MS:-1000}"
-      OBJECT_STORAGE_ENABLED: "${OBJECT_STORAGE_ENABLED:-false}"
-      ARTIFACT_PROTOCOL_ENABLED: "${ARTIFACT_PROTOCOL_ENABLED:-false}"
-      AGENT_MAX_TOOL_CALLS: "${AGENT_MAX_TOOL_CALLS:-4}"
-      AGENT_TOOL_LIMIT: "${AGENT_TOOL_LIMIT:-8}"
-      S3_ENDPOINT: "${S3_ENDPOINT:-}"
-      S3_ALLOW_INSECURE_HTTP: "${S3_ALLOW_INSECURE_HTTP:-false}"
-      S3_REGION: "${S3_REGION:-us-east-1}"
-      S3_BUCKET: "${S3_BUCKET:-}"
-      S3_ACCESS_KEY_ID: "${S3_ACCESS_KEY_ID:-}"
-      S3_SECRET_ACCESS_KEY: "${S3_SECRET_ACCESS_KEY:-}"
-      S3_FORCE_PATH_STYLE: "${S3_FORCE_PATH_STYLE:-true}"
-      S3_MAX_ATTEMPTS: "${S3_MAX_ATTEMPTS:-3}"
-      S3_SERVER_SIDE_ENCRYPTION: "${S3_SERVER_SIDE_ENCRYPTION:-}"
-    volumes:
-      - type: bind
-        source: /home/lu/models
-        target: /app/models
-        read_only: true
-        bind:
-          create_host_path: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - chatbot-backend
     security_opt:
       - no-new-privileges:true
+    mem_limit: 1g
 
   storage-init:
     image: ai-chatbot:latest
