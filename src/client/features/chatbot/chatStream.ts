@@ -3,7 +3,19 @@ import {
   streamUrl,
   type ChatMessageDto,
 } from './chatApi'
+import {
+  fullJitterDelay,
+  isTransientStatus,
+  jitter,
+  sleep,
+} from './backoff'
 import { isCurrentGeneration } from './generationIdentity'
+import {
+  browserSessionStorage,
+  isStreamEventId,
+  readStreamResume,
+  StreamResumeWriter,
+} from './streamResume'
 
 type StreamIdentity = {
   generationId: string
@@ -98,23 +110,22 @@ type StreamRequest = {
   onRestore?: (content: string) => void
 }
 
-function sleep(duration: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) {
-      reject(new DOMException('The operation was aborted', 'AbortError'))
-      return
-    }
+/** Connection drops: 1, 2, 4, 5, 5 s, each spread over [0.5, 1.5). */
+const MAX_RECONNECTS = 5
+/** 502/503/504 (deploys, Redis outages): full jitter from 1 s up to 16 s. */
+const MAX_TRANSIENT_RETRIES = 6
 
-    const onAbort = () => {
-      window.clearTimeout(timeoutId)
-      reject(new DOMException('The operation was aborted', 'AbortError'))
-    }
-    const timeoutId = window.setTimeout(() => {
-      signal.removeEventListener('abort', onAbort)
-      resolve()
-    }, duration)
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
+export function reconnectDelay(retry: number, random: () => number = Math.random) {
+  return jitter(Math.min(500 * 2 ** retry, 5_000), random)
+}
+
+export function transientRetryDelay(
+  retry: number,
+  retryAfterMs: number | undefined,
+  random: () => number = Math.random,
+) {
+  const backoff = fullJitterDelay(retry, { baseMs: 1_000, capMs: 16_000, random })
+  return retryAfterMs === undefined ? backoff : Math.max(retryAfterMs, backoff)
 }
 
 function parseEventBlock(
@@ -141,6 +152,7 @@ async function consumeSse(
   response: Response,
   state: { buffer: string; lastEventId: string; partialText: string },
   request: StreamRequest,
+  resume: StreamResumeWriter,
 ): Promise<boolean> {
   if (!response.body) {
     throw new Error('Streaming response has no body')
@@ -188,24 +200,9 @@ async function consumeSse(
         }
       }
 
-      if (parsed.id && /^\d+-\d+$/.test(parsed.id)) {
+      if (isStreamEventId(parsed.id)) {
         state.lastEventId = parsed.id
-        try {
-          sessionStorage.setItem(
-            `chat:${request.userId}:generation:${request.generationId}:stream`,
-            JSON.stringify({
-              userId: request.userId,
-              conversationId: request.conversationId,
-              generationId: request.generationId,
-              streamId: request.streamId,
-              lastEventId: parsed.id,
-              partialText: state.partialText,
-              updatedAt: Date.now(),
-            }),
-          )
-        } catch {
-          // Streaming remains functional when browser storage is unavailable.
-        }
+        resume.record(parsed.id, state.partialText)
       }
 
       request.onEvent(event)
@@ -217,55 +214,62 @@ async function consumeSse(
 }
 
 export async function runChatStream(request: StreamRequest): Promise<void> {
-  const storageKey =
-    `chat:${request.userId}:generation:${request.generationId}:stream`
-  let restoredCursor = '0-0'
-  let restoredText = ''
-  try {
-    const restored = JSON.parse(
-      sessionStorage.getItem(storageKey) ?? 'null',
-    ) as {
-      streamId?: unknown
-      lastEventId?: unknown
-      partialText?: unknown
-    } | null
-    if (
-      restored?.streamId === request.streamId &&
-      typeof restored.lastEventId === 'string' &&
-      /^\d+-\d+$/.test(restored.lastEventId)
-    ) {
-      restoredCursor = restored.lastEventId
-      if (typeof restored.partialText === 'string') {
-        restoredText = restored.partialText.slice(0, 1_000_000)
-      }
-    }
-  } catch {
-    try {
-      sessionStorage.removeItem(storageKey)
-    } catch {
-      // Continue without resumable browser storage.
-    }
+  const storage = browserSessionStorage()
+  const meta = {
+    userId: request.userId,
+    conversationId: request.conversationId,
+    generationId: request.generationId,
+    streamId: request.streamId,
   }
+  const restored = readStreamResume(storage, meta)
   const state = {
     buffer: '',
-    lastEventId: restoredCursor,
-    partialText: restoredText,
+    lastEventId: restored?.cursor ?? '0-0',
+    partialText: restored?.text ?? '',
   }
+  const resume = new StreamResumeWriter(storage, meta)
+  resume.begin(state.lastEventId, state.partialText)
+  if (state.partialText) request.onRestore?.(state.partialText)
+
+  // A page that is going away keeps its resume state (flushed now); a stream
+  // that ends here for any other reason removes it.
+  let leavingPage = false
+  const onPageHide = () => {
+    leavingPage = true
+    resume.flush()
+  }
+  const onPageShow = () => {
+    leavingPage = false
+  }
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') resume.flush()
+  }
+  const hasWindow = typeof window !== 'undefined'
+  if (hasWindow) {
+    window.addEventListener('pagehide', onPageHide)
+    window.addEventListener('pageshow', onPageShow)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+  }
+
   try {
-    sessionStorage.setItem(storageKey, JSON.stringify({
-      userId: request.userId,
-      conversationId: request.conversationId,
-      generationId: request.generationId,
-      streamId: request.streamId,
-      lastEventId: restoredCursor,
-      partialText: restoredText,
-      updatedAt: Date.now(),
-    }))
-  } catch {
-    // Streaming remains functional when browser storage is unavailable.
+    await connect(request, state, resume)
+  } finally {
+    if (hasWindow) {
+      window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('pageshow', onPageShow)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+    resume.close(!leavingPage)
   }
-  if (restoredText) request.onRestore?.(restoredText)
+}
+
+async function connect(
+  request: StreamRequest,
+  state: { buffer: string; lastEventId: string; partialText: string },
+  resume: StreamResumeWriter,
+): Promise<void> {
   let retries = 0
+  let transientRetries = 0
 
   while (!request.signal.aborted) {
     let response: Response
@@ -282,13 +286,13 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
         },
       )
     } catch (error) {
-      if (request.signal.aborted || retries >= 5) {
+      if (request.signal.aborted || retries >= MAX_RECONNECTS) {
         throw error
       }
 
       retries += 1
       request.onConnectionState?.('reconnecting')
-      await sleep(Math.min(500 * 2 ** retries, 5_000), request.signal)
+      await sleep(reconnectDelay(retries), request.signal)
       continue
     }
 
@@ -297,7 +301,22 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
     }
 
     if (!response.ok) {
-      throw await parseApiError(response)
+      const error = await parseApiError(response)
+
+      if (
+        !isTransientStatus(response.status) ||
+        transientRetries >= MAX_TRANSIENT_RETRIES
+      ) {
+        throw error
+      }
+
+      request.onConnectionState?.('reconnecting')
+      await sleep(
+        transientRetryDelay(transientRetries, error.retryAfterMs),
+        request.signal,
+      )
+      transientRetries += 1
+      continue
     }
 
     request.onConnectionState?.('connected')
@@ -305,31 +324,29 @@ export async function runChatStream(request: StreamRequest): Promise<void> {
     const cursorBefore = state.lastEventId
 
     try {
-      if (await consumeSse(response, state, request)) {
-        try {
-          sessionStorage.removeItem(storageKey)
-        } catch {
-          // Ignore unavailable browser storage after successful completion.
-        }
+      if (await consumeSse(response, state, request, resume)) {
         return
       }
     } catch (error) {
       // A connection that delivered events made progress: the retry budget
       // is for consecutive failures, not for a long stream's reconnects.
       if (state.lastEventId !== cursorBefore) retries = 0
-      if (request.signal.aborted || retries >= 5) {
+      if (request.signal.aborted || retries >= MAX_RECONNECTS) {
         throw error
       }
     }
 
-    if (state.lastEventId !== cursorBefore) retries = 0
+    if (state.lastEventId !== cursorBefore) {
+      retries = 0
+      transientRetries = 0
+    }
     retries += 1
 
-    if (retries > 5) {
+    if (retries > MAX_RECONNECTS) {
       throw new Error('Stream connection was interrupted')
     }
 
     request.onConnectionState?.('reconnecting')
-    await sleep(Math.min(500 * 2 ** retries, 5_000), request.signal)
+    await sleep(reconnectDelay(retries), request.signal)
   }
 }
