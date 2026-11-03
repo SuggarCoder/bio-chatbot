@@ -392,16 +392,18 @@ export async function buildApp(
     ).catch(() => 0) > 0 ? 'ok' : 'unavailable'
     const tokenizer = config.qwenTokenizerPath && existsSync(path.resolve(config.qwenTokenizerPath, 'tokenizer.json'))
       ? 'ok' : 'unavailable'
+    // Readiness of THIS API instance: it can serve requests when PostgreSQL
+    // and Redis answer. A missing worker, tokenizer (only the worker uses it)
+    // or object storage makes the service 'degraded' but must not take a
+    // healthy API instance out of the load balancer.
     const status =
-      postgres === 'ok' && redisStatus === 'ok'
-        && objectStorage !== 'unavailable' && worker === 'ok'
-        && tokenizer !== 'unavailable'
-        ? 'ok'
-        : postgres === 'ok'
-          ? 'degraded'
-          : 'unavailable'
+      postgres !== 'ok' || redisStatus !== 'ok'
+        ? 'unavailable'
+        : objectStorage !== 'unavailable' && worker === 'ok' && tokenizer !== 'unavailable'
+          ? 'ok'
+          : 'degraded'
 
-    if (status !== 'ok') {
+    if (status === 'unavailable') {
       reply.code(503)
     }
 

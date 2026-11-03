@@ -8,6 +8,7 @@ import {
   loadProfile,
   mockUserInfoResponse,
   resolveCurrentUser,
+  clearLocalAuthCache,
 } from './auth.js'
 import type { RedisClient } from './cache.js'
 import type { Database } from './db.js'
@@ -240,7 +241,17 @@ test('cached identity skips the GPAS round trip and the user upsert', async () =
       redis,
     ), (error: unknown) => error instanceof AuthenticationError && error.statusCode === 502)
 
-    // Redis unavailable: fall back to the authoritative path instead of the cache.
+    // Redis unavailable: the in-process copy still answers for the TTL, so
+    // an outage does not turn every request into a GPAS call.
+    assert.deepEqual(await resolveCurrentUser(
+      request('gpas_session=a'),
+      upstream,
+      {} as Database,
+      memoryRedis(false).redis,
+    ), cachedUser)
+
+    // Without either cache: the authoritative path (GPAS) is used.
+    clearLocalAuthCache()
     await assert.rejects(resolveCurrentUser(
       request('gpas_session=a'),
       upstream,

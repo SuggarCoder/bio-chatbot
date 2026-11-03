@@ -13,7 +13,8 @@ if (!databaseUrl) {
   throw new Error('DATABASE_URL is required')
 }
 
-const database = createDatabase(databaseUrl)
+// Migrations may build indexes or backfill large tables: no statement limit.
+const database = createDatabase(databaseUrl, 4, { statementTimeoutMs: 0 })
 
 try {
   await migrateDatabase(database)

@@ -128,7 +128,7 @@ export async function consumeGenerationRateLimit(
   bucket: 'generation' | 'capability' = 'generation',
 ): Promise<GenerationRateLimitResult> {
   if (!redis.isReady) {
-    throw new Error('Redis is unavailable')
+    throw new RedisUnavailableError('Redis is unavailable')
   }
 
   const now = Date.now()
@@ -176,7 +176,7 @@ export async function readMonthlyQuota(
   userId: string,
 ): Promise<number> {
   if (!redis.isReady) {
-    throw new Error('Redis is unavailable')
+    throw new RedisUnavailableError('Redis is unavailable')
   }
 
   const period = monthlyPeriod()
@@ -193,19 +193,33 @@ export async function readMonthlyQuota(
     period.start,
     period.end,
   )
+  // PostgreSQL usage events are the source of truth. The cached total is
+  // re-read from them at least hourly, so any drift (lost increments, a
+  // Redis restart) heals on its own.
   await redis.set(key, String(total), {
-    EX: period.ttlSeconds,
+    EX: Math.min(period.ttlSeconds, QUOTA_CACHE_SECONDS),
   })
   return total
 }
 
+/** How long a cached monthly total is trusted before re-reading PostgreSQL. */
+const QUOTA_CACHE_SECONDS = 3_600
+/** A generation's usage is applied at most once within this window. */
+const QUOTA_APPLIED_MARKER_SECONDS = 86_400
+
+/**
+ * Adds a finished generation's tokens to the cached total, once. A missing
+ * total is NOT created here: INCRBY on a missing key would start from zero
+ * and undercount until it expired; the next read rebuilds it from PostgreSQL.
+ */
 const applyQuotaScript = `
 if redis.call('EXISTS', KEYS[1]) == 1 then
   return 0
 end
 redis.call('SET', KEYS[1], '1', 'EX', ARGV[2])
-redis.call('INCRBY', KEYS[2], ARGV[1])
-redis.call('EXPIRE', KEYS[2], ARGV[2])
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  redis.call('INCRBY', KEYS[2], ARGV[1])
+end
 return 1
 `
 
@@ -226,7 +240,7 @@ export async function applyMonthlyQuota(
       redisKey(config, `quota:applied:${generationId}`),
       redisKey(config, `quota:user:${userId}:${period.key}`),
     ],
-    arguments: [String(totalTokens), String(period.ttlSeconds)],
+    arguments: [String(totalTokens), String(QUOTA_APPLIED_MARKER_SECONDS)],
   })
 }
 

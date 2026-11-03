@@ -176,6 +176,10 @@ export const chats = pgTable(
     index('idx_chat_user_active')
       .on(table.userId, table.status, table.createdAt.desc())
       .where(sql`${table.deletedAt} is null`),
+    // The chat list is ordered by last activity.
+    index('idx_chat_user_updated')
+      .on(table.userId, table.updatedAt.desc(), table.id.desc())
+      .where(sql`${table.deletedAt} is null`),
     unique('uq_chat_user_id').on(table.userId, table.id),
     foreignKey({
       name: 'fk_chat_user_fork',
@@ -453,6 +457,19 @@ export const generations = pgTable(
       .on(table.chatId, table.createdAt)
       .where(sql`${table.chatId} is not null`),
     index('idx_generation_model').on(table.provider, table.model, table.createdAt.desc()),
+    // Worker reconcile lists queued work every 15 s; without this it scans
+    // every generation ever made.
+    index('idx_generation_queued')
+      .on(table.queuedAt)
+      .where(sql`${table.status} = 'queued'`),
+    // Per-user queue limit, counted while the User row is locked.
+    index('idx_generation_user_pending')
+      .on(table.userId)
+      .where(sql`${table.status} in ('created', 'queued')`),
+    // Active generation of a chat (chat detail, FIFO check).
+    index('idx_generation_chat_unfinished')
+      .on(table.chatId)
+      .where(sql`${table.status} in ('created', 'queued', 'scheduled', 'running', 'cancelling')`),
     uniqueIndex('uq_generation_assistant_message')
       .on(table.assistantMessageId),
     uniqueIndex('uq_generation_chat_active')

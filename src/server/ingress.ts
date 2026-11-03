@@ -41,7 +41,7 @@ export class DurableIngress {
     const payloadHash = createHash('sha256').update(JSON.stringify(input.payload)).digest('hex')
     return this.db.transaction(async tx => {
       // Serialize per-user quota and idempotency checks, not external work.
-      await tx.select({ id: users.id }).from(users).where(eq(users.id, input.userId)).for('update')
+      await tx.select({ id: users.id }).from(users).where(eq(users.id, input.userId)).for('no key update')
       const [chat] = await tx.select({ id: chats.id }).from(chats).where(and(eq(chats.id, input.chatId), eq(chats.userId, input.userId), sql`${chats.deletedAt} is null`)).for('update')
       if (!chat) throw new AuthenticationError('会话不存在。', 404, 'chat_not_found')
       const [prior] = await tx.select().from(ingressRequests).where(and(eq(ingressRequests.userId, input.userId), eq(ingressRequests.requestId, input.requestId)))

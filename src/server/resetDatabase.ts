@@ -31,7 +31,7 @@ if (process.env.RESET_DATABASE_CONFIRM?.trim() !== databaseName) {
 
 const checkOnly = process.env.RESET_DATABASE_CHECK_ONLY === 'true'
 
-const database = createDatabase(databaseUrl, 1)
+const database = createDatabase(databaseUrl, 1, { statementTimeoutMs: 0 })
 try {
   if (checkOnly) {
     // Dropping a schema needs its owner's rights; on PostgreSQL 15+ the

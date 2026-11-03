@@ -66,6 +66,27 @@ export async function enqueueBackgroundJob(
   return job.id
 }
 
+const enqueueScript = `
+if redis.call('SET', KEYS[2], '1', 'NX', 'EX', 86400) then
+  redis.call('XADD', KEYS[1], '*', 'jobId', ARGV[1], 'userId', ARGV[2], 'attempt', ARGV[3])
+  return 1
+end
+return 0`
+
+const popScript = `
+local rows = redis.call('XRANGE', KEYS[1], '-', '+', 'COUNT', 1)
+if #rows == 0 then return false end
+local id = rows[1][1]
+local fields = rows[1][2]
+redis.call('XDEL', KEYS[1], id)
+local jobId, attempt = '', ''
+for index = 1, #fields, 2 do
+  if fields[index] == 'jobId' then jobId = fields[index + 1] end
+  if fields[index] == 'attempt' then attempt = fields[index + 1] end
+end
+redis.call('DEL', ARGV[1] .. jobId .. ':' .. attempt)
+return fields`
+
 export class BackgroundQueue {
   readonly workerId = `maintenance-${crypto.randomUUID()}`
 
@@ -89,33 +110,35 @@ export class BackgroundQueue {
     return redisKey(this.config, `maintenance:${jobId}:lease`)
   }
 
+  /**
+   * Dedupe marker and queue entry are written in one script: a timeout
+   * between two separate commands left a marker without an entry, which
+   * blocked the job for the marker's 24 h lifetime.
+   */
   async enqueue(job: BackgroundQueueJob): Promise<void> {
-    const inserted = await this.redis.set(this.dedupeKey(job), '1', {
-      NX: true,
-      EX: 86_400,
-    })
-    if (!inserted) return
-    await this.redis.xAdd(this.streamKey(), '*', {
-      jobId: job.jobId,
-      userId: job.userId,
-      attempt: String(job.attempt),
+    await this.redis.eval(enqueueScript, {
+      keys: [this.streamKey(), this.dedupeKey(job)],
+      arguments: [job.jobId, job.userId, String(job.attempt)],
     })
   }
 
+  /** Takes the oldest entry and clears its dedupe marker atomically. */
   async pop(): Promise<BackgroundQueueJob | null> {
-    const rows = await this.redis.xRange(this.streamKey(), '-', '+', { COUNT: 1 })
-    const row = rows[0]
-    if (!row) return null
-    await this.redis.xDel(this.streamKey(), row.id)
+    const fields = await this.redis.eval(popScript, {
+      keys: [this.streamKey()],
+      arguments: [redisKey(this.config, 'queue:maintenance:dedupe:')],
+    }) as string[] | null
+    if (!fields) return null
+    const message: Record<string, string> = {}
+    for (let index = 0; index + 1 < fields.length; index += 2) message[fields[index]!] = fields[index + 1]!
     const job = {
-      jobId: String(row.message.jobId ?? ''),
-      userId: String(row.message.userId ?? ''),
-      attempt: Number(row.message.attempt ?? 0),
+      jobId: String(message.jobId ?? ''),
+      userId: String(message.userId ?? ''),
+      attempt: Number(message.attempt ?? 0),
     }
     if (!job.jobId || !job.userId || !Number.isSafeInteger(job.attempt)) {
       return null
     }
-    await this.redis.del(this.dedupeKey(job))
     return job
   }
 
@@ -166,7 +189,8 @@ export async function claimBackgroundOutboxBatch(
       ))
       .orderBy(outboxEvents.createdAt)
       .limit(25)
-      .for('update', { skipLocked: true })
+      // Lock only the outbox rows, not the joined BackgroundJob rows.
+      .for('update', { of: outboxEvents, skipLocked: true })
 
     if (rows.length > 0) {
       await transaction

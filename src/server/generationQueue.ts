@@ -422,7 +422,9 @@ export async function claimOutboxBatch(database: Database): Promise<OutboxRow[]>
       ))
       .orderBy(outboxEvents.createdAt)
       .limit(25)
-      .for('update', { skipLocked: true })
+      // Lock only the outbox rows; the joined User/Generation rows must stay
+      // writable by other transactions.
+      .for('update', { of: outboxEvents, skipLocked: true })
 
     if (rows.length > 0) {
       await transaction

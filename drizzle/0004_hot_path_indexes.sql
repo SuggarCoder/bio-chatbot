@@ -1,0 +1,4 @@
+CREATE INDEX "idx_chat_user_updated" ON "Chat" USING btree ("userId","updatedAt" DESC NULLS LAST,"id" DESC NULLS LAST) WHERE "Chat"."deletedAt" is null;--> statement-breakpoint
+CREATE INDEX "idx_generation_queued" ON "Generation" USING btree ("queuedAt") WHERE "Generation"."status" = 'queued';--> statement-breakpoint
+CREATE INDEX "idx_generation_user_pending" ON "Generation" USING btree ("userId") WHERE "Generation"."status" in ('created', 'queued');--> statement-breakpoint
+CREATE INDEX "idx_generation_chat_unfinished" ON "Generation" USING btree ("chatId") WHERE "Generation"."status" in ('created', 'queued', 'scheduled', 'running', 'cancelling');

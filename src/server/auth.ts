@@ -143,6 +143,33 @@ function authCacheKey(request: FastifyRequest, config: AppConfig): string {
  * pool under load. A revoked session may stay valid for AUTH_CACHE_TTL_SECONDS;
  * durable ingress always re-validates the stored cookie before side effects.
  */
+/**
+ * A small in-process copy of the identity cache: it keeps authentication off
+ * GPAS and PostgreSQL when Redis is slow or down, and lets concurrent requests
+ * for the same session share one lookup.
+ */
+const LOCAL_AUTH_CACHE_LIMIT = 2_000
+const localAuthCache = new Map<string, { user: CurrentUser; expiresAt: number }>()
+const inflightAuth = new Map<string, Promise<CurrentUser>>()
+
+function readLocalAuth(key: string): CurrentUser | null {
+  const entry = localAuthCache.get(key)
+  if (!entry) return null
+  if (entry.expiresAt <= Date.now()) {
+    localAuthCache.delete(key)
+    return null
+  }
+  return entry.user
+}
+
+function writeLocalAuth(key: string, user: CurrentUser, ttlSeconds: number): void {
+  localAuthCache.delete(key)
+  localAuthCache.set(key, { user, expiresAt: Date.now() + ttlSeconds * 1_000 })
+  if (localAuthCache.size > LOCAL_AUTH_CACHE_LIMIT) {
+    localAuthCache.delete(localAuthCache.keys().next().value!)
+  }
+}
+
 export async function resolveCurrentUser(
   request: FastifyRequest,
   config: AppConfig,
@@ -150,25 +177,46 @@ export async function resolveCurrentUser(
   redis?: RedisClient,
 ): Promise<CurrentUser> {
   const ttl = config.authCacheTtlSeconds ?? 0
-  const cacheable = Boolean(redis?.isReady) && ttl > 0 &&
+  const cacheable = ttl > 0 &&
     (config.gpas2AuthMode === 'mock' || Boolean(request.headers.cookie))
-  const key = cacheable ? authCacheKey(request, config) : ''
+  if (!cacheable) return syncUser(database, await loadProfile(request, config))
+  const key = authCacheKey(request, config)
 
-  if (cacheable) {
-    const cached = await redis!.get(key).catch(() => null)
-    if (cached) {
-      try {
-        return JSON.parse(cached) as CurrentUser
-      } catch {
-        // Fall through to the authoritative path.
+  const local = readLocalAuth(key)
+  if (local) return local
+  const inflight = inflightAuth.get(key)
+  if (inflight) return inflight
+
+  const lookup = (async () => {
+    if (redis?.isReady) {
+      const cached = await redis.get(key).catch(() => null)
+      if (cached) {
+        try {
+          const user = JSON.parse(cached) as CurrentUser
+          writeLocalAuth(key, user, ttl)
+          return user
+        } catch {
+          // Fall through to the authoritative path.
+        }
       }
     }
+    const profile = await loadProfile(request, config)
+    const user = await syncUser(database, profile)
+    writeLocalAuth(key, user, ttl)
+    if (redis?.isReady) {
+      await redis.set(key, JSON.stringify(user), { EX: ttl }).catch(() => undefined)
+    }
+    return user
+  })()
+  inflightAuth.set(key, lookup)
+  try {
+    return await lookup
+  } finally {
+    inflightAuth.delete(key)
   }
+}
 
-  const profile = await loadProfile(request, config)
-  const user = await syncUser(database, profile)
-  if (cacheable) {
-    await redis!.set(key, JSON.stringify(user), { EX: ttl }).catch(() => undefined)
-  }
-  return user
+/** For tests: forget cached identities. */
+export function clearLocalAuthCache(): void {
+  localAuthCache.clear()
 }

@@ -166,14 +166,7 @@ export async function syncUser(
     image: profile.image || null,
     deletedAt: null,
   }
-  const [row] = await database
-    .insert(users)
-    .values(values)
-    .onConflictDoUpdate({
-      target: users.externalUserId,
-      set: values,
-    })
-    .returning({
+  const selection = {
       id: users.id,
       externalUserId: users.externalUserId,
       externalTeamId: users.externalTeamId,
@@ -189,7 +182,32 @@ export async function syncUser(
       schedulingWeight: users.schedulingWeight,
       generationConcurrencyLimit: users.generationConcurrencyLimit,
       maxQueuedGenerations: users.maxQueuedGenerations,
+  }
+  // Only write when the profile changed: an unconditional UPSERT created a
+  // new row version (and contended for the User row) on every request.
+  const [written] = await database
+    .insert(users)
+    .values(values)
+    .onConflictDoUpdate({
+      target: users.externalUserId,
+      set: values,
+      setWhere: sql`(
+        ${users.externalTeamId}, ${users.realName}, ${users.userName}, ${users.jobTitle},
+        ${users.researchField}, ${users.phone}, ${users.gpas2Role}, ${users.email},
+        ${users.name}, ${users.image}
+      ) is distinct from (
+        excluded."externalTeamId", excluded."realName", excluded."userName", excluded."jobTitle",
+        excluded."researchField", excluded."phone", excluded."gpas2Role", excluded."email",
+        excluded."name", excluded."image"
+      ) or ${users.deletedAt} is not null`,
     })
+    .returning(selection)
+  const row = written ?? (await database
+    .select(selection)
+    .from(users)
+    .where(eq(users.externalUserId, profile.userId))
+    .limit(1))[0]
+  if (!row) throw new Error('USER_SYNC_FAILED')
 
   return {
     ...row,
@@ -296,6 +314,9 @@ export async function deleteChat(
   chatId: string,
 ): Promise<boolean> {
   return database.transaction(async (transaction) => {
+    // Same lock order as memory extraction (memory lock, then Chat row);
+    // the reverse order deadlocked with it.
+    await lockUserMemories(transaction, userId)
     const rows = await transaction
       .update(chats)
       .set({ deletedAt: sql`now()` })
@@ -309,7 +330,6 @@ export async function deleteChat(
       .returning({ id: chats.id })
     if (rows.length === 0) return false
     // What the model learned from a deleted chat goes with it.
-    await lockUserMemories(transaction, userId)
     await forgetChatMemories(transaction, userId, chatId)
     await deleteChatChunks(transaction, userId, chatId)
     return true
@@ -1191,7 +1211,9 @@ export async function createGenerationStart(
       .select({ maxQueuedGenerations: users.maxQueuedGenerations })
       .from(users)
       .where(eq(users.id, input.userId))
-      .for('update')
+      // Serializes this user's starts without blocking inserts that only
+      // reference the user (messages, usage, tool runs take KEY SHARE).
+      .for('no key update')
       .limit(1)
     if (!owner) throw new Error('USER_NOT_FOUND')
     const [queue] = await transaction
@@ -1366,7 +1388,9 @@ export async function createRegenerationStart(
       .select({ maxQueuedGenerations: users.maxQueuedGenerations })
       .from(users)
       .where(eq(users.id, input.userId))
-      .for('update')
+      // Serializes this user's starts without blocking inserts that only
+      // reference the user (messages, usage, tool runs take KEY SHARE).
+      .for('no key update')
       .limit(1)
     if (!owner) throw new Error('USER_NOT_FOUND')
     const [queue] = await transaction

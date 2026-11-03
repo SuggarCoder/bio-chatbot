@@ -526,7 +526,14 @@ export class GenerationService {
     }
 
     this.runtimes.abort(generationId)
-    await this.queue.requestCancellation(userId, generationId)
+    // The cancellation is already durable in PostgreSQL, and the worker polls
+    // it; the Redis signal only makes it faster, so its failure is not fatal.
+    await this.queue.requestCancellation(userId, generationId).catch((error: unknown) => {
+      console.warn('Cancel signal not published; the worker will see it from PostgreSQL', {
+        generationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
 
     return generation
   }
@@ -906,11 +913,12 @@ export class GenerationService {
       }
 
       let context = start.contextMaxSeq === undefined
+        // Caches are an optimization: on a Redis error, read PostgreSQL.
         ? await getCachedChatContext(
             this.redis,
             this.config,
             input.chatId,
-          )
+          ).catch(() => null)
         : null
 
       if (
@@ -930,7 +938,7 @@ export class GenerationService {
           this.config,
           previousRevision,
           context,
-        )
+        ).catch(() => false)
         if (!advanced) context = null
       } else if (context?.revision !== revision) {
         context = null
@@ -948,7 +956,7 @@ export class GenerationService {
           this.redis,
           this.config,
           cacheInput,
-        )
+        ).catch(() => null)
         if (!context) {
           const budgetedContext = await buildBudgetedChatContext(this.database, {
             userId: input.user.id,
@@ -982,7 +990,7 @@ export class GenerationService {
               this.config,
               cacheInput,
               budgetedContext,
-            )
+            ).catch(() => undefined)
           }
         }
       }
@@ -1000,7 +1008,7 @@ export class GenerationService {
         }
 
         if (start.contextMaxSeq === undefined) {
-          await setCachedChatContext(this.redis, this.config, context)
+          await setCachedChatContext(this.redis, this.config, context).catch(() => undefined)
         }
       }
 

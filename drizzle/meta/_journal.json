@@ -29,6 +29,13 @@
       "when": 1793624708610,
       "tag": "0003_drop_incognito",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793675611610,
+      "tag": "0004_hot_path_indexes",
+      "breakpoints": true
     }
   ]
 }
