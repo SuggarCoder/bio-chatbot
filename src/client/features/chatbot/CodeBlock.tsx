@@ -1,7 +1,9 @@
 import {
   createEffect,
+  createMemo,
   createSignal,
   For,
+  Index,
   onCleanup,
   Show,
   untrack,
@@ -10,9 +12,12 @@ import {
 
 import { recordStreamOperation } from './streamMetrics'
 import {
+  cachedHighlight,
   highlightCodeWithShiki,
   normalizeCodeLanguage,
   plainHighlightedCode,
+  rememberHighlight,
+  reuseUnchangedLines,
   STATIC_HIGHLIGHT_MAX_CHARS,
   STREAMING_HIGHLIGHT_MAX_CHARS,
   type CodeToken,
@@ -81,17 +86,32 @@ export function CodeBlock(props: CodeBlockProps) {
   let copiedTimer: number | undefined
   let highlighting = false
   let disposed = false
-  let latestRequest = {
-    source: props.code,
-    language: props.language,
-    isStreaming: props.isStreaming ?? false,
-  }
+  // Effects below depend on these values, not on whatever object the parent
+  // rebuilt them from (a streaming tail is a new object on every delta).
+  const code = createMemo(() => props.code)
+  const language = createMemo(() => props.language)
+  const isStreaming = createMemo(() => props.isStreaming ?? false)
+  let latestRequest = untrack(() => ({
+    source: code(),
+    language: language(),
+    isStreaming: isStreaming(),
+  }))
   const [highlighted, setHighlighted] = createSignal<HighlightedCode>(
-    plainHighlightedCode(props.code, props.language),
+    untrack(() => (
+      isStreaming() ? undefined : cachedHighlight(code(), language())
+    ) ?? plainHighlightedCode(code(), language())),
   )
   const [copied, setCopied] = createSignal(false)
   const shouldWrap = () => props.wrap ?? globalWordWrap()
-  const languageLabel = () => normalizeCodeLanguage(props.language) ?? 'text'
+  const languageLabel = () => normalizeCodeLanguage(language()) ?? 'text'
+
+  /** Applies a result, keeping the line arrays (and so the DOM) of unchanged lines. */
+  const applyHighlight = (next: HighlightedCode) => {
+    setHighlighted((current) => ({
+      ...next,
+      lines: reuseUnchangedLines(current.lines, next.lines),
+    }))
+  }
 
   const scheduleHighlight = () => {
     if (disposed || highlighting || highlightTimer !== undefined) return
@@ -110,8 +130,9 @@ export function CodeBlock(props: CodeBlockProps) {
       void pending.then((result) => {
         const canApply = latestRequest.language === request.language &&
           latestRequest.source.startsWith(request.source)
+        if (!request.isStreaming) rememberHighlight(result, request.language)
         if (!disposed && canApply) {
-          setHighlighted(result)
+          applyHighlight(result)
           if (props.generationId) {
             recordStreamOperation(props.generationId, {
               type: 'highlight',
@@ -135,19 +156,36 @@ export function CodeBlock(props: CodeBlockProps) {
 
   createEffect(() => {
     const next = {
-      source: props.code,
-      language: props.language,
-      isStreaming: props.isStreaming ?? false,
+      source: code(),
+      language: language(),
+      isStreaming: isStreaming(),
     }
     const current = untrack(highlighted)
     latestRequest = next
+    const normalizedLanguage = normalizeCodeLanguage(next.language)
+
+    if (
+      current.highlighted &&
+      current.source === next.source &&
+      current.language === normalizedLanguage
+    ) {
+      return
+    }
+
+    const cached = next.isStreaming
+      ? undefined
+      : cachedHighlight(next.source, next.language)
+    if (cached) {
+      applyHighlight(cached)
+      return
+    }
 
     if (
       !next.source.startsWith(current.source) ||
-      normalizeCodeLanguage(next.language) !== current.language ||
+      normalizedLanguage !== current.language ||
       current.source.length === 0
     ) {
-      setHighlighted(plainHighlightedCode(next.source, next.language))
+      applyHighlight(plainHighlightedCode(next.source, next.language))
     }
     scheduleHighlight()
   })
@@ -243,28 +281,29 @@ export function CodeBlock(props: CodeBlockProps) {
       </div>
       <div class="code-block-scroll overflow-auto">
         <div class="code-block-lines min-w-full py-3 font-mono text-[13px] leading-6">
-          <For each={highlighted().lines}>
+          {/* Index keeps each line's element; only lines whose tokens changed update. */}
+          <Index each={highlighted().lines}>
             {(line, lineIndex) => (
               <div class="code-block-line">
                 <Show when={props.showLineNumbers !== false}>
                   <span
                     aria-hidden="true"
                     class="code-block-line-number"
-                    data-line-number={lineIndex() + 1}
+                    data-line-number={lineIndex + 1}
                   >
-                    {lineIndex() + 1}
+                    {lineIndex + 1}
                   </span>
                 </Show>
                 <code class="code-block-line-content">
-                  <Show when={line.length > 0} fallback={'\u200b'}>
-                    <For each={line}>
+                  <Show when={line().length > 0} fallback={'\u200b'}>
+                    <For each={line()}>
                       {(token) => <span style={tokenStyle(token)}>{token.content}</span>}
                     </For>
                   </Show>
                 </code>
               </div>
             )}
-          </For>
+          </Index>
         </div>
       </div>
     </section>

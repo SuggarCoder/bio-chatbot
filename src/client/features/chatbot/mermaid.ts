@@ -1,4 +1,5 @@
 import { sanitizeMermaidSvg } from '../artifacts/sanitizeSvg'
+import { hashString, LruCache } from './lru'
 
 const mermaidThemeVariables = {
   background: '#ffffff',
@@ -91,4 +92,37 @@ export async function renderStrictMermaid(
   const mermaid = await getMermaid()
   const result = await mermaid.render(id, content)
   return sanitizeMermaidSvg(result.svg)
+}
+
+/**
+ * Sanitized SVG of recently rendered diagrams, keyed by source: reopening a
+ * conversation shows its diagrams without running Mermaid again.
+ */
+const svgCache = new LruCache<string, { source: string; svg: string }>(100)
+const pendingRenders = new Map<string, Promise<string>>()
+
+function svgCacheKey(source: string) {
+  return `${source.length}:${hashString(source)}`
+}
+
+export function cachedMermaidSvg(source: string): string | undefined {
+  const hit = svgCache.get(svgCacheKey(source))
+  return hit?.source === source ? hit.svg : undefined
+}
+
+/** renderStrictMermaid with the cache above; concurrent renders of one source share a result. */
+export function renderMermaidCached(source: string): Promise<string> {
+  const cached = cachedMermaidSvg(source)
+  if (cached !== undefined) return Promise.resolve(cached)
+  const key = svgCacheKey(source)
+  const pending = pendingRenders.get(key)
+  if (pending) return pending
+  const render = renderStrictMermaid(source).then((svg) => {
+    svgCache.set(key, { source, svg })
+    return svg
+  }).finally(() => {
+    pendingRenders.delete(key)
+  })
+  pendingRenders.set(key, render)
+  return render
 }
