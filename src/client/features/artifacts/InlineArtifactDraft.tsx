@@ -1,38 +1,14 @@
 import {
   createEffect,
   createMemo,
-  createSignal,
-  onCleanup,
   Show,
   type Component,
 } from 'solid-js'
 import { CodeBlock } from '../chatbot/CodeBlock'
-import { MarkdownContent } from '../chatbot/MarkdownContent'
+import { IncrementalMarkdownContent } from '../chatbot/IncrementalMarkdownContent'
 import { ArtifactCard } from './ArtifactCard'
 import { getInlineArtifactRenderMode } from './streamingParts'
 import type { ArtifactDraftClientState } from './types'
-
-function useDebouncedValue(
-  source: () => string,
-  delay = 100,
-) {
-  const [value, setValue] = createSignal(source())
-  let timer: number | undefined
-
-  createEffect(() => {
-    const content = source()
-    if (timer !== undefined) window.clearTimeout(timer)
-    timer = window.setTimeout(() => {
-      timer = undefined
-      setValue(content)
-    }, delay)
-  })
-
-  onCleanup(() => {
-    if (timer !== undefined) window.clearTimeout(timer)
-  })
-  return value
-}
 
 const sourceLanguage = (draft: ArtifactDraftClientState) => {
   if (draft.type === 'text/html') return 'html'
@@ -51,9 +27,6 @@ const statusLabel = (draft: ArtifactDraftClientState) => {
 const InlineDraftBody: Component<{ draft: ArtifactDraftClientState }> = (props) => {
   let scrollRef: HTMLDivElement | undefined
   let followTail = true
-  const markdownSource = useDebouncedValue(
-    () => props.draft.content,
-  )
   const renderMode = () => getInlineArtifactRenderMode(props.draft.type)
 
   createEffect(() => {
@@ -73,7 +46,15 @@ const InlineDraftBody: Component<{ draft: ArtifactDraftClientState }> = (props) 
       }}
     >
       <Show when={renderMode() === 'markdown'}>
-        <MarkdownContent source={markdownSource()} class="bg-white p-4 text-slate-700" />
+        {/* Parses only the unfinished tail on each delta, not the whole draft. */}
+        <div class="bg-white p-4 text-slate-700">
+          <IncrementalMarkdownContent
+            source={props.draft.content}
+            isStreaming={props.draft.status === 'streaming'}
+            showCaret={false}
+            placeholder={false}
+          />
+        </div>
       </Show>
       <Show when={renderMode() === 'source'}>
         <CodeBlock
