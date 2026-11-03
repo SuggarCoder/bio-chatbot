@@ -235,6 +235,11 @@ export function agentAnswerFallback(toolCallsUsed: number, answerText: string): 
   return toolCallsUsed > 0 && !answerText.trim() ? AGENT_EMPTY_ANSWER_FALLBACK : null
 }
 
+/** Deltas are merged for at most this long before being written to the stream. */
+const STREAM_COALESCE_MS = 60
+/** ... or until this many characters are pending. */
+const STREAM_COALESCE_CHARS = 512
+
 class GenerationLengthError extends Error {
   constructor() {
     super('Model output reached its configured token limit')
@@ -659,7 +664,7 @@ export class GenerationService {
     let streamWritesStopped = false
     let snapshotPending = false
 
-    const emit = (
+    const emitNow = (
       event: StreamEventPayload,
     ) => {
       // Bound buffered deltas when Redis is slow; final content is durable.
@@ -679,6 +684,51 @@ export class GenerationService {
         streamEvent,
       )).then(() => undefined).catch(() => undefined)
         .finally(() => { pendingEventWrites -= 1 })
+    }
+
+    // Consecutive deltas are merged for up to STREAM_COALESCE_MS (or
+    // STREAM_COALESCE_CHARS): one Redis stream entry per token cost ~355 bytes,
+    // mostly envelope, and dominated Redis memory. Clients place text by
+    // startIndex, so a merged delta is equivalent. Any other event flushes
+    // first, so ordering is unchanged.
+    type DeltaPayload = Extract<StreamEventPayload, { type: 'message.delta' | 'artifact.delta' }>
+    let pendingDelta: DeltaPayload | null = null
+    let pendingDeltaTimer: NodeJS.Timeout | undefined
+    const flushPendingDelta = () => {
+      if (pendingDeltaTimer) clearTimeout(pendingDeltaTimer)
+      pendingDeltaTimer = undefined
+      const delta = pendingDelta
+      pendingDelta = null
+      if (delta) emitNow(delta)
+    }
+    const emit = (
+      event: StreamEventPayload,
+    ) => {
+      if (event.type !== 'message.delta' && event.type !== 'artifact.delta') {
+        flushPendingDelta()
+        emitNow(event)
+        return
+      }
+      const next = event as DeltaPayload
+      const pending = pendingDelta
+      const extends_ = pending !== null && (
+        pending.type === 'message.delta' && next.type === 'message.delta'
+          ? pending.startIndex + pending.delta.length === next.startIndex
+          : pending.type === 'artifact.delta' && next.type === 'artifact.delta' &&
+            pending.artifactStreamId === next.artifactStreamId
+      )
+      if (pending && extends_) {
+        pendingDelta = { ...pending, sequence: next.sequence, delta: pending.delta + next.delta } as DeltaPayload
+      } else {
+        flushPendingDelta()
+        pendingDelta = next
+      }
+      if (pendingDelta!.delta.length >= STREAM_COALESCE_CHARS) {
+        flushPendingDelta()
+      } else if (!pendingDeltaTimer) {
+        pendingDeltaTimer = setTimeout(flushPendingDelta, STREAM_COALESCE_MS)
+        pendingDeltaTimer.unref()
+      }
     }
 
     const updateStep = (step: MessageExecutionStep) => {
@@ -1711,8 +1761,11 @@ export class GenerationService {
         }),
       ])
     } finally {
+      flushPendingDelta()
       clearInterval(snapshotTimer)
       this.runtimes.delete(start.generationId, runtime)
+      // The run is final in PostgreSQL; the recovery snapshot is no longer needed.
+      void this.queue.deleteSnapshot(input.user.id, start.generationId).catch(() => undefined)
       const memory = bytes.report()
       metrics.generationBytes.observe(memory.totalBytes)
       if (firstTokenAt !== null) metrics.generationFirstToken.observe((firstTokenAt - startedAt) / 1_000)

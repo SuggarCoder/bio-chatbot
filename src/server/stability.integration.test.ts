@@ -5,9 +5,11 @@ import { eq, sql } from 'drizzle-orm'
 import { dependencyUnavailable } from './app.js'
 import { mockUserInfoResponse } from './auth.js'
 import { BackgroundQueue } from './backgroundJobs.js'
+import { GenerationQueue } from './generationQueue.js'
 import { applyMonthlyQuota, createRedisClient, readMonthlyQuota, redisKey, RedisUnavailableError } from './cache.js'
 import type { AppConfig } from './config.js'
-import { closeDatabase, createDatabase, migrateDatabase, syncUser } from './db.js'
+import { closeDatabase, createChat, createDatabase, createGenerationStart, deleteChat, migrateDatabase, syncUser } from './db.js'
+import { runRetention } from './retention.js'
 import { users } from './db/schema.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -106,6 +108,95 @@ test('a lost quota counter is rebuilt from PostgreSQL, not restarted from zero',
     await database.delete(users).where(eq(users.id, user.id))
   } finally {
     await closeDatabase(database)
+    await redis.close()
+  }
+})
+
+test('retention purges expired rows, rolls up usage and hard-deletes old deleted chats', { skip: !databaseUrl }, async () => {
+  const database = createDatabase(databaseUrl as string)
+  try {
+    await migrateDatabase(database)
+    const user = await syncUser(database, { ...mockUserInfoResponse.data, userId: crypto.randomUUID() })
+    const keep = await createChat(database, user.id, 'keep')
+    const doomed = await createChat(database, user.id, 'doomed')
+    for (const chat of [keep, doomed]) {
+      await createGenerationStart(database, {
+        userId: user.id,
+        chatId: chat.id,
+        clientMessageId: crypto.randomUUID(),
+        content: 'hello',
+        generationId: crypto.randomUUID(),
+        streamId: crypto.randomUUID(),
+        requestId: crypto.randomUUID(),
+        provider: 'qwen',
+        model: 'test',
+      })
+    }
+    await deleteChat(database, user.id, doomed.id)
+    await database.execute(sql`update "Chat" set "deletedAt" = now() - interval '31 days' where id = ${doomed.id}`)
+
+    // Usage: two old events in the same month, one recent.
+    const old = sql`date_trunc('month', now(), 'UTC') - interval '5 months' + interval '3 days'`
+    await database.execute(sql`
+      insert into "UsageEvent" ("userId", kind, "inputTokens", "outputTokens", "createdAt") values
+        (${user.id}, 'chat', 100, 10, ${old}),
+        (${user.id}, 'chat', 200, 20, ${old}),
+        (${user.id}, 'chat', 5, 5, now())
+    `)
+    await database.execute(sql`
+      insert into "AuditLog" ("actorUserId", action, "createdAt") values
+        (${user.id}, 'retention.test.old', now() - interval '100 days'),
+        (${user.id}, 'retention.test.new', now())
+    `)
+
+    const result = await runRetention(database, { batchSize: 1 })
+    assert.ok((result.Chat ?? 0) >= 1, JSON.stringify(result))
+    assert.ok((result.UsageEvent ?? 0) >= 2, JSON.stringify(result))
+
+    const chats = await database.execute<{ id: string }>(sql`select id from "Chat" where "userId" = ${user.id}`)
+    assert.deepEqual(chats.rows.map((row) => row.id), [keep.id], 'old deleted chat purged, live chat kept')
+    const orphans = await database.execute<{ n: number }>(sql`
+      select (select count(*) from "Message" where "chatId" = ${doomed.id})::int
+           + (select count(*) from "Generation" where "chatId" = ${doomed.id})::int as n
+    `)
+    assert.equal(orphans.rows[0]!.n, 0, 'messages and generations cascade')
+
+    const raw = await database.execute<{ n: number }>(sql`select count(*)::int as n from "UsageEvent" where "userId" = ${user.id}`)
+    assert.equal(raw.rows[0]!.n, 1, 'only the recent usage event stays raw')
+    const monthly = await database.execute<{ events: string; input: string; output: string }>(sql`
+      select events::text, "inputTokens"::text as input, "outputTokens"::text as output from "UsageMonthly" where "userId" = ${user.id}
+    `)
+    assert.deepEqual(monthly.rows, [{ events: '2', input: '300', output: '30' }])
+
+    const audit = await database.execute<{ action: string }>(sql`select action from "AuditLog" where "actorUserId" = ${user.id} and action like 'retention.test.%'`)
+    assert.deepEqual(audit.rows.map((row) => row.action), ['retention.test.new'])
+
+    // Idempotent: a second run changes nothing for this user.
+    await runRetention(database)
+    const again = await database.execute<{ events: string }>(sql`select events::text from "UsageMonthly" where "userId" = ${user.id}`)
+    assert.deepEqual(again.rows, [{ events: '2' }])
+    await database.delete(users).where(eq(users.id, user.id))
+  } finally {
+    await closeDatabase(database)
+  }
+})
+
+test('draining a user\'s generation queue leaves no per-user keys behind', { skip: !redisUrl }, async () => {
+  const config = { redisUrl, redisPrefix: `test:genq:${crypto.randomUUID()}:` } as unknown as AppConfig
+  const redis = createRedisClient(config)
+  await redis.connect()
+  try {
+    const queue = new GenerationQueue(config, redis)
+    const userId = crypto.randomUUID()
+    await queue.enqueue({ generationId: crypto.randomUUID(), userId, attempt: 0 }, 1)
+    await queue.enqueue({ generationId: crypto.randomUUID(), userId, attempt: 0 }, 1)
+    assert.ok(await queue.pop())
+    assert.equal(await redis.exists(redisKey(config, `queue:tenant:${userId}`)), 1, 'kept while entries remain')
+    assert.ok(await queue.pop())
+    assert.equal(await redis.exists(redisKey(config, `queue:tenant:${userId}`)), 0)
+    assert.equal(Number(await redis.hExists(redisKey(config, 'queue:user-weights'), userId)), 0)
+    assert.equal(await queue.pop(), null)
+  } finally {
     await redis.close()
   }
 })

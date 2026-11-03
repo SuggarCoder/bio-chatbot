@@ -62,3 +62,36 @@ test('all Fastify route schemas compile at startup', async () => {
     await app.close()
   }
 })
+
+test('an overloaded database pool sheds new requests with 503 but keeps health checks', async () => {
+  const pool = { waitingCount: 0 }
+  const app = await buildApp({
+    config: {
+      nodeEnv: 'test',
+      serveClient: false,
+      gpas2AuthMode: 'mock',
+      loadShedEventLoopMs: 0,
+      loadShedPoolWaiting: 10,
+    } as AppConfig,
+    database: { $client: pool } as unknown as Database,
+    redis: {} as RedisClient,
+    generations: {} as GenerationService,
+    streamHub: {} as GenerationStreamHub,
+    objectStore: null,
+    artifactService: null,
+  })
+  try {
+    await app.ready()
+    const request = () => app.inject({ method: 'POST', url: '/ai-chatbot/api/conversations', payload: { title: '' } })
+    assert.equal((await request()).statusCode, 400, 'accepted (and validated) while the pool is idle')
+    pool.waitingCount = 11
+    const shed = await request()
+    assert.equal(shed.statusCode, 503)
+    assert.equal(shed.headers['retry-after'], '2')
+    assert.equal(shed.json().error.code, 'overloaded')
+    const health = await app.inject({ method: 'GET', url: '/ai-chatbot/api/health' })
+    assert.notEqual(health.json().error?.code, 'overloaded', 'health is never shed')
+  } finally {
+    await app.close()
+  }
+})

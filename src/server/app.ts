@@ -64,6 +64,7 @@ import {
   listArtifactVersionsForUser,
 } from './artifacts/repository.js'
 import { httpSchemas } from './httpSchemas.js'
+import { LoadShedder, poolOf } from './loadShed.js'
 import {
   deleteUserMemories,
   loadMemorySettings,
@@ -284,6 +285,28 @@ export async function buildApp(
   })
   const { gpas, toolIds: agentToolCatalog } =
     dependencies.capabilityRuntime ?? createCapabilityRuntime(config)
+
+  const shedEventLoopMs = config.loadShedEventLoopMs ?? 0
+  const shedPoolWaiting = config.loadShedPoolWaiting ?? 0
+  if (shedEventLoopMs > 0 || shedPoolWaiting > 0) {
+    const shedder = new LoadShedder(poolOf(database), {
+      maxEventLoopDelayMs: shedEventLoopMs > 0 ? shedEventLoopMs : Number.POSITIVE_INFINITY,
+      maxPoolWaiting: shedPoolWaiting > 0 ? shedPoolWaiting : Number.POSITIVE_INFINITY,
+    })
+    app.addHook('onClose', async () => { shedder.stop() })
+    app.addHook('onRequest', async (request, reply) => {
+      // Health checks must keep answering so the orchestrator sees the
+      // instance as alive-but-busy rather than dead.
+      if (request.url.startsWith(`${API_BASE}/health`)) return
+      const reason = shedder.check()
+      if (!reason) return
+      shedder.shed(reason)
+      return reply
+        .code(503)
+        .header('retry-after', '2')
+        .send(errorBody(request, 'overloaded', 'Service is temporarily busy. Please retry shortly.'))
+    })
+  }
 
   app.addHook('onResponse', (request, reply, done) => {
     metrics.httpRequestDuration.observe({
@@ -1006,6 +1029,7 @@ export async function buildApp(
 
   app.get<{
     Params: { shareSlug: string }
+    Querystring: { afterSeq?: string }
   }>(`${API_BASE}/shared/conversations/:shareSlug`, {
     schema: {
       params: httpSchemas.shareSlugParams,
@@ -1019,7 +1043,14 @@ export async function buildApp(
         errorBody(request, 'invalid_share_slug', 'Invalid share identifier'),
       )
     }
-    const shared = await getSharedChat(database, user.id, shareSlug)
+    const afterSeq = request.query.afterSeq === undefined
+      ? undefined
+      : parsePositiveInteger(request.query.afterSeq, 0, Number.MAX_SAFE_INTEGER) ?? undefined
+    // One audit entry per viewer and share per hour, not one per page load.
+    const audit = afterSeq === undefined && await redis.set(
+      redisKey(config, `audit:share:${shareSlug}:${user.id}`), '1', { NX: true, EX: 3_600 },
+    ).then((result) => result === 'OK', () => true)
+    const shared = await getSharedChat(database, user.id, shareSlug, { afterSeq, audit })
     if (!shared) {
       return reply.code(404).send(
         errorBody(request, 'shared_conversation_not_found', 'Shared conversation not found'),

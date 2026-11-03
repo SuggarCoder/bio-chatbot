@@ -6,6 +6,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  gt,
   lt,
   lte,
   notExists,
@@ -534,6 +535,9 @@ export async function getChatDetail(
   }
 }
 
+/** Upper bound for one page of messages (the client pages back for more). */
+export const MESSAGE_PAGE_MAX_BYTES = 2 * 1024 * 1024
+
 async function queryChatMessagesPage(
   database: Database,
   userId: string,
@@ -568,7 +572,30 @@ async function queryChatMessagesPage(
     conditions.push(lt(messages.seq, BigInt(beforeSeq)))
   }
 
-  const rows = await database
+  // A page is bounded by bytes as well as by count: 50 long answers could
+  // be 20-40 MB of JSON. Sizes are read first; only the rows that fit are
+  // loaded.
+  const sized = await database
+    .select({
+      id: messages.id,
+      bytes: sql<number>`octet_length(${messages.parts}::text) + coalesce(octet_length(${generations.metadata}::text), 0)`,
+    })
+    .from(messages)
+    .leftJoin(generations, eq(generations.assistantMessageId, messages.id))
+    .where(and(...conditions))
+    .orderBy(desc(messages.seq))
+    .limit(limit + 1)
+  let pageBytes = 0
+  let take = 0
+  for (const row of sized.slice(0, limit)) {
+    const bytes = Number(row.bytes)
+    if (take > 0 && pageBytes + bytes > MESSAGE_PAGE_MAX_BYTES) break
+    pageBytes += bytes
+    take += 1
+  }
+  const hasMore = sized.length > take
+  const pageIds = sized.slice(0, take).map((row) => row.id)
+  const rows = pageIds.length === 0 ? [] : await database
     .select({
       id: messages.id,
       seq: messages.seq,
@@ -585,11 +612,9 @@ async function queryChatMessagesPage(
       votes,
       and(eq(votes.messageId, messages.id), eq(votes.userId, userId)),
     )
-    .where(and(...conditions))
+    .where(inArray(messages.id, pageIds))
     .orderBy(desc(messages.seq))
-    .limit(limit + 1)
-  const hasMore = rows.length > limit
-  const pageRows = rows.slice(0, limit).reverse()
+  const pageRows = rows.reverse()
   const referencedArtifactIds = [...new Set(pageRows.flatMap((row) =>
     Array.isArray(row.parts)
       ? row.parts.flatMap((part) =>
@@ -926,15 +951,20 @@ export async function unshareChat(
   return rows.length > 0
 }
 
+/** Messages per shared-conversation page; also bounded by MESSAGE_PAGE_MAX_BYTES. */
+const SHARED_PAGE_MAX_MESSAGES = 100
+
 export async function getSharedChat(
   database: Database,
   viewerUserId: string,
   shareSlug: string,
+  options: { afterSeq?: number; audit?: boolean } = {},
 ): Promise<{
   id: string
   title: string
   shareMode: 'snapshot' | 'live'
   messages: ChatMessageDto[]
+  pageInfo: { hasMore: boolean; afterSeq: number | null }
 } | null> {
   const [chat] = await database
     .select({
@@ -954,39 +984,66 @@ export async function getSharedChat(
   if (!chat || (chat.shareMode !== 'snapshot' && chat.shareMode !== 'live')) {
     return null
   }
-  const rows = await database
+  // Paged from the start and bounded by bytes: loading a whole long chat
+  // for every viewer used to take hundreds of MB per request.
+  const visible = and(
+    eq(messages.chatId, chat.id),
+    inArray(messages.role, ['user', 'assistant']),
+    eq(messages.status, 'completed'),
+    isNotNull(messages.sharedText),
+    chat.shareMode === 'snapshot' && chat.sharedThroughSeq
+      ? lte(messages.seq, chat.sharedThroughSeq)
+      : undefined,
+    options.afterSeq !== undefined ? gt(messages.seq, BigInt(options.afterSeq)) : undefined,
+  )
+  const sized = await database
+    .select({ id: messages.id, bytes: sql<number>`octet_length(${messages.sharedText})` })
+    .from(messages)
+    .where(visible)
+    .orderBy(messages.seq)
+    .limit(SHARED_PAGE_MAX_MESSAGES + 1)
+  let pageBytes = 0
+  let take = 0
+  for (const row of sized.slice(0, SHARED_PAGE_MAX_MESSAGES)) {
+    const bytes = Number(row.bytes)
+    if (take > 0 && pageBytes + bytes > MESSAGE_PAGE_MAX_BYTES) break
+    pageBytes += bytes
+    take += 1
+  }
+  const pageIds = sized.slice(0, take).map((row) => row.id)
+  const rows = pageIds.length === 0 ? [] : await database
     .select({
       id: messages.id,
       seq: messages.seq,
       role: messages.role,
       status: messages.status,
       content: messages.sharedText,
-      parts: messages.parts,
+      // The shared view renders the shared text only.
+      parts: sql<MessagePart[]>`'[]'::jsonb`,
       createdAt: messages.createdAt,
     })
     .from(messages)
-    .where(and(
-      eq(messages.chatId, chat.id),
-      inArray(messages.role, ['user', 'assistant']),
-      eq(messages.status, 'completed'),
-      isNotNull(messages.sharedText),
-      chat.shareMode === 'snapshot' && chat.sharedThroughSeq
-        ? lte(messages.seq, chat.sharedThroughSeq)
-        : undefined,
-    ))
+    .where(inArray(messages.id, pageIds))
     .orderBy(messages.seq)
-  await database.insert(auditLogs).values({
-    actorUserId: viewerUserId,
-    action: 'shared_conversation.read',
-    resourceType: 'conversation',
-    resourceId: chat.id,
-    metadata: { shareSlug, ownerUserId: chat.ownerUserId },
-  })
+  if (options.audit !== false) {
+    await database.insert(auditLogs).values({
+      actorUserId: viewerUserId,
+      action: 'shared_conversation.read',
+      resourceType: 'conversation',
+      resourceId: chat.id,
+      metadata: { shareSlug, ownerUserId: chat.ownerUserId },
+    })
+  }
+  const last = rows.at(-1)
   return {
     id: chat.id,
     title: chat.title,
     shareMode: chat.shareMode,
     messages: rows.map((row) => mapMessage(row)),
+    pageInfo: {
+      hasMore: sized.length > take,
+      afterSeq: last ? Number(last.seq) : options.afterSeq ?? null,
+    },
   }
 }
 

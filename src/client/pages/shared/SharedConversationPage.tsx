@@ -1,15 +1,37 @@
 import { A, useParams } from '@solidjs/router'
-import { createResource, For, Show } from 'solid-js'
+import { createResource, createSignal, For, Show } from 'solid-js'
 
-import { fetchSharedConversation } from '../../features/chatbot/chatApi'
+import { fetchSharedConversation, type ChatMessageDto } from '../../features/chatbot/chatApi'
 import { appRoutes } from '../../routes'
 
 export function SharedConversationPage() {
   const params = useParams<{ shareSlug: string }>()
+  // Later pages are appended here; the first page comes from the resource.
+  const [laterPages, setLaterPages] = createSignal<ChatMessageDto[]>([])
+  const [pageInfo, setPageInfo] = createSignal<{ hasMore: boolean; afterSeq: number | null } | null>(null)
+  const [loadingMore, setLoadingMore] = createSignal(false)
   const [conversation] = createResource(
     () => params.shareSlug,
-    fetchSharedConversation,
+    async (shareSlug) => {
+      const first = await fetchSharedConversation(shareSlug)
+      setLaterPages([])
+      setPageInfo(first.pageInfo)
+      return first
+    },
   )
+  const messages = () => [...(conversation()?.messages ?? []), ...laterPages()]
+  const loadMore = async () => {
+    const info = pageInfo()
+    if (!info?.hasMore || info.afterSeq === null || loadingMore()) return
+    setLoadingMore(true)
+    try {
+      const next = await fetchSharedConversation(params.shareSlug, info.afterSeq)
+      setLaterPages((current) => [...current, ...next.messages])
+      setPageInfo(next.pageInfo)
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   return (
     <main class="h-full overflow-y-auto bg-slate-50 px-4 py-8 text-slate-900 sm:px-8">
@@ -48,7 +70,7 @@ export function SharedConversationPage() {
               </header>
 
               <section class="space-y-4">
-                <For each={shared().messages}>
+                <For each={messages()}>
                   {(message) => (
                     <article
                       class={message.role === 'user'
@@ -65,6 +87,18 @@ export function SharedConversationPage() {
                   )}
                 </For>
               </section>
+              <Show when={pageInfo()?.hasMore}>
+                <div class="mt-6 flex justify-center">
+                  <button
+                    type="button"
+                    class="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+                    disabled={loadingMore()}
+                    onClick={() => void loadMore()}
+                  >
+                    {loadingMore() ? '加载中…' : '加载更多'}
+                  </button>
+                </div>
+              </Show>
             </>
           )}
         </Show>

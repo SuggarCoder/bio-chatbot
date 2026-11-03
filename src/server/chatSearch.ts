@@ -140,6 +140,17 @@ export async function indexChatTurn(
   const content = buildChunkContent(user?.content ?? '', assistant.content ?? '')
   if (!content) return undefined
 
+  // A regeneration supersedes an earlier reply of this chat: drop its chunk
+  // so searches never scan it again.
+  await database.execute(sql`
+    delete from "MessageChunk" chunk
+    using "Generation" original, "Generation" replacement
+    where chunk."chatId" = ${input.chatId}
+      and original."assistantMessageId" = chunk."assistantMessageId"
+      and replacement."supersedesGenerationId" = original.id
+      and replacement.status = 'completed'
+  `)
+
   const [chunk] = await database
     .insert(messageChunks)
     .values({
@@ -218,6 +229,43 @@ export type ChatSearchHit = {
 }
 
 const CANDIDATES_PER_METHOD = 40
+/** A search that takes longer is cancelled by PostgreSQL. */
+const SEARCH_STATEMENT_TIMEOUT_MS = 1_500
+
+/** At most this many searches run at once per process; others wait briefly. */
+class SearchSlots {
+  private active = 0
+  private readonly waiting: Array<() => void> = []
+
+  constructor(private readonly limit: number, private readonly waitMs: number) {}
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.active >= this.limit) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const index = this.waiting.indexOf(grant)
+          if (index >= 0) this.waiting.splice(index, 1)
+          reject(new Error('Chat search is busy; try again shortly'))
+        }, this.waitMs)
+        const grant = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+        this.waiting.push(grant)
+      })
+    } else {
+      this.active += 1
+    }
+    try {
+      return await operation()
+    } finally {
+      const next = this.waiting.shift()
+      if (next) next()
+      else this.active -= 1
+    }
+  }
+}
+const searchSlots = new SearchSlots(4, 2_000)
 
 export async function searchUserChats(
   database: Database,
@@ -256,58 +304,77 @@ export async function searchUserChats(
     content: messageChunks.content,
     createdAt: messageChunks.createdAt,
   }
+  // The superseded-reply filter is applied to the top candidates only (it
+  // probed every chunk before), and the whole search runs under a short
+  // statement timeout and a per-process concurrency limit, so a heavy user's
+  // search cannot hold the connection pool.
   const visible = and(
     eq(messageChunks.userId, input.userId),
     searchableChat(input.userId, input.excludeChatId),
-    notSupersededMessage(database, messageChunks.assistantMessageId),
   )
-
   const similarity = new Map<string, number>()
-  let semantic: Candidate[] = []
-  if (queryVector && embedder) {
-    const distance = cosineDistance(messageChunks.embedding, queryVector)
-    // An exact scan over this user's chunks: complete and fast at per-user scale.
-    const rows = await database
-      .select({ ...selection, distance: sql<number>`${distance}` })
-      .from(messageChunks)
-      .innerJoin(chats, eq(chats.id, messageChunks.chatId))
-      .where(and(
-        visible,
-        isNotNull(messageChunks.embedding),
-        eq(messageChunks.embeddingModel, embedder.model),
-      ))
-      .orderBy(distance)
-      .limit(CANDIDATES_PER_METHOD)
-    for (const { distance: rowDistance, ...row } of rows) {
-      const score = 1 - Number(rowDistance)
-      if (score < (input.minSimilarity ?? 0)) continue
-      semantic.push(row)
-      similarity.set(String(row.id), score)
+  const { semantic, lexical } = await searchSlots.run(() => database.transaction(async (transaction) => {
+    await transaction.execute(sql.raw(`set local statement_timeout = ${SEARCH_STATEMENT_TIMEOUT_MS}`))
+    let semantic: Candidate[] = []
+    if (queryVector && embedder) {
+      const distance = cosineDistance(messageChunks.embedding, queryVector)
+      // An exact scan over this user's chunks: complete and fast at per-user scale.
+      const rows = await transaction
+        .select({ ...selection, distance: sql<number>`${distance}` })
+        .from(messageChunks)
+        .innerJoin(chats, eq(chats.id, messageChunks.chatId))
+        .where(and(
+          visible,
+          isNotNull(messageChunks.embedding),
+          eq(messageChunks.embeddingModel, embedder.model),
+        ))
+        .orderBy(distance)
+        .limit(CANDIDATES_PER_METHOD * 2)
+      for (const { distance: rowDistance, ...row } of rows) {
+        const score = 1 - Number(rowDistance)
+        if (score < (input.minSimilarity ?? 0)) continue
+        semantic.push(row)
+        similarity.set(String(row.id), score)
+      }
     }
-  }
 
-  let lexical: Candidate[] = []
-  if (terms.length > 0) {
-    const rows = await database
-      .select(selection)
+    let lexical: Candidate[] = []
+    if (terms.length > 0) {
+      const rows = await transaction
+        .select(selection)
+        .from(messageChunks)
+        .innerJoin(chats, eq(chats.id, messageChunks.chatId))
+        .where(and(
+          visible,
+          or(
+            ...terms.map((term) => sql`${messageChunks.content} ilike ${`%${escapeLike(term)}%`}`),
+            ...terms.map((term) => sql`${chats.title} ilike ${`%${escapeLike(term)}%`}`),
+          ),
+        ))
+        .orderBy(desc(messageChunks.createdAt))
+        .limit(400)
+      lexical = rows
+        .map((row) => ({ row, score: scoreText(row.content, terms) + scoreText(row.title, terms) }))
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score || right.row.createdAt.getTime() - left.row.createdAt.getTime())
+        .slice(0, CANDIDATES_PER_METHOD * 2)
+        .map((item) => item.row)
+    }
+
+    // Replies the user regenerated are not part of the conversation.
+    const candidateIds = [...new Set([...semantic, ...lexical].map((row) => row.id))]
+    const live = candidateIds.length === 0 ? new Set<string>() : new Set((await transaction
+      .select({ id: messageChunks.id })
       .from(messageChunks)
-      .innerJoin(chats, eq(chats.id, messageChunks.chatId))
       .where(and(
-        visible,
-        or(
-          ...terms.map((term) => sql`${messageChunks.content} ilike ${`%${escapeLike(term)}%`}`),
-          ...terms.map((term) => sql`${chats.title} ilike ${`%${escapeLike(term)}%`}`),
-        ),
-      ))
-      .orderBy(desc(messageChunks.createdAt))
-      .limit(400)
-    lexical = rows
-      .map((row) => ({ row, score: scoreText(row.content, terms) + scoreText(row.title, terms) }))
-      .filter((item) => item.score > 0)
-      .sort((left, right) => right.score - left.score || right.row.createdAt.getTime() - left.row.createdAt.getTime())
-      .slice(0, CANDIDATES_PER_METHOD)
-      .map((item) => item.row)
-  }
+        inArray(messageChunks.id, candidateIds),
+        notSupersededMessage(transaction, messageChunks.assistantMessageId),
+      ))).map((row) => String(row.id)))
+    return {
+      semantic: semantic.filter((row) => live.has(String(row.id))).slice(0, CANDIDATES_PER_METHOD),
+      lexical: lexical.filter((row) => live.has(String(row.id))).slice(0, CANDIDATES_PER_METHOD),
+    }
+  }))
 
   const fused = fuseRankings([semantic, lexical], (row) => String(row.id))
   const byId = new Map([...semantic, ...lexical].map((row) => [String(row.id), row]))

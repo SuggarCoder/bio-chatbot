@@ -106,6 +106,8 @@ local queueKey = ARGV[1] .. userId
 local entries = redis.call('XRANGE', queueKey, '-', '+', 'COUNT', 1)
 if not entries[1] then
   redis.call('ZREM', KEYS[1], userId)
+  redis.call('DEL', queueKey)
+  redis.call('HDEL', KEYS[2], userId)
   return nil
 end
 local entryId = entries[1][1]
@@ -126,7 +128,11 @@ local weight = tonumber(redis.call('HGET', KEYS[2], userId) or '1')
 local score = tonumber(redis.call('ZSCORE', KEYS[1], userId) or '0')
 local nextScore = score + (1 / math.max(weight, 1))
 if redis.call('XLEN', queueKey) == 0 then
+  -- An emptied stream stays as a key: drop it and the user's weight, so
+  -- every user who ever chatted does not leave keys behind.
   redis.call('ZREM', KEYS[1], userId)
+  redis.call('DEL', queueKey)
+  redis.call('HDEL', KEYS[2], userId)
 else
   redis.call('ZADD', KEYS[1], nextScore, userId)
 end
@@ -348,6 +354,10 @@ export class GenerationQueue {
       this.config,
       `generation:${userId}:${generationId}:cancel`,
     )) > 0
+  }
+
+  async deleteSnapshot(userId: string, generationId: string): Promise<void> {
+    await this.redis.del(redisKey(this.config, `generation:${userId}:${generationId}:snapshot`))
   }
 
   async saveSnapshot(

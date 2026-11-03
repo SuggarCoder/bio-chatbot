@@ -348,6 +348,7 @@ export const httpSchemas = {
       title: z.string(),
       shareMode: z.enum(['snapshot', 'live']),
       messages: z.array(chatMessage),
+      pageInfo: z.object({ hasMore: z.boolean(), afterSeq: z.number().int().nullable() }),
     })),
     ...errorResponses,
   },

@@ -180,6 +180,10 @@ export const chats = pgTable(
     index('idx_chat_user_updated')
       .on(table.userId, table.updatedAt.desc(), table.id.desc())
       .where(sql`${table.deletedAt} is null`),
+    // Retention: soft-deleted chats are purged after 30 days.
+    index('idx_chat_deleted')
+      .on(table.deletedAt)
+      .where(sql`${table.deletedAt} is not null`),
     unique('uq_chat_user_id').on(table.userId, table.id),
     foreignKey({
       name: 'fk_chat_user_fork',
@@ -689,6 +693,10 @@ export const outboxEvents = pgTable(
     index('idx_outbox_pending')
       .on(table.status, table.availableAt, table.createdAt),
     index('idx_outbox_aggregate').on(table.aggregateId, table.createdAt),
+    // Retention: settled events are deleted after a week.
+    index('idx_outbox_settled')
+      .on(table.updatedAt)
+      .where(sql`${table.status} in ('published', 'failed')`),
   ],
 )
 
@@ -727,6 +735,7 @@ export const toolRuns = pgTable(
       .where(sql`${table.toolCallId} is not null`),
     index('idx_tool_run_generation').on(table.generationId, table.startedAt),
     index('idx_tool_run_name').on(table.toolName, table.startedAt.desc()),
+    index('idx_tool_run_started').on(table.startedAt),
   ],
 )
 
@@ -1079,6 +1088,9 @@ export const backgroundJobs = pgTable(
       table.createdAt,
     ),
     index('idx_background_job_chat').on(table.chatId, table.createdAt.desc()),
+    index('idx_background_job_finished')
+      .on(table.finishedAt)
+      .where(sql`${table.finishedAt} is not null`),
   ],
 )
 
@@ -1128,6 +1140,30 @@ export const usageEvents = pgTable(
       foreignColumns: [backgroundJobs.userId, backgroundJobs.id],
     }),
     index('idx_usage_user_created').on(table.userId, table.createdAt.desc()),
+    index('idx_usage_created').on(table.createdAt),
+  ],
+)
+
+/**
+ * Usage per user, calendar month (UTC) and kind. Raw UsageEvent rows are
+ * rolled up here and deleted once they are older than the retention window,
+ * so billing history stays available without keeping every event forever.
+ */
+export const usageMonthly = pgTable(
+  'UsageMonthly',
+  {
+    userId: uuid('userId')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    month: timestampTz('month').notNull(),
+    kind: varchar('kind', { length: 32 }).notNull(),
+    events: bigintValue('events').notNull().default(sql`0`),
+    inputTokens: bigintValue('inputTokens').notNull().default(sql`0`),
+    outputTokens: bigintValue('outputTokens').notNull().default(sql`0`),
+    updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ name: 'pk_usage_monthly', columns: [table.userId, table.month, table.kind] }),
   ],
 )
 
@@ -1159,6 +1195,7 @@ export const auditLogs = pgTable(
       .on(table.requestId)
       .where(sql`${table.requestId} is not null`),
     index('idx_audit_outcome').on(table.outcome, table.createdAt.desc()),
+    index('idx_audit_created').on(table.createdAt),
   ],
 )
 
@@ -1267,6 +1304,8 @@ export const businessOperations = pgTable('BusinessOperation', {
   uniqueIndex('uq_business_team_mutation').on(table.teamId)
     .where(sql`${table.mutation} and ${table.status} in ('running', 'result_ready', 'uncertain')`),
   check('chk_business_status', sql`${table.status} in ('running', 'result_ready', 'completed', 'failed', 'uncertain')`),
+  index('idx_business_settled').on(table.updatedAt)
+    .where(sql`${table.status} in ('completed', 'failed')`),
 ])
 
 // Durable admission before tool selection, generation or external business execution.
@@ -1294,4 +1333,6 @@ export const ingressRequests = pgTable('IngressRequest', {
   uniqueIndex('uq_ingress_active_chat').on(table.chatId).where(sql`${table.status} in ('queued', 'running')`),
   index('idx_ingress_pending').on(table.availableAt).where(sql`${table.status} in ('queued', 'running')`),
   check('chk_ingress_status', sql`${table.status} in ('queued', 'running', 'succeeded', 'failed')`),
+  index('idx_ingress_settled').on(table.updatedAt)
+    .where(sql`${table.status} in ('succeeded', 'failed')`),
 ])

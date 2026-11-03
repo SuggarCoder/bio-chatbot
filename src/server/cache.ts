@@ -85,6 +85,12 @@ export function withRedisDeadlines<T extends object>(client: T, timeoutMs = 2_00
   })
 }
 
+/**
+ * Context caches only help retries and the next turns soon after; a new key
+ * is written for every turn, so a long lifetime is mostly wasted memory.
+ */
+const CONTEXT_CACHE_SECONDS = 15 * 60
+
 export function redisKey(config: AppConfig, key: string): string {
   return `${config.redisPrefix}${key}`
 }
@@ -284,7 +290,7 @@ export async function setCachedChatContext(
     ),
     JSON.stringify(context),
     {
-      EX: 2 * 60 * 60,
+      EX: CONTEXT_CACHE_SECONDS,
     },
   )
 }
@@ -337,7 +343,7 @@ export async function setCachedBudgetedChatContext(
 ): Promise<void> {
   if (!redis.isReady) return
   await redis.set(budgetedContextKey(config, input), JSON.stringify(context), {
-    EX: 24 * 60 * 60,
+    EX: CONTEXT_CACHE_SECONDS,
   })
 }
 
@@ -373,24 +379,4 @@ export async function advanceCachedChatContext(
     ],
   })
   return Number(result) === 1
-}
-
-export async function notifyGenerationStateChanged(
-  redis: RedisClient,
-  config: AppConfig,
-  userId: string,
-  generationId: string,
-  status: string,
-): Promise<void> {
-  if (!redis.isReady) {
-    return
-  }
-
-  await redis.publish(
-    redisKey(config, `notify:user:${userId}`),
-    JSON.stringify({
-      type: `generation.${status}`,
-      generationId,
-    }),
-  )
 }

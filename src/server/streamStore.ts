@@ -77,10 +77,12 @@ export class GenerationStreamStore {
     const id = await this.redis.xAdd(key, '*', { event: serialized }, {
       TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: 10_000 },
     })
+    // A finished stream only serves clients reconnecting right after the end;
+    // later readers get the full message from PostgreSQL.
     const retention = event.type === 'message.finish'
       ? event.finishReason === 'error' || event.finishReason === 'length'
-        ? 30 * 60
-        : 15 * 60
+        ? 10 * 60
+        : 3 * 60
       : 60 * 60
     await Promise.all([
       this.redis.expire(key, retention),

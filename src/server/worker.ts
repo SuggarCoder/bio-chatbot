@@ -40,6 +40,7 @@ import {
 } from './generationQueue.js'
 import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
 import { normalizeExecutionSteps } from './executionTrace.js'
+import { runRetention } from './retention.js'
 import { SeaweedS3ObjectStore } from './storage/seaweedS3ObjectStore.js'
 import { QwenTokenCounter } from './tokenBudget.js'
 import { AgentToolbox } from './agent/tools.js'
@@ -460,11 +461,16 @@ async function runStep(name: string, step: () => Promise<unknown>): Promise<void
   }
 }
 
+let retentionRun: Promise<void> | null = null
+
 async function mainLoop(): Promise<void> {
   let nextHeartbeatAt = 0
   let nextOutboxPollAt = 0
   let nextReconcileAt = 0
   let nextMemoryPurgeAt = 0
+  // First run a few minutes after start so a crash-looping worker does not
+  // keep running it.
+  let nextRetentionAt = Date.now() + 5 * 60_000
 
   while (!stopping) {
     if (Date.now() >= nextHeartbeatAt) {
@@ -485,6 +491,14 @@ async function mainLoop(): Promise<void> {
         const purged = await purgeExpiredMemories(database)
         if (purged > 0) console.info('Purged aged-out memories', { purged })
       })
+    }
+
+    if (Date.now() >= nextRetentionAt && !retentionRun) {
+      nextRetentionAt = Date.now() + 60 * 60_000
+      // Runs beside the loop (bounded to 30 s of work) so scheduling and
+      // heartbeats are not delayed; a failure is retried next hour.
+      retentionRun = runStep('retention', () => runRetention(database, { objectStore }))
+        .finally(() => { retentionRun = null })
     }
 
     // Keep looking past blocked tenants, but bound scans when all are blocked.
@@ -529,7 +543,7 @@ async function shutdown(signal: string): Promise<void> {
     controller.abort(new Error('Worker shutting down'))
   }
   await Promise.race([
-    Promise.allSettled([...active, ...backgroundActive]),
+    Promise.allSettled([...active, ...backgroundActive, ...(retentionRun ? [retentionRun] : [])]),
     wait(15_000),
   ])
   await generations.shutdown()

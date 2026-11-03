@@ -126,7 +126,7 @@ test('native Redis stream uses a user-scoped key and terminal retention', async 
     assistantMessage: null,
     error: { code: 'failed', message: 'failed' },
   })
-  assert.equal(redis.expirations.get(key), 30 * 60)
+  assert.equal(redis.expirations.get(key), 10 * 60)
   assert.equal(redis.published.at(-1)?.channel, 'test:v3:stream:events')
 })
 

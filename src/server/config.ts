@@ -74,6 +74,10 @@ export type AppConfig = {
   generationMaxBytes: number
   /** Internal port for /metrics and /healthz; 0 disables it. */
   metricsPort: number
+  /** API: shed new requests when the p99 event-loop delay exceeds this (0 disables). */
+  loadShedEventLoopMs?: number
+  /** API: shed new requests when this many queries wait for a pool connection (0 disables). */
+  loadShedPoolWaiting?: number
   objectStorage: ObjectStorageConfig
 }
 
@@ -471,7 +475,9 @@ export function readConfig(): AppConfig {
     ),
     generationSnapshotIntervalMs: positiveInteger(
       'GENERATION_SNAPSHOT_INTERVAL_MS',
-      1_000,
+      // Recovery snapshots only matter after a worker crash; each write is
+      // the whole answer so far, so every second was wasteful.
+      5_000,
     ),
     artifactProtocolEnabled: booleanValue(
       process.env,
@@ -484,6 +490,8 @@ export function readConfig(): AppConfig {
     agentToolLimit: positiveInteger('AGENT_TOOL_LIMIT', 8),
     generationMaxBytes,
     metricsPort: positiveInteger('METRICS_PORT', 9464, true),
+    loadShedEventLoopMs: positiveInteger('LOAD_SHED_EVENT_LOOP_MS', 500, true),
+    loadShedPoolWaiting: positiveInteger('LOAD_SHED_POOL_WAITING', 32, true),
     objectStorage: readObjectStorageConfig(process.env, nodeEnv),
   }
 }

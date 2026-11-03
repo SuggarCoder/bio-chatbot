@@ -19,6 +19,7 @@ import { GenerationService } from './generation.js'
 import { GenerationFinalizer } from './generationFinalizer.js'
 import { claimGeneration, loadGenerationWorkItem } from './generationQueue.js'
 import { GenerationRuntimeRegistry } from './generationRuntimeRegistry.js'
+import { generationStreamKey } from './streamStore.js'
 import { CharacterTokenCounter } from './tokenBudget.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -104,7 +105,9 @@ async function runGeneration(deltas: string[], env: Record<string, string> = {})
       .select({ content: messages.content, parts: messages.parts })
       .from(messages)
       .where(eq(messages.generationId, generationId))
-    return { generation: generation!, assistant: assistant!, capBytes: config.generationMaxBytes }
+    const entries = await redis.xRange(generationStreamKey(config, user.id, generationId), '-', '+')
+    const streamEvents = entries.map((entry) => JSON.parse(String(entry.message.event)) as { type: string; delta?: string; startIndex?: number })
+    return { generation: generation!, assistant: assistant!, capBytes: config.generationMaxBytes, streamEvents }
   } finally {
     if (userId) await database.delete(users).where(eq(users.id, userId))
     await redis.close()
@@ -115,9 +118,19 @@ async function runGeneration(deltas: string[], env: Record<string, string> = {})
 
 test('a generation stores its streamed text as parts and records its byte use', { skip: !databaseUrl || !redisUrl }, async () => {
   const deltas = Array.from({ length: 300 }, (_, index) => index % 7 === 0 ? `段落 ${index}\n` : `宏基因组 token${index} `)
-  const { generation, assistant } = await runGeneration(deltas)
+  const { generation, assistant, streamEvents } = await runGeneration(deltas)
   const text = deltas.join('')
   assert.equal(generation.status, 'completed')
+  // Deltas are coalesced into far fewer stream entries, and replaying them
+  // by startIndex reproduces the text exactly.
+  const textDeltas = streamEvents.filter((event) => event.type === 'message.delta')
+  assert.ok(textDeltas.length > 0 && textDeltas.length < deltas.length / 4, `${textDeltas.length} delta entries for ${deltas.length} model deltas`)
+  let replayed = ''
+  for (const event of textDeltas) {
+    assert.equal(event.startIndex, replayed.length, 'contiguous')
+    replayed += event.delta
+  }
+  assert.equal(replayed, text)
   assert.equal(assistant.content, text)
   const textParts = (assistant.parts as Array<{ type: string; text?: string }>).filter((part) => part.type === 'text')
   assert.deepEqual(textParts.map((part) => part.text), [text])

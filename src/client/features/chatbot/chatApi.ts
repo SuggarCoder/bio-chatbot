@@ -133,6 +133,8 @@ export type SharedConversationDto = {
   title: string
   shareMode: 'snapshot' | 'live'
   messages: ChatMessageDto[]
+  /** Shared conversations are paged from the start; pass afterSeq for the next page. */
+  pageInfo: { hasMore: boolean; afterSeq: number | null }
 }
 
 type ApiErrorBody = {
@@ -272,9 +274,10 @@ export async function fetchChat(chatId: string) {
   )
 }
 
-export function fetchSharedConversation(shareSlug: string) {
+export function fetchSharedConversation(shareSlug: string, afterSeq?: number) {
+  const query = afterSeq === undefined ? '' : `?afterSeq=${afterSeq}`
   return requestJson<SharedConversationDto>(
-    `/shared/conversations/${encodeURIComponent(shareSlug)}`,
+    `/shared/conversations/${encodeURIComponent(shareSlug)}${query}`,
   )
 }
 
