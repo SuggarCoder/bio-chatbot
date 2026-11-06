@@ -351,6 +351,11 @@ export const generations = pgTable(
       sql`(${table.cancelRequestedAt} is null and ${table.cancelSource} is null)
         or (${table.cancelRequestedAt} is not null and ${table.cancelSource} is not null)`,
     ),
+    // The encrypted Cookie must not outlive the generation that needs it.
+    check(
+      'chk_generation_credential_active',
+      sql`${table.credential} is null or ${table.status} in ('created', 'queued', 'scheduled', 'running', 'cancelling')`,
+    ),
     check(
       'chk_generation_finished_at',
       sql`(${table.status} in ('completed', 'failed', 'cancelled', 'interrupted', 'timed_out') and ${table.finishedAt} is not null)
