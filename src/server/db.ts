@@ -1890,7 +1890,7 @@ export async function requestGenerationCancellation(
         cancelRequestedAt: sql`coalesce(${generations.cancelRequestedAt}, now())`,
         cancelSource: sql`coalesce(${generations.cancelSource}, ${source})`,
         updatedAt: sql`now()`,
-        ...(queued ? { finishedAt: sql`now()`, finishReason: 'cancelled' } : {}),
+        ...(queued ? { finishedAt: sql`now()`, finishReason: 'cancelled', credential: null } : {}),
       })
       .where(eq(generations.id, generationId))
     if (queued) {

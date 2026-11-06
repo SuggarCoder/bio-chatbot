@@ -10,11 +10,8 @@ import {
   inet,
   integer,
   jsonb,
-  numeric,
   pgTable,
-  pgView,
   primaryKey,
-  smallint,
   text,
   timestamp,
   unique,
@@ -127,11 +124,6 @@ export const chats = pgTable(
     shareSlug: varchar('shareSlug', { length: 64 }),
     contextRevision: bigintValue('contextRevision').notNull().default(sql`0`),
     nextMessageSeq: bigintValue('nextMessageSeq').notNull().default(sql`1`),
-    forkedFromChatId: uuid('forkedFromChatId').references(
-      (): AnyPgColumn => chats.id,
-      { onDelete: 'set null' },
-    ),
-    forkedFromSeq: bigintValue('forkedFromSeq'),
     /** Highest message seq the memory extractor has already read. */
     memoryExtractedSeq: bigintValue('memoryExtractedSeq').notNull().default(sql`0`),
     createdAt: timestampTz('createdAt').notNull().defaultNow(),
@@ -145,15 +137,6 @@ export const chats = pgTable(
       sql`${table.chatType} in ('general', 'analysis', 'pipeline', 'literature')`,
     ),
     check('chk_chat_next_seq', sql`${table.nextMessageSeq} >= 1`),
-    check(
-      'chk_chat_fork_state',
-      sql`(
-        (${table.forkedFromChatId} is null and ${table.forkedFromSeq} is null)
-        or
-        (${table.forkedFromChatId} is not null and ${table.forkedFromSeq} is not null
-          and ${table.forkedFromSeq} >= 1 and ${table.forkedFromChatId} <> ${table.id})
-      )`,
-    ),
     check(
       'chk_chat_share_scope',
       sql`${table.shareScope} in ('private', 'authenticated')`,
@@ -191,11 +174,6 @@ export const chats = pgTable(
       .on(table.deletedAt)
       .where(sql`${table.deletedAt} is not null`),
     unique('uq_chat_user_id').on(table.userId, table.id),
-    foreignKey({
-      name: 'fk_chat_user_fork',
-      columns: [table.userId, table.forkedFromChatId],
-      foreignColumns: [table.userId, table.id],
-    }),
     uniqueIndex('uq_chat_share_slug')
       .on(table.shareSlug)
       .where(sql`${table.shareSlug} is not null`),
@@ -288,74 +266,6 @@ export const votes = pgTable(
   ],
 )
 
-export const attachments = pgTable(
-  'Attachment',
-  {
-    id: uuid('id').defaultRandom().primaryKey(),
-    userId: uuid('userId')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    storageProvider: varchar('storageProvider', { length: 32 }).notNull(),
-    storageKey: text('storageKey').notNull(),
-    fileName: text('fileName').notNull(),
-    mimeType: varchar('mimeType', { length: 255 }),
-    sizeBytes: bigintValue('sizeBytes').notNull(),
-    sha256: varchar('sha256', { length: 64 }),
-    status: varchar('status', { length: 20 }).notNull().default('uploading'),
-    metadata: jsonb('metadata').$type<JsonRecord>().notNull().default({}),
-    createdAt: timestampTz('createdAt').notNull().defaultNow(),
-    updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
-    deletedAt: timestampTz('deletedAt'),
-  },
-  (table) => [
-    check('chk_attachment_size', sql`${table.sizeBytes} >= 0`),
-    check(
-      'chk_attachment_status',
-      sql`${table.status} in ('uploading', 'scanning', 'ready', 'quarantined', 'failed')`,
-    ),
-    unique('uq_attachment_storage').on(table.storageProvider, table.storageKey),
-    unique('uq_attachment_user_id').on(table.userId, table.id),
-    index('idx_attachment_user')
-      .on(table.userId, table.createdAt.desc())
-      .where(sql`${table.deletedAt} is null`),
-    index('idx_attachment_sha')
-      .on(table.userId, table.sha256)
-      .where(sql`${table.sha256} is not null and ${table.deletedAt} is null`),
-  ],
-)
-
-export const messageAttachments = pgTable(
-  'MessageAttachment',
-  {
-    userId: uuid('userId')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    messageId: uuid('messageId')
-      .notNull()
-      .references(() => messages.id, { onDelete: 'cascade' }),
-    attachmentId: uuid('attachmentId')
-      .notNull()
-      .references(() => attachments.id, { onDelete: 'cascade' }),
-    position: smallint('position').notNull().default(0),
-  },
-  (table) => [
-    primaryKey({ columns: [table.messageId, table.attachmentId] }),
-    foreignKey({
-      name: 'fk_message_attachment_user_message',
-      columns: [table.userId, table.messageId],
-      foreignColumns: [messages.userId, messages.id],
-    }),
-    foreignKey({
-      name: 'fk_message_attachment_user_attachment',
-      columns: [table.userId, table.attachmentId],
-      foreignColumns: [attachments.userId, attachments.id],
-    }),
-    unique('uq_message_attachment_position').on(table.messageId, table.position),
-    check('chk_message_attachment_position', sql`${table.position} >= 0`),
-    index('idx_message_attachment_attachment').on(table.attachmentId),
-  ],
-)
-
 export const generations = pgTable(
   'Generation',
   {
@@ -385,7 +295,6 @@ export const generations = pgTable(
     // Cleared when the generation is finalized.
     credential: text('credential'),
     status: varchar('status', { length: 20 }).notNull().default('created'),
-    priority: integer('priority').notNull().default(0),
     attempt: integer('attempt').notNull().default(0),
     workerId: varchar('workerId', { length: 128 }),
     providerRequestStartedAt: timestampTz('providerRequestStartedAt'),
@@ -398,7 +307,6 @@ export const generations = pgTable(
     outputTokens: bigintValue('outputTokens').notNull().default(sql`0`),
     cachedInputTokens: bigintValue('cachedInputTokens').notNull().default(sql`0`),
     reasoningTokens: bigintValue('reasoningTokens').notNull().default(sql`0`),
-    providerCostUsd: numeric('providerCostUsd', { precision: 18, scale: 8 }),
     latencyMs: integer('latencyMs'),
     timeToFirstTokenMs: integer('timeToFirstTokenMs'),
     finishReason: varchar('finishReason', { length: 64 }),
@@ -426,10 +334,6 @@ export const generations = pgTable(
       'chk_generation_tokens',
       sql`${table.inputTokens} >= 0 and ${table.outputTokens} >= 0
         and ${table.cachedInputTokens} >= 0 and ${table.reasoningTokens} >= 0`,
-    ),
-    check(
-      'chk_generation_cost',
-      sql`${table.providerCostUsd} is null or ${table.providerCostUsd} >= 0`,
     ),
     check(
       'chk_generation_latency',
@@ -466,6 +370,8 @@ export const generations = pgTable(
     index('idx_generation_chat')
       .on(table.chatId, table.createdAt)
       .where(sql`${table.chatId} is not null`),
+    // Deleting a message checks this restrict foreign key row by row.
+    index('idx_generation_user_message').on(table.userMessageId),
     index('idx_generation_model').on(table.provider, table.model, table.createdAt.desc()),
     // Worker reconcile lists queued work every 15 s; without this it scans
     // every generation ever made.
@@ -745,105 +651,6 @@ export const toolRuns = pgTable(
   ],
 )
 
-export const analysisJobs = pgTable(
-  'AnalysisJob',
-  {
-    id: uuid('id').defaultRandom().primaryKey(),
-    chatId: uuid('chatId').references(() => chats.id, { onDelete: 'set null' }),
-    userId: uuid('userId')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    externalJobId: varchar('externalJobId', { length: 256 }),
-    jobType: varchar('jobType', { length: 64 }).notNull(),
-    jobName: text('jobName'),
-    params: jsonb('params').$type<JsonRecord>().notNull().default({}),
-    status: varchar('status', { length: 20 }).notNull().default('pending'),
-    progress: smallint('progress').notNull().default(0),
-    result: jsonb('result').$type<JsonRecord>(),
-    error: text('error'),
-    idempotencyKey: varchar('idempotencyKey', { length: 128 }),
-    attempt: integer('attempt').notNull().default(0),
-    maxAttempts: integer('maxAttempts').notNull().default(3),
-    workerId: varchar('workerId', { length: 128 }),
-    leaseUntil: timestampTz('leaseUntil'),
-    heartbeatAt: timestampTz('heartbeatAt'),
-    cancelRequestedAt: timestampTz('cancelRequestedAt'),
-    queuedAt: timestampTz('queuedAt'),
-    startedAt: timestampTz('startedAt'),
-    finishedAt: timestampTz('finishedAt'),
-    createdAt: timestampTz('createdAt').notNull().defaultNow(),
-    updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
-    originToolRunId: uuid('originToolRunId').references(() => toolRuns.id, {
-      onDelete: 'set null',
-    }),
-  },
-  (table) => [
-    check(
-      'chk_job_status',
-      sql`${table.status} in ('pending', 'queued', 'running', 'completed', 'failed', 'cancelled')`,
-    ),
-    foreignKey({
-      name: 'fk_analysis_job_user_chat',
-      columns: [table.userId, table.chatId],
-      foreignColumns: [chats.userId, chats.id],
-    }),
-    foreignKey({
-      name: 'fk_analysis_job_user_tool_run',
-      columns: [table.userId, table.originToolRunId],
-      foreignColumns: [toolRuns.userId, toolRuns.id],
-    }),
-    unique('uq_analysis_job_user_id').on(table.userId, table.id),
-    check('chk_job_progress', sql`${table.progress} between 0 and 100`),
-    check(
-      'chk_job_attempt',
-      sql`${table.attempt} >= 0 and ${table.maxAttempts} >= 1
-        and ${table.attempt} <= ${table.maxAttempts}`,
-    ),
-    index('idx_job_chat')
-      .on(table.chatId)
-      .where(sql`${table.chatId} is not null`),
-    index('idx_job_user_status')
-      .on(table.userId, table.status, table.createdAt.desc())
-      .where(sql`${table.userId} is not null`),
-    index('idx_job_active_status')
-      .on(table.status, table.createdAt)
-      .where(sql`${table.status} in ('pending', 'queued', 'running')`),
-    index('idx_job_external')
-      .on(table.externalJobId)
-      .where(sql`${table.externalJobId} is not null`),
-    uniqueIndex('uq_job_idempotency')
-      .on(table.userId, table.idempotencyKey)
-      .where(sql`${table.userId} is not null and ${table.idempotencyKey} is not null`),
-    index('idx_job_origin_tool')
-      .on(table.originToolRunId)
-      .where(sql`${table.originToolRunId} is not null`),
-  ],
-)
-
-export const jobEvents = pgTable(
-  'JobEvent',
-  {
-    id: bigserial('id', { mode: 'bigint' }).primaryKey(),
-    userId: uuid('userId')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    jobId: uuid('jobId')
-      .notNull()
-      .references(() => analysisJobs.id, { onDelete: 'cascade' }),
-    eventType: varchar('eventType', { length: 64 }).notNull(),
-    data: jsonb('data').$type<JsonRecord>().notNull().default({}),
-    createdAt: timestampTz('createdAt').notNull().defaultNow(),
-  },
-  (table) => [
-    foreignKey({
-      name: 'fk_job_event_user_job',
-      columns: [table.userId, table.jobId],
-      foreignColumns: [analysisJobs.userId, analysisJobs.id],
-    }),
-    index('idx_job_event_job').on(table.jobId, table.id),
-  ],
-)
-
 export const artifacts = pgTable(
   'Artifact',
   {
@@ -856,15 +663,10 @@ export const artifacts = pgTable(
     generationId: uuid('generationId').references(() => generations.id, {
       onDelete: 'set null',
     }),
-    analysisJobId: uuid('analysisJobId').references(() => analysisJobs.id, {
-      onDelete: 'set null',
-    }),
     logicalId: varchar('logicalId', { length: 64 }),
     currentVersion: integer('currentVersion').notNull().default(0),
     title: text('title').notNull(),
     artifactType: varchar('artifactType', { length: 32 }).notNull(),
-    isChatShareable: boolean('isChatShareable')
-      .generatedAlwaysAs(sql`"artifactType" in ('report', 'table', 'chart')`),
     format: varchar('format', { length: 32 }).notNull(),
     status: varchar('status', { length: 20 }).notNull().default('generating'),
     content: text('content'),
@@ -936,11 +738,6 @@ export const artifacts = pgTable(
       columns: [table.userId, table.generationId],
       foreignColumns: [generations.userId, generations.id],
     }),
-    foreignKey({
-      name: 'fk_artifact_user_analysis_job',
-      columns: [table.userId, table.analysisJobId],
-      foreignColumns: [analysisJobs.userId, analysisJobs.id],
-    }),
     unique('uq_artifact_user_id').on(table.userId, table.id),
     uniqueIndex('uq_artifact_storage')
       .on(table.storageProvider, table.storageKey)
@@ -956,15 +753,13 @@ export const artifacts = pgTable(
     index('idx_artifact_chat')
       .on(table.chatId, table.createdAt.desc())
       .where(sql`${table.chatId} is not null and ${table.deletedAt} is null`),
-    index('idx_artifact_message')
+    // No deletedAt filter: foreign-key checks on parent deletes must be able to use these.
+    index('idx_artifact_message_ref')
       .on(table.messageId)
-      .where(sql`${table.messageId} is not null and ${table.deletedAt} is null`),
-    index('idx_artifact_generation')
+      .where(sql`${table.messageId} is not null`),
+    index('idx_artifact_generation_ref')
       .on(table.generationId)
-      .where(sql`${table.generationId} is not null and ${table.deletedAt} is null`),
-    index('idx_artifact_job')
-      .on(table.analysisJobId)
-      .where(sql`${table.analysisJobId} is not null and ${table.deletedAt} is null`),
+      .where(sql`${table.generationId} is not null`),
     index('idx_artifact_expiry')
       .on(table.expiresAt)
       .where(sql`${table.expiresAt} is not null and ${table.deletedAt} is null`),
@@ -1048,6 +843,9 @@ export const artifactVersions = pgTable(
       table.version.desc(),
     ),
     index('idx_artifact_version_message').on(table.sourceMessageId),
+    index('idx_artifact_version_generation')
+      .on(table.sourceGenerationId)
+      .where(sql`${table.sourceGenerationId} is not null`),
   ],
 )
 
@@ -1239,90 +1037,6 @@ export const auditLogs = pgTable(
   ],
 )
 
-export const sharedChats = pgView('SharedChat').as((query) =>
-  query
-    .select({
-      id: chats.id,
-      ownerUserId: sql<string>`${chats.userId}`.as('ownerUserId'),
-      title: chats.title,
-      chatType: chats.chatType,
-      shareMode: chats.shareMode,
-      sharedThroughSeq: chats.sharedThroughSeq,
-      sharedAt: chats.sharedAt,
-      shareSlug: chats.shareSlug,
-      createdAt: chats.createdAt,
-      updatedAt: chats.updatedAt,
-    })
-    .from(chats)
-    .where(
-      sql`${chats.shareScope} = 'authenticated' and ${chats.deletedAt} is null`,
-    ),
-)
-
-export const sharedChatMessages = pgView('SharedChatMessage').as((query) =>
-  query
-    .select({
-      id: messages.id,
-      chatId: messages.chatId,
-      seq: messages.seq,
-      role: messages.role,
-      sharedText: messages.sharedText,
-      createdAt: messages.createdAt,
-    })
-    .from(messages)
-    .innerJoin(chats, sql`${chats.id} = ${messages.chatId}`)
-    .where(sql`
-      ${chats.shareScope} = 'authenticated'
-      and ${chats.deletedAt} is null
-      and ${messages.role} in ('user', 'assistant')
-      and ${messages.status} = 'completed'
-      and ${messages.sharedText} is not null
-      and (
-        ${chats.shareMode} = 'live'
-        or (${chats.shareMode} = 'snapshot' and ${messages.seq} <= ${chats.sharedThroughSeq})
-      )
-    `),
-)
-
-export const sharedArtifacts = pgView('SharedArtifact').as((query) =>
-  query
-    .select({
-      id: artifacts.id,
-      chatId: artifacts.chatId,
-      messageId: artifacts.messageId,
-      title: artifacts.title,
-      artifactType: artifacts.artifactType,
-      format: artifacts.format,
-      status: artifacts.status,
-      content: artifacts.content,
-      mimeType: artifacts.mimeType,
-      sizeBytes: artifacts.sizeBytes,
-      hasStoredContent: sql<boolean>`${artifacts.storageKey} is not null`.as('hasStoredContent'),
-      createdAt: artifacts.createdAt,
-      updatedAt: artifacts.updatedAt,
-      expiresAt: artifacts.expiresAt,
-    })
-    .from(artifacts)
-    .innerJoin(
-      messages,
-      sql`${messages.id} = ${artifacts.messageId} and ${messages.chatId} = ${artifacts.chatId}`,
-    )
-    .innerJoin(chats, sql`${chats.id} = ${artifacts.chatId}`)
-    .where(sql`
-      ${chats.shareScope} = 'authenticated'
-      and ${chats.deletedAt} is null
-      and ${artifacts.isChatShareable} = true
-      and ${artifacts.status} = 'ready'
-      and ${messages.status} = 'completed'
-      and ${artifacts.deletedAt} is null
-      and (${artifacts.expiresAt} is null or ${artifacts.expiresAt} > now())
-      and (
-        ${chats.shareMode} = 'live'
-        or (${chats.shareMode} = 'snapshot' and ${messages.seq} <= ${chats.sharedThroughSeq})
-      )
-    `),
-)
-
 // Durable reservation; external HTTP is never executed inside a transaction.
 export const businessOperations = pgTable('BusinessOperation', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -1338,6 +1052,11 @@ export const businessOperations = pgTable('BusinessOperation', {
   updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
   expiresAt: timestampTz('expiresAt').notNull(),
 }, table => [
+  foreignKey({
+    name: 'fk_business_user_chat',
+    columns: [table.userId, table.chatId],
+    foreignColumns: [chats.userId, chats.id],
+  }),
   unique('uq_business_request').on(table.chatId, table.requestId),
   uniqueIndex('uq_business_chat_running').on(table.chatId)
     .where(sql`${table.status} in ('running', 'result_ready')`),
@@ -1369,6 +1088,11 @@ export const ingressRequests = pgTable('IngressRequest', {
   createdAt: timestampTz('createdAt').notNull().defaultNow(),
   updatedAt: timestampTz('updatedAt').notNull().defaultNow(),
 }, table => [
+  foreignKey({
+    name: 'fk_ingress_user_chat',
+    columns: [table.userId, table.chatId],
+    foreignColumns: [chats.userId, chats.id],
+  }),
   unique('uq_ingress_request').on(table.userId, table.requestId),
   uniqueIndex('uq_ingress_active_chat').on(table.chatId).where(sql`${table.status} in ('queued', 'running')`),
   index('idx_ingress_pending').on(table.availableAt).where(sql`${table.status} in ('queued', 'running')`),

@@ -50,6 +50,13 @@
       "when": 1793695933891,
       "tag": "0006_token_quota_reset",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793959509252,
+      "tag": "0007_drop_unused_tables_add_fk_indexes",
+      "breakpoints": true
     }
   ]
 }

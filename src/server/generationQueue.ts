@@ -503,6 +503,7 @@ export async function markOutboxFailed(
         errorCode: 'queue_publish_failed',
         errorMessage,
         finishReason: 'failed',
+        credential: null,
         finishedAt: sql`now()`,
         updatedAt: sql`now()`,
       })
